@@ -1,0 +1,9 @@
+use math.linalg
+
+fn main() {
+    let a = Tensor<f64, [_, _]>.random(1000, 1000)
+    let b = Tensor<f64, [_, _]>.random(1000, 1000)
+    let c = a @ b
+    let (vals, vecs) = linalg.eig(c)
+    print("trace = {trace(c)}")
+}

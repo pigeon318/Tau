@@ -1,0 +1,13 @@
+[package]
+name = "tau"
+version = "0.0.1"
+edition = "2021"
+description = "Tau: a low-level, math/science-focused language (stage 1: lexer, parser, AST)"
+
+[lib]
+name = "tau"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tau"
+path = "src/main.rs"

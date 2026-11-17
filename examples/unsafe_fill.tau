@@ -1,0 +1,7 @@
+fn fill(n: usize, v: u8) -> Vec<u8> {
+    unsafe {
+        let p = alloc<u8>(n)
+        for i in 0..n { p[i] = v }
+        Vec.from_raw(p, n)
+    }
+}

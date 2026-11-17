@@ -1,0 +1,151 @@
+// A tour of the syntax in SPEC.md. This file only needs to parse.
+
+use math.fft.{fft, ifft}
+use mypkg.tools as t
+use std.io.*
+
+const G: f64 = 6.674e-11
+const MAX: usize = 1_000
+
+type Grid = Tensor<f64, [_, _]>
+
+#[test]
+fn adds() {
+    assert(1 + 1 == 2)
+    assert_eq(hypot(3.0, 4.0), 5.0)
+}
+
+pub fn hypot(a: f64, b: f64) -> f64 {
+    sqrt(a^2 + b^2)
+}
+
+enum Shape {
+    Circle(f64)
+    Rect(f64, f64)
+    Empty
+}
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => PI * r^2
+        Rect(w, h) => w * h
+        Empty => 0.0
+    }
+}
+
+trait Number {
+    fn zero() -> Self
+    fn add(self, o: Self) -> Self
+}
+
+fn sum<T: Number>(xs: [T]) -> T {
+    let mut acc = T.zero()
+    for x in xs { acc = acc.add(x) }
+    acc
+}
+
+struct Vec3 { x: f64, y: f64, z: f64 }
+
+impl Vec3 {
+    fn dot(self, o: Vec3) -> f64 { self.x*o.x + self.y*o.y + self.z*o.z }
+}
+
+impl Add for Vec3 {
+    fn add(self, o: Vec3) -> Vec3 { Vec3(self.x+o.x, self.y+o.y, self.z+o.z) }
+}
+
+// ownership
+fn scale(v: mut [f64], k: f64) {
+    for x in mut v { x *= k }
+}
+
+fn total(v: [f64]) -> f64 { sum(v) }
+
+fn consume(own v: Vec<f64>) -> usize { v.len }
+
+fn ownership_demo() {
+    let mut data = vec[1.0, 2.0, 3.0]
+    scale(mut data, 2.0)
+    let t = total(data)
+    consume(data)
+}
+
+// errors
+fn read_config(path: str) -> Result<Config, IoError> {
+    let text = fs.read(path)?
+    parse(text)
+}
+
+// control flow
+fn flow(x: i64) -> i64 {
+    let sign = if x >= 0 { 1 } else { -1 }
+    let mut n = 0
+    while n < 10 {
+        n += 1
+        if n == 5 { continue }
+        if n > 8 { break }
+    }
+    loop {
+        if n > 100 { break }
+        n *= 2
+    }
+    if x < 0 {
+        return -x
+    }
+    else if x == 0 {
+        return 0
+    }
+    sign * n
+}
+
+fn patterns(n: i64) -> str {
+    match n {
+        0 => "zero"
+        1 | 2 | 3 => "small"
+        4..=9 => "medium"
+        x if x < 0 => "negative"
+        _ => "large"
+    }
+}
+
+// closures, chains, indexing
+fn closures() {
+    let add = |a, b| { a + b }
+    let double = |x: f64| x * 2.0
+    let nothing = || 42
+    let result = [1, 2, 3]
+        .map(|x| x * 2)
+        .filter(|x| x > 2)
+        .sum()
+    let m = a[i, j] + a[0..3]
+    let z = 3 + 4i
+    let big = 0xFFu64 ^^ 0b1010u64
+    let c = 'x'
+    let tup = (1, "two", 3.0)
+    let second = tup.1
+    let zeros = [0.0; 100]
+}
+
+// parallelism
+fn parallel(a: [f64], b: [f64], out: mut [f64]) {
+    par for i in 0..a.len {
+        out[i] = a[i] + b[i]
+    }
+    let dot = par sum(i in 0..a.len) a[i] * b[i]
+    let h = spawn { heavy(a) }
+    let r = h.join()
+    par for chunk in par_chunks(mut out, 64) {
+        chunk[0] = 0.0
+    }
+}
+
+fn shifts(x: u32) -> u32 {
+    (x << 3) >> 1
+}
+
+fn nested_generics() {
+    let v: Vec<Vec<f64>> = Vec<Vec<f64>>.new()
+    let t: Tensor<f64, [3, 3]> = tensor.zeros()
+    let u: Tensor<f64, [N, M]> = tensor.zeros()
+    let a: [f64; 3] = [1.0, 2.0, 3.0]
+}

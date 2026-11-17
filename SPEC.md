@@ -50,7 +50,21 @@ Tau is a low-level, statically typed language focused on math and science. It is
 - An unsuffixed integer literal is `i64` unless inference says otherwise, and a float literal is `f64`. Suffixes force a type: `5u8`, `2.0f32`.
 - Attributes: `#[name]` or `#[name(args)]` on the line before an item, e.g. `#[test]`.
 - Strings: `"text"` with `{expr}` interpolation, so `"x = {x}"`. Use `\{` for a literal brace.
-- Keywords (small set): `fn let mut const struct enum trait impl use pub if else match for while loop break continue return own par spawn on unsafe type as in true false`
+- Keywords (small set): `fn let mut const struct enum trait impl use pub if else match for while loop break continue return own par spawn on unsafe type as in true false where cluster`
+  (`where` guards `for` loops; `cluster` is reserved for the post-v1 cluster declaration. `self` and `Self` are ordinary identifiers with special meaning in `impl`/`trait`.)
+
+### Grammar notes (settled while writing the stage-1 parser)
+- **Newlines.** A line break ends a statement unless the line ends with a binary operator, `,`, `=`, `->` or `=>`; the next line starts with `.` (a method chain); or the break is inside `( )` or `[ ]` (but not `{ }`). `else` may start the line after the closing `}` of an `if`.
+- **Semicolons** are a hard error with a hint, except inside `[T; N]` and `[value; count]`.
+- **Operator precedence**, loosest to tightest: assignment, `..`, `||`, `&&`, comparisons, `|`, `^^`, `&`, `<< >>`, `+ -`, `* / % @`, `as`, unary `- ! ~ mut`, `^`, postfix. Power binds tighter than unary minus (`-x^2` is `-(x^2)`) and is right-associative.
+- **Generics in expressions** have no turbofish: `Map<String, usize>.new()` and `alloc<u8>(n)` are read as generic applications when the `<...>` parses as types and the closing `>` is directly followed by `.` or `(`. Otherwise `<` is a comparison. This means `f(a < b, c > (d))` is misread as a generic call; write `f(a < b, (c > d))`.
+- **`>>`** is a shift only when the two `>` are adjacent, so `Vec<Vec<f64>>` works.
+- **Parameter modes.** `own` goes before the name (`own v: Vec<f64>`), `mut` goes on the type (`v: mut [f64]`). `self` takes `mut self` / `own self`.
+- **Struct construction** is positional, like a call: `Vec3(1.0, 2.0, 3.0)`. There is no `Name { field: value }` form, so `if x { ... }` is never ambiguous.
+- **Unit literals** (`9.8 m/s`) do not parse in v1. The form is reserved.
+- **Builtin constructors** such as `vec[1, 2, 3]` parse as indexing with several indices; name resolution (stage 2) will treat `vec` specially.
+- **Tuple fields** are `t.0`, `t.0.1`.
+- **Numeric literals**: `1_000`, `0xFF`, `0b1010`, `0o17`, `1e-9`, suffixes `u8..u128`, `i8..i128`, `usize`, `isize`, `f32`, `f64`, and `4i` for an imaginary literal.
 
 ---
 
