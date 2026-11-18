@@ -202,6 +202,9 @@ impl<'a> Checker<'a> {
     pub(super) fn expr(&mut self, e: &'a Expr, exp: Option<&Ty>) -> Ty {
         let t = self.expr_inner(e, exp);
         self.record(e, &t);
+        if let ExprKind::Int { value, .. } = &e.kind {
+            self.body.int_lits.push((NodeKey::of(e), *value, e.span, false));
+        }
         t
     }
 
@@ -1403,6 +1406,14 @@ impl<'a> Checker<'a> {
     fn unary(&mut self, e: &'a Expr, op: UnOp, inner: &'a Expr, exp: Option<&Ty>) -> Ty {
         let hint = if op == UnOp::Neg { self.numeric_hint(exp) } else { None };
         let t = self.expr(inner, hint.as_ref());
+        if op == UnOp::Neg {
+            // `-128i8` is fine although `128i8` alone is not
+            if let Some(last) = self.body.int_lits.last_mut() {
+                if last.0 == NodeKey::of(inner) {
+                    last.3 = true;
+                }
+            }
+        }
         let st = self.infer.shallow(&t);
         match op {
             UnOp::Not => {

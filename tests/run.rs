@@ -120,6 +120,12 @@ fn integer_overflow_panics_at_the_static_width() {
 }
 
 #[test]
+fn abs_of_the_most_negative_integer_overflows() {
+    panics("let x: i8 = -128\nprint(abs(x))", "integer overflow");
+    assert_eq!(out("let x: i8 = -127\nprint(abs(x))\nprint(abs(-5))"), "127\n5\n");
+}
+
+#[test]
 fn division_by_zero_panics() {
     panics("let z = 0\nprint(1 / z)", "division by zero");
     assert_eq!(out("print(1.0 / 0.0)"), "inf\n");

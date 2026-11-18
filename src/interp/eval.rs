@@ -9,7 +9,7 @@ use crate::ast::BinOp;
 /// Items per block in a parallel reduction (see `par_reduce`).
 pub const PAR_BLOCK: usize = 4096;
 
-fn int_range(it: IntTy) -> (i128, i128) {
+pub(super) fn int_range(it: IntTy) -> (i128, i128) {
     match it {
         IntTy::I8 => (i8::MIN as i128, i8::MAX as i128),
         IntTy::I16 => (i16::MIN as i128, i16::MAX as i128),
