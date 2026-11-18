@@ -60,7 +60,9 @@ impl<'a> Interp<'a> {
     pub fn tensor_text(&self, t: &Tensor) -> String {
         let cell = |i: usize| -> String {
             match &t.data {
-                TData::F(d) => self.float_text(d[i]),
+                TData::F(d) => {
+                    if t.single { self.f32_text(d[i] as f32) } else { self.float_text(d[i]) }
+                }
                 TData::C(d) => {
                     let (a, b) = d[i];
                     if b < 0.0 {
