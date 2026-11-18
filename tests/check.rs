@@ -72,6 +72,12 @@ fn integer_literals_must_fit_their_type() {
 }
 
 #[test]
+fn str_and_slices_are_copy() {
+    // the spec: numbers, bool, char, `str` and slices are `Copy`
+    ok("fn id<T: Copy>(x: T) -> T { x }\nfn main() {\n let a = id(\"s\")\n let v = vec[1, 2]\n let s = id(v[0..1])\n}");
+}
+
+#[test]
 fn float_literals_default_to_f64() {
     assert_eq!(m("let x = 2.5", "x"), "f64");
 }

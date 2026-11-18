@@ -335,7 +335,6 @@ fn unsupported_programs_say_so_instead_of_miscompiling() {
     for src in [
         "fn main() { let v = vec[1, 2, 3]\n print(v[0]) }",
         "fn main() { let f = |x: i64| x + 1\n print(f(1)) }",
-        "fn id<T: Copy>(x: T) -> T { x }\nfn main() { print(id(1)) }",
         "fn main() { let t = Tensor<f64, [2]>.ones()\n print(t) }",
     ] {
         match native::emit_c(src) {
@@ -423,4 +422,58 @@ fn float_printing_matches_the_interpreter_on_many_values() {
     }
     prog.push_str(&format!("fn main() {{\n{calls}}}\n"));
     same(&prog);
+}
+
+// ------------------------------------------------------------------ structs, enums and generics
+
+#[test]
+fn structs() {
+    same("struct P { x: i64, y: f64 }\nfn main() {\n let p = P(3, 2.5)\n print(p.x)\n print(p.y * 2.0)\n let mut q = P(1, 1.0)\n q.x = 10\n q.y += 0.5\n print(q.x)\n print(q.y)\n}");
+    same("struct Pair { a: (i64, i64), b: bool }\nfn main() {\n let p = Pair((1, 2), true)\n print(p.a.1)\n let Pair((x, y), flag) = p\n print(x + y)\n print(flag)\n}");
+    same("struct Unit {}\nstruct One { v: i8 }\nfn main() {\n let u = Unit()\n let o = One(5)\n print(o.v)\n}");
+    same("struct Acc { total: i64 }\nfn bump(a: mut Acc, by: i64) { a.total += by }\nfn read(a: Acc) -> i64 { a.total }\nfn main() {\n let mut a = Acc(0)\n bump(mut a, 5)\n bump(mut a, 6)\n print(read(a))\n}");
+    same("struct In { v: i64 }\nstruct Out { i: In, w: i64 }\nfn main() {\n let mut o = Out(In(1), 2)\n o.i.v = 7\n o.i.v += 1\n print(o.i.v + o.w)\n}");
+}
+
+#[test]
+fn enums_and_match() {
+    same("enum Shape { Circle(f64), Rect(f64, f64), Empty }\nfn area(s: Shape) -> f64 {\n match s {\n Circle(r) => 3.0 * r * r\n Rect(w, h) => w * h\n Empty => 0.0\n }\n}\nfn main() {\n print(area(Circle(2.0)))\n print(area(Rect(2.0, 3.5)))\n print(area(Empty))\n}");
+    same("enum Color { Red, Green, Blue }\nfn name(c: Color) -> str {\n match c {\n Red => \"red\"\n Green => \"green\"\n Blue => \"blue\"\n }\n}\nfn main() {\n print(name(Green))\n print(name(Color.Blue))\n let c = Color.Red\n print(name(c))\n}");
+    same("enum T { A(i64), B(i64, i64) }\nfn f(t: T) -> i64 {\n match t {\n A(x) if x > 5 => x\n A(x) => 0 - x\n B(x, y) => x * y\n }\n}\nfn main() {\n print(f(A(9)))\n print(f(A(2)))\n print(f(B(3, 4)))\n}");
+    same("enum E { V(i64) }\nfn main() {\n let e = V(4)\n let r = match e { V(x) => x + 1 }\n print(r)\n}");
+}
+
+#[test]
+fn option_and_result() {
+    same("fn find(n: i64) -> Option<i64> { if n > 0 { Some(n * 2) } else { None } }\nfn main() {\n match find(4) {\n Some(v) => print(\"got {v}\")\n None => print(\"none\")\n }\n match find(-1) {\n Some(v) => print(\"got {v}\")\n None => print(\"none\")\n }\n}");
+    same("fn div(a: i64, b: i64) -> Result<i64, str> { if b == 0 { Err(\"div by zero\") } else { Ok(a / b) } }\nfn main() {\n for d in 0..3 {\n match div(6, d) {\n Ok(v) => print(v)\n Err(m) => print(m)\n }\n }\n}");
+    same("fn half(n: i64) -> Result<i64, str> { if n % 2 == 0 { Ok(n / 2) } else { Err(\"odd\") } }\nfn quarter(n: i64) -> Result<i64, str> {\n let h = half(n)?\n let q = half(h)?\n Ok(q)\n}\nfn main() {\n print(match quarter(8) { Ok(v) => v, Err(_) => -1 })\n print(match quarter(6) { Ok(v) => v, Err(_) => -1 })\n print(match quarter(7) { Ok(v) => v, Err(_) => -2 })\n}");
+    same("fn pos(n: i64) -> Option<i64> { if n > 0 { Some(n) } else { None } }\nfn sum2(a: i64, b: i64) -> Option<i64> {\n let x = pos(a)?\n let y = pos(b)?\n Some(x + y)\n}\nfn main() {\n print(match sum2(1, 2) { Some(v) => v, None => 0 })\n print(match sum2(1, -2) { Some(v) => v, None => 0 })\n}");
+    same("fn main() {\n let a: Option<f64> = Some(1.5)\n let b: Result<(), str> = Ok(())\n let c: Option<(i64, bool)> = Some((1, true))\n match c {\n Some((n, f)) => print(\"{n} {f}\")\n None => print(\"none\")\n }\n match b {\n Ok(_) => print(\"ok\")\n Err(e) => print(e)\n }\n match a {\n Some(x) => print(x)\n None => print(0.0)\n }\n}");
+}
+
+#[test]
+fn methods_and_associated_functions() {
+    same("struct C { n: i64 }\nimpl C {\n fn new() -> C { C(0) }\n fn bump(mut self) { self.n += 1 }\n fn get(self) -> i64 { self.n }\n fn plus(self, k: i64) -> C { C(self.n + k) }\n}\nfn main() {\n let mut c = C.new()\n c.bump()\n c.bump()\n print(c.get())\n print(c.plus(5).get())\n}");
+    same("struct V { x: f64, y: f64 }\nimpl V {\n fn dot(self, o: V) -> f64 { self.x * o.x + self.y * o.y }\n fn norm(self) -> f64 { sqrt(self.dot(self)) }\n}\nfn main() {\n let v = V(3.0, 4.0)\n print(v.norm())\n print(v.dot(V(1.0, 2.0)))\n}");
+}
+
+#[test]
+fn operator_overloading() {
+    same("struct V { x: f64, y: f64 }\nimpl Copy for V {}\nimpl Add for V { fn add(self, o: V) -> V { V(self.x + o.x, self.y + o.y) } }\nimpl Sub for V { fn sub(self, o: V) -> V { V(self.x - o.x, self.y - o.y) } }\nimpl Mul for V { fn mul(self, k: f64) -> V { V(self.x * k, self.y * k) } }\nimpl Neg for V { fn neg(self) -> V { V(0.0 - self.x, 0.0 - self.y) } }\nfn main() {\n let a = V(1.0, 2.0)\n let b = V(0.5, 0.25)\n let c = (a + b) * 2.0 - a\n print(c.x)\n print(c.y)\n let mut d = a\n d += b\n d *= 3.0\n print(d.x)\n let n = -a\n print(n.y)\n}");
+    same("struct M { v: i64 }\nimpl Copy for M {}\nimpl Eq for M { fn eq(self, o: M) -> bool { self.v == o.v } }\nimpl Ord for M { fn lt(self, o: M) -> bool { self.v < o.v } }\nfn main() {\n let a = M(1)\n let b = M(2)\n print(a == b)\n print(a != b)\n print(a < b)\n print(a > b)\n print(a <= b)\n print(b >= a)\n print(a == M(1))\n}");
+}
+
+#[test]
+fn generic_functions_and_types() {
+    same("fn id<T: Copy>(x: T) -> T { x }\nfn main() {\n print(id(5))\n print(id(2.5))\n print(id(\"s\"))\n print(id((1, 2)))\n}");
+    same("struct Box2<T> { a: T, b: T }\nfn swap2<T: Copy>(p: Box2<T>) -> Box2<T> { Box2(p.b, p.a) }\nfn main() {\n let p = swap2(Box2(1, 2))\n print(p.a)\n let q = swap2(Box2(1.5, 2.5))\n print(q.a)\n}");
+    same("enum Maybe<T> { Just(T), Nothing }\nfn unwrap_or<T: Copy>(m: Maybe<T>, d: T) -> T {\n match m {\n Just(v) => v\n Nothing => d\n }\n}\nfn main() {\n print(unwrap_or(Just(3), 0))\n print(unwrap_or(Maybe.Nothing, 9))\n print(unwrap_or(Just(1.5), 0.0))\n}");
+    same("fn pick<T: Ord + Copy>(a: T, b: T) -> T { if a < b { b } else { a } }\nfn main() {\n print(pick(1, 2))\n print(pick(2.5, 1.5))\n print(pick(\"a\", \"b\"))\n}");
+}
+
+#[test]
+fn traits_with_static_dispatch() {
+    same("trait Shape {\n fn area(self) -> f64\n fn name(self) -> str { \"shape\" }\n}\nstruct Sq { s: f64 }\nstruct Ci { r: f64 }\nimpl Shape for Sq {\n fn area(self) -> f64 { self.s * self.s }\n fn name(self) -> str { \"square\" }\n}\nimpl Shape for Ci { fn area(self) -> f64 { 3.0 * self.r * self.r } }\nfn describe<T: Shape>(x: T) {\n print(x.name())\n print(x.area())\n}\nfn main() {\n describe(Sq(2.0))\n describe(Ci(1.0))\n}");
+    same("trait Zero { fn zero() -> Self }\nimpl Zero for i64 { fn zero() -> i64 { 0 } }\nimpl Zero for f64 { fn zero() -> f64 { 0.0 } }\nfn z<T: Zero>() -> T { T.zero() }\nfn main() {\n let a: i64 = z()\n let b: f64 = z()\n print(a)\n print(b)\n}");
 }

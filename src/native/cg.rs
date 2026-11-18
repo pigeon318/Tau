@@ -1,11 +1,13 @@
-//! C code generation from the checked AST (milestone 1: scalars, tuples, strings, functions,
-//! control flow, checked arithmetic, panics and `print`).
+//! C code generation from the checked AST.
 //!
 //! Tau is expression-oriented and C is not, so expressions are emitted as GNU statement
 //! expressions (`({ ...; value; })`, supported by clang and gcc). Control flow uses `goto`
-//! rather than C `break`/`continue`, so a Tau `break` is never captured by an enclosing
-//! `switch`-like construct the generator itself introduced. Evaluation order is made
-//! explicit with temporaries, since C leaves the order of operands and arguments open.
+//! rather than C `break`/`continue`, so a Tau `break` is never captured by a construct the
+//! generator itself introduced. Evaluation order is made explicit with temporaries, since C
+//! leaves the order of operands and arguments open.
+//!
+//! Generic functions are monomorphized: every call records the concrete types of the
+//! callee's generic parameters, and each distinct instantiation becomes one C function.
 //!
 //! Anything outside the supported subset is reported as "unsupported", and the caller falls
 //! back to the interpreter.
@@ -15,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use super::NativeError;
 use crate::ast::*;
 use crate::check::{CheckResult, NodeKey, Res, Results};
+use crate::interp::match_ty;
 use crate::program::*;
 use crate::types::*;
 
@@ -23,6 +26,8 @@ type CgResult<T> = Result<T, NativeError>;
 fn unsupported<T>(what: impl Into<String>) -> CgResult<T> {
     Err(NativeError::unsupported(format!("{} is not supported by the native backend yet", what.into())))
 }
+
+type Subst = Vec<(GenericId, Ty)>;
 
 #[derive(Clone)]
 struct Local {
@@ -40,6 +45,19 @@ struct LoopCtx {
     result: Option<String>,
 }
 
+/// One monomorphic instance of a function waiting to be generated.
+struct Inst {
+    name: String,
+    fid: FnId,
+    sub: Subst,
+}
+
+/// What a call resolved to.
+enum Target {
+    User { name: String, fid: FnId, sub: Subst },
+    Builtin { key: String, fid: FnId, sub: Subst },
+}
+
 pub struct Cg<'a> {
     prog: &'a Program,
     res: &'a Results,
@@ -48,15 +66,17 @@ pub struct Cg<'a> {
     types: String,
     protos: String,
     bodies: String,
-    tuple_names: HashSet<String>,
+    type_names: HashMap<String, String>,
     helpers: HashSet<String>,
-    queue: Vec<FnId>,
-    seen: HashSet<FnId>,
+    queue: Vec<Inst>,
+    instances: HashMap<String, String>,
     seen_consts: HashSet<ConstId>,
     counter: usize,
     scopes: Vec<Vec<Local>>,
     loops: Vec<LoopCtx>,
     cur_ret: Ty,
+    /// The generic arguments of the instance being generated.
+    sub: Subst,
 }
 
 /// Translate a checked program to a complete C source file (runtime included).
@@ -69,26 +89,19 @@ pub fn translate(user: &Module, check: &CheckResult) -> Result<String, NativeErr
         types: String::new(),
         protos: String::new(),
         bodies: String::new(),
-        tuple_names: HashSet::new(),
+        type_names: HashMap::new(),
         helpers: HashSet::new(),
         queue: Vec::new(),
-        seen: HashSet::new(),
+        instances: HashMap::new(),
         seen_consts: HashSet::new(),
         counter: 0,
         scopes: Vec::new(),
         loops: Vec::new(),
         cur_ret: Ty::unit(),
+        sub: Vec::new(),
     };
     for item in &user.items {
-        match &item.kind {
-            ItemKind::Fn(f) => cg.register(f),
-            ItemKind::Const(c) => {
-                if let Some(id) = cg.res.const_decl.get(&NodeKey::of(c)) {
-                    cg.consts.insert(*id, c);
-                }
-            }
-            _ => {}
-        }
+        cg.register_item(item);
     }
     let main = user.items.iter().find_map(|i| match &i.kind {
         ItemKind::Fn(f) if f.name.name == "main" => cg.res.fn_decl.get(&NodeKey::of(f)).copied(),
@@ -97,11 +110,10 @@ pub fn translate(user: &Module, check: &CheckResult) -> Result<String, NativeErr
     let Some(main) = main else {
         return Err(NativeError::plain("the program has no `fn main()`"));
     };
-    cg.request(main)?;
-    while let Some(f) = cg.queue.pop() {
-        cg.gen_fn(f)?;
+    let main_name = cg.request(main, Vec::new())?;
+    while let Some(inst) = cg.queue.pop() {
+        cg.gen_fn(inst)?;
     }
-    let main_name = cg.fn_name(main);
     Ok(format!(
         "{}\n/* ===== generated from Tau ===== */\n{}\n{}\n{}\nstatic void tau_run_main(void) {{ {}(); }}\n",
         super::RUNTIME,
@@ -113,6 +125,22 @@ pub fn translate(user: &Module, check: &CheckResult) -> Result<String, NativeErr
 }
 
 impl<'a> Cg<'a> {
+    // ------------------------------------------------------------ registration
+
+    fn register_item(&mut self, item: &'a Item) {
+        match &item.kind {
+            ItemKind::Fn(f) => self.register(f),
+            ItemKind::Const(c) => {
+                if let Some(id) = self.res.const_decl.get(&NodeKey::of(c)) {
+                    self.consts.insert(*id, c);
+                }
+            }
+            ItemKind::Impl(i) => i.items.iter().for_each(|x| self.register_item(x)),
+            ItemKind::Trait(t) => t.items.iter().for_each(|x| self.register_item(x)),
+            _ => {}
+        }
+    }
+
     fn register(&mut self, f: &'a FnDecl) {
         if let Some(id) = self.res.fn_decl.get(&NodeKey::of(f)) {
             self.decls.insert(*id, f);
@@ -125,22 +153,41 @@ impl<'a> Cg<'a> {
     }
 
     fn ty_of(&self, e: &Expr) -> Ty {
-        self.res.expr_ty.get(&NodeKey::of(e)).cloned().unwrap_or(Ty::Error)
+        let t = self.res.expr_ty.get(&NodeKey::of(e)).cloned().unwrap_or(Ty::Error);
+        t.subst(&self.sub)
     }
 
     fn pat_ty(&self, p: &Pattern) -> Ty {
-        self.res.pat_ty.get(&NodeKey::of(p)).cloned().unwrap_or(Ty::Error)
+        let t = self.res.pat_ty.get(&NodeKey::of(p)).cloned().unwrap_or(Ty::Error);
+        t.subst(&self.sub)
     }
 
     fn is_unit(t: &Ty) -> bool {
         t.is_unit()
     }
 
-    fn fn_name(&self, f: FnId) -> String {
-        format!("tau_fn_{}_{}", self.prog.fn_(f).name, f.0)
+    fn is_never(t: &Ty) -> bool {
+        matches!(t, Ty::Never)
+    }
+
+    fn apply_sub(&self, subst: &[(GenericId, Ty)]) -> Subst {
+        subst.iter().map(|(g, t)| (*g, t.subst(&self.sub))).collect()
     }
 
     // ------------------------------------------------------------ types
+
+    fn adt_fields(&self, id: AdtId, args: &[Ty]) -> Vec<Vec<Ty>> {
+        let def = self.prog.adt(id);
+        let sub: Subst = def.generics.iter().copied().zip(args.iter().cloned()).collect();
+        match &def.kind {
+            AdtKind::Struct(fs) => vec![fs.iter().map(|f| f.ty.subst(&sub)).collect()],
+            AdtKind::Enum(vs) => vs.iter().map(|v| v.fields.iter().map(|t| t.subst(&sub)).collect()).collect(),
+        }
+    }
+
+    fn is_enum(&self, id: AdtId) -> bool {
+        matches!(self.prog.adt(id).kind, AdtKind::Enum(_))
+    }
 
     fn mangle(&mut self, ty: &Ty) -> CgResult<String> {
         Ok(match ty {
@@ -155,6 +202,18 @@ impl<'a> Cg<'a> {
                 let parts: CgResult<Vec<String>> = ts.iter().map(|t| self.mangle(t)).collect();
                 format!("T{}_{}", ts.len(), parts?.join("_"))
             }
+            Ty::Adt(id, args) => {
+                let def = self.prog.adt(*id);
+                if def.module == 0 && matches!(def.name.as_str(), "Vec" | "String" | "Range" | "Ptr" | "Task" | "Cluster" | "Map") {
+                    return unsupported(self.describe(ty));
+                }
+                let mut s = format!("{}{}", def.name, id.0);
+                for a in args {
+                    s.push('_');
+                    s.push_str(&self.mangle(a)?);
+                }
+                s
+            }
             other => return unsupported(self.describe(other)),
         })
     }
@@ -167,7 +226,7 @@ impl<'a> Cg<'a> {
             Ty::Tensor(..) => "tensors (milestone 4)".to_string(),
             Ty::Adt(id, _) => format!("the type `{}` (milestone 2)", self.prog.adt(*id).name),
             Ty::Fn(..) => "function values and closures (milestone 3)".to_string(),
-            Ty::Param(_) => "generic code (milestone 3)".to_string(),
+            Ty::Param(_) => "generic code with unresolved parameters".to_string(),
             other => format!("the type {other:?}"),
         }
     }
@@ -195,15 +254,61 @@ impl<'a> Cg<'a> {
             Ty::Never => "tau_unit".to_string(),
             Ty::Tuple(ts) if ts.is_empty() => "tau_unit".to_string(),
             Ty::Tuple(ts) => {
-                let name = format!("tup_{}", self.mangle(ty)?);
-                if self.tuple_names.insert(name.clone()) {
-                    let mut fields = String::new();
-                    for (i, t) in ts.iter().enumerate() {
-                        let ct = self.cty(t)?;
-                        fields.push_str(&format!(" {ct} f{i};"));
-                    }
-                    self.types.push_str(&format!("typedef struct {{{fields} }} {name};\n"));
+                let key = self.mangle(ty)?;
+                if let Some(n) = self.type_names.get(&key) {
+                    return Ok(n.clone());
                 }
+                let name = format!("tup_{key}");
+                // dependencies first, so the definition order is always valid C
+                let mut fields = String::new();
+                for (i, t) in ts.iter().enumerate() {
+                    let ct = self.cty(t)?;
+                    fields.push_str(&format!(" {ct} f{i};"));
+                }
+                self.types.push_str(&format!("typedef struct {{{fields} }} {name};\n"));
+                self.type_names.insert(key, name.clone());
+                name
+            }
+            Ty::Adt(id, args) => {
+                let key = self.mangle(ty)?;
+                if let Some(n) = self.type_names.get(&key) {
+                    return Ok(n.clone());
+                }
+                let all = self.adt_fields(*id, args);
+                let is_enum = self.is_enum(*id);
+                let name = format!("{}_{key}", if is_enum { "en" } else { "st" });
+                let mut text = String::new();
+                if is_enum {
+                    let mut union = String::new();
+                    for (vi, fields) in all.iter().enumerate() {
+                        if fields.is_empty() {
+                            continue;
+                        }
+                        let mut fs = String::new();
+                        for (i, t) in fields.iter().enumerate() {
+                            let ct = self.cty(t)?;
+                            fs.push_str(&format!(" {ct} f{i};"));
+                        }
+                        union.push_str(&format!(" struct {{{fs} }} v{vi};"));
+                    }
+                    if union.is_empty() {
+                        text.push_str(&format!("typedef struct {{ uint32_t tag; }} {name};\n"));
+                    } else {
+                        text.push_str(&format!("typedef struct {{ uint32_t tag; union {{{union} }} u; }} {name};\n"));
+                    }
+                } else {
+                    let mut fs = String::new();
+                    for (i, t) in all[0].iter().enumerate() {
+                        let ct = self.cty(t)?;
+                        fs.push_str(&format!(" {ct} f{i};"));
+                    }
+                    if fs.is_empty() {
+                        fs.push_str(" uint8_t unit_;");
+                    }
+                    text.push_str(&format!("typedef struct {{{fs} }} {name};\n"));
+                }
+                self.types.push_str(&text);
+                self.type_names.insert(key, name.clone());
                 name
             }
             other => return unsupported(self.describe(other)),
@@ -215,52 +320,117 @@ impl<'a> Cg<'a> {
         it.name()
     }
 
-    // ------------------------------------------------------------ functions
+    // ------------------------------------------------------------ copy and moves
 
-    fn request(&mut self, f: FnId) -> CgResult<()> {
-        if self.seen.insert(f) {
-            self.queue.push(f);
+    /// Is `ty` `Copy`? (Mirrors the checker: scalars, tuples and arrays of `Copy`, and ADTs
+    /// with an explicit `impl Copy`.) Needed from M2b on, when values own heap memory.
+    #[allow(dead_code)]
+    fn is_copy(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Int(_) | Ty::Float(_) | Ty::Complex(_) | Ty::Bool | Ty::Char | Ty::Str | Ty::Never | Ty::Slice(_) => true,
+            Ty::Tuple(ts) => ts.iter().all(|t| self.is_copy(t)),
+            Ty::Array(t, _) => self.is_copy(t),
+            Ty::Adt(..) => {
+                let Some(copy) = self.prog.find_trait("Copy") else { return false };
+                for imp in &self.prog.impls {
+                    if imp.trait_ref.as_ref().map(|t| t.trait_) != Some(copy) {
+                        continue;
+                    }
+                    let mut binds = Vec::new();
+                    if !match_ty(&imp.self_ty, ty, &mut binds) {
+                        continue;
+                    }
+                    let ok = binds.iter().all(|(g, t)| {
+                        self.prog.generic(*g).bounds.iter().all(|b| b.trait_ != copy || self.is_copy(t))
+                    });
+                    if ok {
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
         }
-        Ok(())
     }
 
-    fn gen_fn(&mut self, id: FnId) -> CgResult<()> {
-        let def = self.prog.fn_(id).clone();
-        let Some(decl) = self.decls.get(&id).copied() else {
+    // ------------------------------------------------------------ functions and instances
+
+    /// The C name of the instance of `fid` with these (already substituted) generic arguments,
+    /// queueing it for generation if it is new.
+    fn request(&mut self, fid: FnId, sub: Subst) -> CgResult<String> {
+        let mut key = format!("{}", fid.0);
+        for (g, t) in &sub {
+            key.push_str(&format!("|{}={}", g.0, self.mangle(t)?));
+        }
+        if let Some(n) = self.instances.get(&key) {
+            return Ok(n.clone());
+        }
+        let name = format!("tau_fn_{}_{}", self.prog.fn_(fid).name, self.instances.len());
+        self.instances.insert(key, name.clone());
+        self.queue.push(Inst { name: name.clone(), fid, sub });
+        Ok(name)
+    }
+
+    /// The type of `self` in a method.
+    fn self_ty(&self, def: &FnDef) -> Option<Ty> {
+        match def.parent {
+            Parent::Impl(i) => Some(self.prog.impl_(i).self_ty.subst(&self.sub)),
+            Parent::Trait(t) => Some(Ty::Param(self.prog.trait_(t).self_generic).subst(&self.sub)),
+            Parent::Free => None,
+        }
+    }
+
+    /// Does a parameter of this mode and type travel as a pointer to the caller's value?
+    fn by_ptr(mode: ParamMode, ty: &Ty) -> bool {
+        mode == ParamMode::Mut && !matches!(ty, Ty::Slice(_) | Ty::Str)
+    }
+
+    fn gen_fn(&mut self, inst: Inst) -> CgResult<()> {
+        let def = self.prog.fn_(inst.fid).clone();
+        let Some(decl) = self.decls.get(&inst.fid).copied() else {
             return unsupported(format!("calling `{}`", def.name));
         };
-        if !def.sig.generics.is_empty() || def.parent != Parent::Free {
-            return unsupported(format!("`{}` (generic functions and methods, milestone 3)", def.name));
-        }
         let Some(body) = &decl.body else {
             return unsupported(format!("calling `{}`", def.name));
         };
-        let ret_c = self.cty(&def.sig.ret)?;
-        let name = self.fn_name(id);
+        self.sub = inst.sub.clone();
+        let ret_ty = def.sig.ret.subst(&self.sub);
+        let ret_c = self.cty(&ret_ty)?;
+        self.scopes.clear();
         self.scopes.push(Vec::new());
         self.loops.clear();
-        self.cur_ret = def.sig.ret.clone();
+        self.cur_ret = ret_ty.clone();
         let mut params = Vec::new();
+        if let Some(mode) = def.sig.self_mode {
+            let st = self.self_ty(&def).unwrap_or(Ty::Error);
+            let ct = self.cty(&st)?;
+            let cname = self.fresh("p_self");
+            let ptr = Self::by_ptr(mode, &st);
+            params.push(if ptr { format!("{ct} *{cname}") } else { format!("{ct} {cname}") });
+            self.scopes.last_mut().unwrap().push(Local { name: "self".to_string(), cname, ty: st, by_ptr: ptr });
+        }
         for (p, pd) in decl.params.iter().filter(|p| p.name.name != "self").zip(&def.sig.params) {
-            let ct = self.cty(&pd.ty)?;
+            let ty = pd.ty.subst(&self.sub);
+            let ct = self.cty(&ty)?;
             let cname = self.fresh(&format!("p_{}", p.name.name));
-            let by_ptr = pd.mode == ParamMode::Mut;
-            params.push(if by_ptr { format!("{ct} *{cname}") } else { format!("{ct} {cname}") });
-            self.scopes.last_mut().unwrap().push(Local { name: p.name.name.clone(), cname, ty: pd.ty.clone(), by_ptr });
+            let ptr = Self::by_ptr(pd.mode, &ty);
+            params.push(if ptr { format!("{ct} *{cname}") } else { format!("{ct} {cname}") });
+            self.scopes.last_mut().unwrap().push(Local { name: p.name.name.clone(), cname, ty, by_ptr: ptr });
         }
         let plist = if params.is_empty() { "void".to_string() } else { params.join(", ") };
         let value = self.block_value(body)?;
         let body_ty = self.block_ty(body);
-        let tail = if Self::is_unit(&def.sig.ret) || matches!(def.sig.ret, Ty::Never) {
+        let tail = if Self::is_unit(&ret_ty) || Self::is_never(&ret_ty) {
             format!("(void)({value}); return 0;")
-        } else if matches!(body_ty, Ty::Never) {
+        } else if Self::is_never(&body_ty) {
             format!("(void)({value}); tau_panic_cstr(\"unreachable\");")
         } else {
             format!("return {value};")
         };
-        self.scopes.pop();
-        self.protos.push_str(&format!("static {ret_c} {name}({plist});\n"));
-        self.bodies.push_str(&format!("static {ret_c} {name}({plist}) {{\n  {tail}\n}}\n"));
+        self.scopes.clear();
+        self.sub.clear();
+        self.protos.push_str(&format!("static {ret_c} {}({plist});\n", inst.name));
+        self.bodies.push_str(&format!("static {ret_c} {}({plist}) {{\n  {tail}\n}}\n", inst.name));
         Ok(())
     }
 
@@ -292,8 +462,8 @@ impl<'a> Cg<'a> {
             Some(Stmt::Expr(e)) => self.ty_of(e),
             _ => {
                 let diverges = b.stmts.iter().any(|s| match s {
-                    Stmt::Expr(e) => matches!(self.ty_of(e), Ty::Never),
-                    Stmt::Let { init: Some(e), .. } => matches!(self.ty_of(e), Ty::Never),
+                    Stmt::Expr(e) => Self::is_never(&self.ty_of(e)),
+                    Stmt::Let { init: Some(e), .. } => Self::is_never(&self.ty_of(e)),
                     _ => false,
                 });
                 if diverges { Ty::Never } else { Ty::unit() }
@@ -364,6 +534,7 @@ impl<'a> Cg<'a> {
         }
     }
 
+    /// Bind a pattern that always matches (`let (a, b) = ...`, `let Point(x, y) = ...`).
     fn bind_irrefutable(&mut self, pat: &'a Pattern, access: &str, ty: &Ty, out: &mut String) -> CgResult<()> {
         match &pat.kind {
             PatKind::Wild => Ok(()),
@@ -376,6 +547,17 @@ impl<'a> Cg<'a> {
             PatKind::Tuple(ps) => {
                 let Ty::Tuple(ts) = ty else { return unsupported("this pattern") };
                 for (i, (p, t)) in ps.iter().zip(ts).enumerate() {
+                    self.bind_irrefutable(p, &format!("{access}.f{i}"), t, out)?;
+                }
+                Ok(())
+            }
+            PatKind::Variant { args, .. } => {
+                let Ty::Adt(id, targs) = ty else { return unsupported("this pattern") };
+                if self.is_enum(*id) {
+                    return unsupported("a refutable pattern in `let`");
+                }
+                let fields = self.adt_fields(*id, targs).remove(0);
+                for (i, (p, t)) in args.iter().zip(&fields).enumerate() {
                     self.bind_irrefutable(p, &format!("{access}.f{i}"), t, out)?;
                 }
                 Ok(())
@@ -395,8 +577,20 @@ impl<'a> Cg<'a> {
             }
             ExprKind::Field { base, name } => {
                 let (b, bt) = self.place(base)?;
-                match (&bt, name.name.parse::<usize>()) {
-                    (Ty::Tuple(ts), Ok(i)) if i < ts.len() => Ok((format!("{b}.f{i}"), ts[i].clone())),
+                match &bt {
+                    Ty::Tuple(ts) => match name.name.parse::<usize>() {
+                        Ok(i) if i < ts.len() => Ok((format!("{b}.f{i}"), ts[i].clone())),
+                        _ => unsupported("assigning to this field"),
+                    },
+                    Ty::Adt(id, args) if !self.is_enum(*id) => {
+                        let def = self.prog.adt(*id);
+                        let AdtKind::Struct(fs) = &def.kind else { return unsupported("this field") };
+                        let Some(i) = fs.iter().position(|f| f.name == name.name) else {
+                            return unsupported(format!("the field `{}`", name.name));
+                        };
+                        let ft = self.adt_fields(*id, args).remove(0).remove(i);
+                        Ok((format!("{b}.f{i}"), ft))
+                    }
                     _ => unsupported("assigning to this field"),
                 }
             }
@@ -404,23 +598,27 @@ impl<'a> Cg<'a> {
         }
     }
 
+    fn is_trivial(e: &Expr) -> bool {
+        matches!(e.kind, ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_))
+    }
+
     /// Evaluate operands left to right. Returns declarations to run first and the operand
-    /// names to use afterwards. Literals and plain local reads are used in place.
+    /// names to use afterwards. Literals are used in place; if fewer than two operands could
+    /// have side effects the order cannot matter.
     fn ordered(&mut self, es: &[&'a Expr]) -> CgResult<(String, Vec<String>)> {
         let mut exprs = Vec::new();
         for e in es {
             exprs.push(self.expr(e)?);
         }
-        let trivial = |e: &Expr| matches!(e.kind, ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_) | ExprKind::Ident(_));
-        let nontrivial = es.iter().filter(|e| !trivial(e)).count();
-        let literals = es.iter().filter(|e| !matches!(e.kind, ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_))).count();
-        if es.len() < 2 || nontrivial == 0 || literals < 2 {
+        let effectful = es.iter().filter(|e| !Self::is_trivial(e) && !matches!(e.kind, ExprKind::Ident(_))).count();
+        let non_lit = es.iter().filter(|e| !Self::is_trivial(e)).count();
+        if es.len() < 2 || effectful == 0 || non_lit < 2 {
             return Ok((String::new(), exprs));
         }
         let mut decls = String::new();
         let mut names = Vec::new();
         for (e, c) in es.iter().zip(exprs) {
-            if matches!(e.kind, ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_)) {
+            if Self::is_trivial(e) {
                 names.push(c);
             } else {
                 let t = self.cty(&self.ty_of(e))?;
@@ -572,28 +770,19 @@ impl<'a> Cg<'a> {
                 let ct = self.cty(&ty)?;
                 let refs: Vec<&'a Expr> = es.iter().collect();
                 let (decls, names) = self.ordered(&refs)?;
-                let fields: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-                Ok(Self::wrap(decls, format!("(({ct}){{{}}})", fields.join(", "))))
+                Ok(Self::wrap(decls, format!("(({ct}){{{}}})", names.join(", "))))
             }
-            ExprKind::Unary { op, expr } => self.unary(&ty, *op, expr),
-            ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs),
-            ExprKind::Assign { op, lhs, rhs } => self.assign(*op, lhs, rhs),
+            ExprKind::Unary { op, expr } => self.unary(e, &ty, *op, expr),
+            ExprKind::Binary { op, lhs, rhs } => self.binary(e, *op, lhs, rhs),
+            ExprKind::Assign { op, lhs, rhs } => self.assign(e, *op, lhs, rhs),
             ExprKind::Cast { expr, .. } => {
                 let from = self.ty_of(expr);
                 let v = self.expr(expr)?;
                 self.cast(&v, &from, &ty)
             }
             ExprKind::Call { callee, args } => self.call(e, callee, args),
-            ExprKind::Field { base, name } => {
-                let bt = self.ty_of(base);
-                match (&bt, name.name.parse::<usize>()) {
-                    (Ty::Tuple(ts), Ok(i)) if i < ts.len() => {
-                        let b = self.expr(base)?;
-                        Ok(format!("({b}).f{i}"))
-                    }
-                    _ => unsupported(format!("the field `{}`", name.name)),
-                }
-            }
+            ExprKind::MethodCall { recv, args, .. } => self.method_call(e, recv, args),
+            ExprKind::Field { base, name } => self.field(e, base, &name.name),
             ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block_value(b),
             ExprKind::If { cond, then, else_ } => self.if_expr(&ty, cond, then, else_.as_deref()),
             ExprKind::Match { scrutinee, arms } => self.match_expr(&ty, scrutinee, arms),
@@ -610,7 +799,7 @@ impl<'a> Cg<'a> {
                 let val = match v {
                     Some(x) => {
                         let c = self.expr(x)?;
-                        if Self::is_unit(&ret) || matches!(ret, Ty::Never) { format!("(void)({c}); return 0;") } else { format!("return {c};") }
+                        if Self::is_unit(&ret) || Self::is_never(&ret) { format!("(void)({c}); return 0;") } else { format!("return {c};") }
                     }
                     None => "return 0;".to_string(),
                 };
@@ -636,15 +825,15 @@ impl<'a> Cg<'a> {
                 let Some(ctx) = self.loops.last() else { return unsupported("`continue` here") };
                 Ok(format!("({{ goto {}; ((tau_unit)0); }})", ctx.cont))
             }
+            ExprKind::Try(inner) => self.try_expr(&ty, inner),
+            ExprKind::MutBorrow(inner) => self.expr(inner),
             ExprKind::Imag(_) => unsupported("complex numbers (milestone 4)"),
-            ExprKind::Array(_) | ExprKind::ArrayRepeat { .. } => unsupported("arrays (milestone 2)"),
-            ExprKind::Index { .. } => unsupported("indexing (milestone 2)"),
-            ExprKind::MethodCall { .. } => unsupported("method calls (milestone 2)"),
+            ExprKind::Array(_) | ExprKind::ArrayRepeat { .. } => unsupported("arrays (milestone 2b)"),
+            ExprKind::Index { .. } => unsupported("indexing (milestone 2b)"),
             ExprKind::Closure { .. } => unsupported("closures (milestone 3)"),
-            ExprKind::Range { .. } => unsupported("ranges outside a `for` loop (milestone 2)"),
-            ExprKind::Try(_) => unsupported("the `?` operator (milestone 2)"),
+            ExprKind::Range { .. } => unsupported("ranges outside a `for` loop (milestone 2b)"),
             ExprKind::ParReduce { .. } | ExprKind::Spawn(_) | ExprKind::On { .. } => unsupported("parallel constructs (milestone 5)"),
-            ExprKind::TypeApp { .. } | ExprKind::MutBorrow(_) => unsupported("this expression"),
+            ExprKind::TypeApp { .. } => unsupported("this expression"),
         }
     }
 
@@ -654,6 +843,14 @@ impl<'a> Cg<'a> {
         }
         match self.res.expr_res.get(&NodeKey::of(e)) {
             Some(Res::Const(cid)) => self.const_ref(*cid),
+            Some(Res::Variant(adt, i, _)) => {
+                let ty = self.ty_of(e);
+                if matches!(ty, Ty::Fn(..)) {
+                    return unsupported("a variant constructor used as a function value (milestone 3)");
+                }
+                self.construct(*adt, Some(*i), &ty, Vec::new())
+            }
+            Some(Res::Fn(..)) => unsupported("a function used as a value (milestone 3)"),
             _ => unsupported(format!("`{name}` used as a value")),
         }
     }
@@ -676,9 +873,12 @@ impl<'a> Cg<'a> {
             let ct = self.cty(&def.ty)?;
             let saved_scopes = std::mem::replace(&mut self.scopes, vec![Vec::new()]);
             let saved_loops = std::mem::take(&mut self.loops);
-            let v = self.expr(&decl.value)?;
+            let saved_sub = std::mem::take(&mut self.sub);
+            let v = self.expr(&decl.value);
             self.scopes = saved_scopes;
             self.loops = saved_loops;
+            self.sub = saved_sub;
+            let v = v?;
             self.protos.push_str(&format!("static {ct} {name}(void);\n"));
             self.bodies.push_str(&format!(
                 "static {ct} {name}(void) {{ static bool done; static {ct} v; if (!done) {{ v = {v}; done = true; }} return v; }}\n"
@@ -725,9 +925,68 @@ impl<'a> Cg<'a> {
         Ok(s)
     }
 
+    // ------------------------------------------------------------ constructors and fields
+
+    /// Build a struct or enum value of type `ty` from already compiled field values.
+    fn construct(&mut self, adt: AdtId, variant: Option<usize>, ty: &Ty, fields: Vec<String>) -> CgResult<String> {
+        let ct = self.cty(ty)?;
+        Ok(match variant {
+            Some(i) => {
+                if fields.is_empty() {
+                    format!("(({ct}){{ .tag = {i} }})")
+                } else {
+                    format!("(({ct}){{ .tag = {i}, .u.v{i} = {{ {} }} }})", fields.join(", "))
+                }
+            }
+            None => {
+                let _ = adt;
+                if fields.is_empty() {
+                    format!("(({ct}){{ 0 }})")
+                } else {
+                    format!("(({ct}){{ {} }})", fields.join(", "))
+                }
+            }
+        })
+    }
+
+    fn field(&mut self, e: &'a Expr, base: &'a Expr, name: &str) -> CgResult<String> {
+        match self.res.expr_res.get(&NodeKey::of(e)) {
+            Some(Res::Const(cid)) => return self.const_ref(*cid),
+            Some(Res::Variant(adt, i, _)) => {
+                let ty = self.ty_of(e);
+                if matches!(ty, Ty::Fn(..)) {
+                    return unsupported("a variant constructor used as a function value (milestone 3)");
+                }
+                return self.construct(*adt, Some(*i), &ty, Vec::new());
+            }
+            Some(Res::Fn(..)) => return unsupported("a function used as a value (milestone 3)"),
+            _ => {}
+        }
+        let bt = self.ty_of(base);
+        let b = self.expr(base)?;
+        match &bt {
+            Ty::Tuple(ts) => match name.parse::<usize>() {
+                Ok(i) if i < ts.len() => Ok(format!("({b}).f{i}")),
+                _ => unsupported(format!("the field `{name}`")),
+            },
+            Ty::Adt(id, _) if !self.is_enum(*id) => {
+                let AdtKind::Struct(fs) = &self.prog.adt(*id).kind else { return unsupported("this field") };
+                match fs.iter().position(|f| f.name == name) {
+                    Some(i) => Ok(format!("({b}).f{i}")),
+                    None => unsupported(format!("the field `{name}`")),
+                }
+            }
+            _ => unsupported(format!("the field `{name}`")),
+        }
+    }
+
     // ------------------------------------------------------------ operators
 
-    fn unary(&mut self, ty: &Ty, op: UnOp, inner: &'a Expr) -> CgResult<String> {
+    fn unary(&mut self, e: &'a Expr, ty: &Ty, op: UnOp, inner: &'a Expr) -> CgResult<String> {
+        if let Some(Res::Fn(fid, subst)) = self.res.expr_res.get(&NodeKey::of(e)) {
+            let subst = self.apply_sub(subst);
+            return self.call_resolved(*fid, &subst, None, &[inner]);
+        }
         // `-128i8`: negate the literal itself, as 128 does not fit in an i8
         if let (UnOp::Neg, ExprKind::Int { value, .. }, Ty::Int(it)) = (op, &inner.kind, ty) {
             let ct = self.cty(ty)?;
@@ -753,14 +1012,26 @@ impl<'a> Cg<'a> {
         })
     }
 
-    fn binary(&mut self, op: BinOp, lhs: &'a Expr, rhs: &'a Expr) -> CgResult<String> {
-        if self.res.expr_res.contains_key(&NodeKey::of(lhs)) && false {
-            return unsupported("operator overloading");
-        }
+    fn binary(&mut self, e: &'a Expr, op: BinOp, lhs: &'a Expr, rhs: &'a Expr) -> CgResult<String> {
         let lt = self.ty_of(lhs);
         if matches!(op, BinOp::And | BinOp::Or) {
             let (l, r) = (self.expr(lhs)?, self.expr(rhs)?);
             return Ok(format!("({l} {} {r})", if op == BinOp::And { "&&" } else { "||" }));
+        }
+        if let Some(Res::Fn(fid, subst)) = self.res.expr_res.get(&NodeKey::of(e)) {
+            // an operator implemented by a user type: the same mapping the interpreter uses
+            let subst = self.apply_sub(subst);
+            let name = self.prog.fn_(*fid).name.clone();
+            let call = |this: &mut Self, a: &'a Expr, b: &'a Expr| this.call_resolved(*fid, &subst, None, &[a, b]);
+            return match (name.as_str(), op) {
+                ("eq", BinOp::Eq) => call(self, lhs, rhs),
+                ("eq", _) => Ok(format!("(!{})", call(self, lhs, rhs)?)),
+                ("lt", BinOp::Lt) => call(self, lhs, rhs),
+                ("lt", BinOp::Gt) => call(self, rhs, lhs),
+                ("lt", BinOp::Le) => Ok(format!("(!{})", call(self, rhs, lhs)?)),
+                ("lt", _) => Ok(format!("(!{})", call(self, lhs, rhs)?)),
+                _ => call(self, lhs, rhs),
+            };
         }
         let (decls, n) = self.ordered(&[lhs, rhs])?;
         let (l, r) = (n[0].clone(), n[1].clone());
@@ -824,15 +1095,24 @@ impl<'a> Cg<'a> {
         })
     }
 
-    fn assign(&mut self, op: Option<BinOp>, lhs: &'a Expr, rhs: &'a Expr) -> CgResult<String> {
+    fn assign(&mut self, e: &'a Expr, op: Option<BinOp>, lhs: &'a Expr, rhs: &'a Expr) -> CgResult<String> {
         let lt = self.ty_of(lhs);
-        let (target, _) = self.place(lhs)?;
-        let r = self.expr(rhs)?;
-        let rt = self.cty(&self.ty_of(rhs))?;
+        let rty = self.ty_of(rhs);
+        let rt = self.cty(&rty)?;
+        let lct = self.cty(&lt)?;
         let rv = self.fresh("rv");
+        let r = self.expr(rhs)?;
+        let (target, _) = self.place(lhs)?;
         Ok(match op {
             None => format!("({{ {rt} {rv} = {r}; {target} = {rv}; ((tau_unit)0); }})"),
             Some(bop) => {
+                if let Some(Res::Fn(fid, subst)) = self.res.expr_res.get(&NodeKey::of(e)) {
+                    // `a += b` on a user type is `a = add(a, b)`
+                    let subst = self.apply_sub(subst);
+                    let cur = self.fresh("cur");
+                    let call = self.call_with_values(*fid, &subst, &[(cur.clone(), lt.clone()), (rv.clone(), rty.clone())])?;
+                    return Ok(format!("({{ {rt} {rv} = {r}; {lct} {cur} = {target}; {target} = {call}; ((tau_unit)0); }})"));
+                }
                 let value = self.arith(bop, &target, &rv, &lt)?;
                 format!("({{ {rt} {rv} = {r}; {target} = {value}; ((tau_unit)0); }})")
             }
@@ -856,33 +1136,168 @@ impl<'a> Cg<'a> {
 
     // ------------------------------------------------------------ calls
 
-    fn call(&mut self, e: &'a Expr, callee: &'a Expr, args: &'a [Expr]) -> CgResult<String> {
-        let Some(Res::Fn(fid, subst)) = self.res.expr_res.get(&NodeKey::of(callee)) else {
-            return unsupported("this kind of call");
-        };
-        let (fid, subst) = (*fid, subst.clone());
+    /// Find what a call to `fid` with these (substituted) generic arguments runs: a trait
+    /// method is replaced by the implementing type's method, and a function with a body
+    /// becomes a monomorphic instance.
+    fn resolve(&mut self, fid: FnId, subst: &[(GenericId, Ty)]) -> CgResult<Target> {
+        let (fid, subst) = self.resolve_trait_method(fid, subst);
         let def = self.prog.fn_(fid).clone();
-        if self.decls.contains_key(&fid) {
-            if !def.sig.generics.is_empty() {
-                return unsupported(format!("calling the generic function `{}` (milestone 3)", def.name));
-            }
-            self.request(fid)?;
-            let name = self.fn_name(fid);
-            let refs: Vec<&'a Expr> = args.iter().collect();
-            let (decls, names) = self.ordered_args(&refs, &def.sig)?;
-            return Ok(Self::wrap(decls, format!("{name}({})", names.join(", "))));
+        if def.has_body && self.decls.contains_key(&fid) {
+            let name = self.request(fid, subst.clone())?;
+            return Ok(Target::User { name, fid, sub: subst });
         }
-        self.builtin(e, &def, &subst, args)
+        if def.module != 0 {
+            return unsupported(format!("the library function `{}`", def.name));
+        }
+        let key = match def.parent {
+            Parent::Impl(i) => {
+                let head = match &self.prog.impl_(i).self_ty {
+                    Ty::Adt(a, _) => self.prog.adt(*a).name.clone(),
+                    Ty::Slice(_) => "slice".to_string(),
+                    Ty::Str => "str".to_string(),
+                    _ => "?".to_string(),
+                };
+                format!("{head}::{}", def.name)
+            }
+            _ => def.name.clone(),
+        };
+        Ok(Target::Builtin { key, fid, sub: subst })
+    }
+
+    /// If `fid` is a trait method and `Self` is a known type, the impl's version (the same
+    /// lookup the interpreter does at run time, done once here).
+    fn resolve_trait_method(&self, fid: FnId, subst: &[(GenericId, Ty)]) -> (FnId, Subst) {
+        let def = self.prog.fn_(fid);
+        let Parent::Trait(tid) = def.parent else { return (fid, subst.to_vec()) };
+        let tdef = self.prog.trait_(tid);
+        let Some(self_ty) = subst.iter().find(|(g, _)| *g == tdef.self_generic).map(|(_, t)| t.clone()) else {
+            return (fid, subst.to_vec());
+        };
+        if matches!(self_ty, Ty::Param(_) | Ty::Var(_) | Ty::Error) {
+            return (fid, subst.to_vec());
+        }
+        for imp in &self.prog.impls {
+            if imp.trait_ref.as_ref().map(|t| t.trait_) != Some(tid) {
+                continue;
+            }
+            let mut binds: Subst = Vec::new();
+            if !match_ty(&imp.self_ty, &self_ty, &mut binds) {
+                continue;
+            }
+            let Some((_, ifid)) = imp.methods.iter().find(|(n, _)| *n == def.name) else {
+                // a default method: instantiated with `Self` bound
+                return (fid, subst.to_vec());
+            };
+            let isig = &self.prog.fn_(*ifid).sig;
+            for (tg, ig) in def.sig.generics.iter().zip(&isig.generics) {
+                if let Some((_, t)) = subst.iter().find(|(g, _)| g == tg) {
+                    binds.push((*ig, t.clone()));
+                }
+            }
+            return (*ifid, binds);
+        }
+        (fid, subst.to_vec())
+    }
+
+    fn call(&mut self, e: &'a Expr, callee: &'a Expr, args: &'a [Expr]) -> CgResult<String> {
+        match self.res.expr_res.get(&NodeKey::of(callee)) {
+            Some(Res::Fn(fid, subst)) => {
+                let subst = self.apply_sub(subst);
+                let refs: Vec<&'a Expr> = args.iter().collect();
+                self.call_resolved(*fid, &subst, None, &refs)
+            }
+            Some(Res::StructCtor(adt, _)) => self.construct_call(e, *adt, None, args),
+            Some(Res::Variant(adt, i, _)) => self.construct_call(e, *adt, Some(*i), args),
+            _ => unsupported("this kind of call"),
+        }
+    }
+
+    fn method_call(&mut self, e: &'a Expr, recv: &'a Expr, args: &'a [Expr]) -> CgResult<String> {
+        match self.res.expr_res.get(&NodeKey::of(e)) {
+            Some(Res::Fn(fid, subst)) => {
+                let subst = self.apply_sub(subst);
+                let has_self = self.prog.fn_(*fid).sig.self_mode.is_some();
+                let refs: Vec<&'a Expr> = args.iter().collect();
+                self.call_resolved(*fid, &subst, if has_self { Some(recv) } else { None }, &refs)
+            }
+            Some(Res::StructCtor(adt, _)) => self.construct_call(e, *adt, None, args),
+            Some(Res::Variant(adt, i, _)) => self.construct_call(e, *adt, Some(*i), args),
+            Some(Res::Builtin(_)) => unsupported("tensors (milestone 4)"),
+            _ => unsupported("this method call"),
+        }
+    }
+
+    fn construct_call(&mut self, e: &'a Expr, adt: AdtId, variant: Option<usize>, args: &'a [Expr]) -> CgResult<String> {
+        let ty = self.ty_of(e);
+        let refs: Vec<&'a Expr> = args.iter().collect();
+        let (decls, names) = self.ordered(&refs)?;
+        let v = self.construct(adt, variant, &ty, names)?;
+        Ok(Self::wrap(decls, v))
+    }
+
+    /// A call of `fid` where the receiver (if any) and the arguments are source expressions.
+    fn call_resolved(&mut self, fid: FnId, subst: &[(GenericId, Ty)], recv: Option<&'a Expr>, args: &[&'a Expr]) -> CgResult<String> {
+        let target = self.resolve(fid, subst)?;
+        let (tfid, tsub) = match &target {
+            Target::User { fid, sub, .. } | Target::Builtin { fid, sub, .. } => (*fid, sub.clone()),
+        };
+        let sig = self.prog.fn_(tfid).sig.clone();
+        // operands in call order, with how each one is passed
+        let mut ops: Vec<(&'a Expr, ParamMode, Ty)> = Vec::new();
+        let mut it = args.iter();
+        if let (Some(r), Some(mode)) = (recv, sig.self_mode) {
+            let st = self.ty_of(r);
+            ops.push((r, mode, st));
+        } else if sig.self_mode.is_some() {
+            // an operator function: the first operand plays the receiver
+            if let Some(a) = it.next() {
+                let st = self.ty_of(a);
+                ops.push((a, sig.self_mode.unwrap(), st));
+            }
+        }
+        for (i, a) in it.enumerate() {
+            let pd = sig.params.get(i);
+            let mode = pd.map(|p| p.mode).unwrap_or(ParamMode::Borrow);
+            let ty = pd.map(|p| p.ty.subst(&tsub)).unwrap_or(Ty::Error);
+            ops.push((*a, mode, ty));
+        }
+        if let Target::Builtin { key, .. } = &target {
+            let exprs: Vec<&'a Expr> = ops.iter().map(|o| o.0).collect();
+            return self.builtin(key, &tsub, &exprs);
+        }
+        let Target::User { name, .. } = target else { unreachable!() };
+        let (decls, names) = self.ordered_args(&ops)?;
+        Ok(Self::wrap(decls, format!("{name}({})", names.join(", "))))
+    }
+
+    /// Call `fid` with arguments that are already C values (named temporaries), all by value.
+    fn call_with_values(&mut self, fid: FnId, subst: &[(GenericId, Ty)], vals: &[(String, Ty)]) -> CgResult<String> {
+        let target = self.resolve(fid, subst)?;
+        match target {
+            Target::User { name, fid, .. } => {
+                let sig = self.prog.fn_(fid).sig.clone();
+                let mut names = Vec::new();
+                for (i, (v, t)) in vals.iter().enumerate() {
+                    let mode = if i == 0 { sig.self_mode } else { sig.params.get(i - 1).map(|p| p.mode) };
+                    if mode == Some(ParamMode::Mut) && Self::by_ptr(ParamMode::Mut, t) {
+                        names.push(format!("&{v}"));
+                    } else {
+                        names.push(v.clone());
+                    }
+                }
+                Ok(format!("{name}({})", names.join(", ")))
+            }
+            Target::Builtin { key, .. } => unsupported(format!("the library operator `{key}`")),
+        }
     }
 
     /// Arguments in order; `mut` arguments become pointers to their place.
-    fn ordered_args(&mut self, args: &[&'a Expr], sig: &FnSig) -> CgResult<(String, Vec<String>)> {
+    fn ordered_args(&mut self, ops: &[(&'a Expr, ParamMode, Ty)]) -> CgResult<(String, Vec<String>)> {
         let mut decls = String::new();
         let mut names = Vec::new();
-        let temps = args.len() >= 2 && args.iter().filter(|a| !matches!(a.kind, ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_))).count() >= 2;
-        for (i, a) in args.iter().enumerate() {
-            let mode = sig.params.get(i).map(|p| p.mode).unwrap_or(ParamMode::Borrow);
-            if mode == ParamMode::Mut {
+        let temps = ops.len() >= 2 && ops.iter().filter(|o| !Self::is_trivial(o.0) && !matches!(o.0.kind, ExprKind::Ident(_))).count() >= 1 && ops.iter().filter(|o| !Self::is_trivial(o.0)).count() >= 2;
+        for (a, mode, pty) in ops {
+            if Self::by_ptr(*mode, pty) {
                 let inner: &'a Expr = match &a.kind {
                     ExprKind::MutBorrow(x) => x,
                     _ => a,
@@ -897,7 +1312,7 @@ impl<'a> Cg<'a> {
                 continue;
             }
             let v = self.expr(a)?;
-            if temps && !matches!(a.kind, ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_)) {
+            if temps && !Self::is_trivial(a) {
                 let t = self.cty(&self.ty_of(a))?;
                 let tmp = self.fresh("arg");
                 decls.push_str(&format!("{t} {tmp} = {v}; "));
@@ -909,15 +1324,12 @@ impl<'a> Cg<'a> {
         Ok((decls, names))
     }
 
-    fn builtin(&mut self, e: &'a Expr, def: &FnDef, subst: &[(GenericId, Ty)], args: &'a [Expr]) -> CgResult<String> {
-        if def.module != 0 {
-            return unsupported(format!("the library function `{}`", def.name));
-        }
+    fn builtin(&mut self, key: &str, subst: &[(GenericId, Ty)], args: &[&'a Expr]) -> CgResult<String> {
         let targ = subst.first().map(|(_, t)| t.clone());
-        let name = def.name.as_str();
+        let name = key;
         match name {
             "print" => {
-                let a = &args[0];
+                let a = args[0];
                 let ty = self.ty_of(a);
                 if let ExprKind::Str(pieces) = &a.kind {
                     if pieces.iter().any(|p| matches!(p, StrPiece::Interp(_))) {
@@ -931,13 +1343,13 @@ impl<'a> Cg<'a> {
                 Ok(format!("({{ {ct} pv_ = {v}; tau_buf *o_ = tau_out_begin(); {f} tau_buf_char(o_, '\\n'); tau_out_end(); ((tau_unit)0); }})"))
             }
             "assert" => {
-                let c = self.expr(&args[0])?;
+                let c = self.expr(args[0])?;
                 Ok(format!("({{ if (!({c})) tau_panic_cstr(\"assertion failed\"); ((tau_unit)0); }})"))
             }
             "assert_eq" => {
-                let ty = self.ty_of(&args[0]);
+                let ty = self.ty_of(args[0]);
                 let ct = self.cty(&ty)?;
-                let (decls, n) = self.ordered(&[&args[0], &args[1]])?;
+                let (decls, n) = self.ordered(&[args[0], args[1]])?;
                 let eq = self.eq_expr("ea_", "eb_", &ty)?;
                 let fa = self.fmt_stmt("&m_", "ea_", &ty)?;
                 let fb = self.fmt_stmt("&m_", "eb_", &ty)?;
@@ -947,26 +1359,23 @@ impl<'a> Cg<'a> {
                 ))
             }
             "panic" => {
-                let m = self.expr(&args[0])?;
+                let m = self.expr(args[0])?;
                 Ok(format!("({{ tau_panic_str({m}); ((tau_unit)0); }})"))
             }
             "sqrt" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "exp" | "ln" | "log10" | "floor" | "ceil" | "round" => {
                 let single = matches!(targ, Some(Ty::Float(FloatTy::F32)));
-                let f = match name {
-                    "ln" => "log",
-                    n => n,
-                };
-                let x = self.expr(&args[0])?;
+                let f = if name == "ln" { "log" } else { name };
+                let x = self.expr(args[0])?;
                 Ok(if single { format!("((float){f}((double)({x})))") } else { format!("{f}({x})") })
             }
             "atan2" => {
                 let single = matches!(targ, Some(Ty::Float(FloatTy::F32)));
-                let (decls, n) = self.ordered(&[&args[0], &args[1]])?;
+                let (decls, n) = self.ordered(&[args[0], args[1]])?;
                 let v = if single { format!("((float)atan2((double)({}), (double)({})))", n[0], n[1]) } else { format!("atan2({}, {})", n[0], n[1]) };
                 Ok(Self::wrap(decls, v))
             }
             "abs" => {
-                let x = self.expr(&args[0])?;
+                let x = self.expr(args[0])?;
                 Ok(match targ {
                     Some(Ty::Float(FloatTy::F32)) => format!("fabsf({x})"),
                     Some(Ty::Float(_)) => format!("fabs({x})"),
@@ -981,7 +1390,7 @@ impl<'a> Cg<'a> {
             "min" | "max" => {
                 let Some(t) = targ else { return unsupported("`min`/`max` on this type") };
                 let ct = self.cty(&t)?;
-                let (decls, n) = self.ordered(&[&args[0], &args[1]])?;
+                let (decls, n) = self.ordered(&[args[0], args[1]])?;
                 let test = match &t {
                     Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char => {
                         if name == "min" { "(a_ <= b_)".to_string() } else { "(!(a_ < b_))".to_string() }
@@ -993,26 +1402,49 @@ impl<'a> Cg<'a> {
                 };
                 Ok(Self::wrap(decls, format!("({{ {ct} a_ = {}; {ct} b_ = {}; {test} ? a_ : b_; }})", n[0], n[1])))
             }
-            other => {
-                let _ = e;
-                unsupported(format!("the library function `{other}`"))
-            }
+            other => unsupported(format!("the library function `{other}`")),
         }
+    }
+
+    // ------------------------------------------------------------ `?`
+
+    fn try_expr(&mut self, ty: &Ty, inner: &'a Expr) -> CgResult<String> {
+        let it = self.ty_of(inner);
+        let Ty::Adt(id, _) = &it else { return unsupported("`?` on this type") };
+        let name = self.prog.adt(*id).name.clone();
+        if !matches!(name.as_str(), "Option" | "Result") || self.prog.adt(*id).module != 0 {
+            return unsupported("`?` on this type");
+        }
+        let ict = self.cty(&it)?;
+        let ret = self.cur_ret.clone();
+        let rct = self.cty(&ret)?;
+        let Ty::Adt(rid, _) = &ret else { return unsupported("`?` in a function that does not return Option or Result") };
+        let v = self.expr(inner)?;
+        let t = self.fresh("try");
+        // the failing variant is index 1 (`None`, `Err`); its payload (if any) is passed on
+        let propagate = if *rid == *id && name == "Result" {
+            format!("return (({rct}){{ .tag = 1, .u.v1 = {{ {t}.u.v1.f0 }} }});")
+        } else {
+            format!("return (({rct}){{ .tag = 1 }});")
+        };
+        let vct = self.cty(ty)?;
+        let value = if Self::is_unit(ty) { "((tau_unit)0)".to_string() } else { format!("(({vct}){t}.u.v0.f0)") };
+        Ok(format!("({{ {ict} {t} = {v}; if ({t}.tag == 1) {{ {propagate} }} {value}; }})"))
     }
 
     // ------------------------------------------------------------ control flow
 
     fn if_expr(&mut self, ty: &Ty, cond: &'a Expr, then: &'a Block, else_: Option<&'a Expr>) -> CgResult<String> {
         let c = self.expr(cond)?;
-        let never = matches!(ty, Ty::Never);
+        let never = Self::is_never(ty);
         let ct = self.cty(ty)?;
         let r = self.fresh("if");
-        let then_never = matches!(self.block_ty(then), Ty::Never);
+        let then_never = Self::is_never(&self.block_ty(then));
         let t = self.block_value(then)?;
         let then_stmt = if never || then_never { format!("(void)({t});") } else { format!("{r} = {t};") };
         let mut s = format!("({{ {ct} {r} = ({ct}){{0}}; if ({c}) {{ {then_stmt} }}");
         if let Some(el) = else_ {
-            let else_never = matches!(self.ty_of(el), Ty::Never);
+            let else_never = Self::is_never(&self.ty_of(el));
             let ev = self.expr(el)?;
             let else_stmt = if never || else_never { format!("(void)({ev});") } else { format!("{r} = {ev};") };
             s.push_str(&format!(" else {{ {else_stmt} }}"));
@@ -1021,19 +1453,43 @@ impl<'a> Cg<'a> {
         Ok(s)
     }
 
-    fn pat_has_bindings(&self, p: &Pattern) -> bool {
+    fn pat_has_bindings(&self, p: &Pattern, ty: &Ty) -> bool {
         match &p.kind {
-            PatKind::Ident { .. } => true,
-            PatKind::Tuple(ps) => ps.iter().any(|x| self.pat_has_bindings(x)),
-            PatKind::Or(alts) => alts.iter().any(|x| self.pat_has_bindings(x)),
+            PatKind::Ident { name, mutable } => !(self.unit_variant_of(ty, name, *mutable).is_some()),
+            PatKind::Tuple(ps) => ps.iter().any(|x| self.pat_has_bindings(x, &Ty::Error)),
+            PatKind::Variant { args, .. } => args.iter().any(|x| self.pat_has_bindings(x, &Ty::Error)),
+            PatKind::Or(alts) => alts.iter().any(|x| self.pat_has_bindings(x, ty)),
             _ => false,
+        }
+    }
+
+    /// If `name` in a pattern against type `ty` names a unit variant of that enum, its index.
+    fn unit_variant_of(&self, ty: &Ty, name: &str, mutable: bool) -> Option<usize> {
+        if mutable {
+            return None;
+        }
+        let Ty::Adt(id, _) = ty else { return None };
+        match &self.prog.adt(*id).kind {
+            AdtKind::Enum(vs) => vs.iter().position(|v| v.name == name && v.fields.is_empty()),
+            _ => None,
+        }
+    }
+
+    fn variant_index(&self, id: AdtId, name: &str) -> Option<usize> {
+        match &self.prog.adt(id).kind {
+            AdtKind::Enum(vs) => vs.iter().position(|v| v.name == name),
+            AdtKind::Struct(_) => None,
         }
     }
 
     /// A C condition that is true when `access` (of type `ty`) matches `p`.
     fn pat_test(&mut self, p: &'a Pattern, access: &str, ty: &Ty) -> CgResult<String> {
         Ok(match &p.kind {
-            PatKind::Wild | PatKind::Ident { .. } => "1".to_string(),
+            PatKind::Wild => "1".to_string(),
+            PatKind::Ident { name, mutable } => match self.unit_variant_of(ty, name, *mutable) {
+                Some(i) => format!("({access}.tag == {i})"),
+                None => "1".to_string(),
+            },
             PatKind::Lit(e) => {
                 let lit = self.expr(e)?;
                 self.eq_expr(access, &lit, ty)?
@@ -1051,7 +1507,7 @@ impl<'a> Cg<'a> {
                 if parts.is_empty() { "1".to_string() } else { format!("({})", parts.join(" && ")) }
             }
             PatKind::Or(alts) => {
-                if self.pat_has_bindings(p) {
+                if self.pat_has_bindings(p, ty) {
                     return unsupported("`|` patterns that bind variables");
                 }
                 let mut parts = Vec::new();
@@ -1060,13 +1516,45 @@ impl<'a> Cg<'a> {
                 }
                 format!("({})", parts.join(" || "))
             }
-            PatKind::Variant { .. } | PatKind::Path(_) => return unsupported("enum patterns (milestone 2)"),
+            PatKind::Path(path) => {
+                let Ty::Adt(id, _) = ty else { return unsupported("this pattern") };
+                let name = &path.last().unwrap().name;
+                match self.variant_index(*id, name) {
+                    Some(i) => format!("({access}.tag == {i})"),
+                    None => return unsupported("this pattern"),
+                }
+            }
+            PatKind::Variant { path, args } => {
+                let Ty::Adt(id, targs) = ty else { return unsupported("this pattern") };
+                let name = &path.last().unwrap().name;
+                let all = self.adt_fields(*id, targs);
+                let (vi, fields, base) = if self.is_enum(*id) {
+                    let Some(vi) = self.variant_index(*id, name) else { return unsupported("this pattern") };
+                    (Some(vi), all[vi].clone(), format!("{access}.u.v{vi}"))
+                } else {
+                    (None, all[0].clone(), access.to_string())
+                };
+                let mut parts = Vec::new();
+                if let Some(vi) = vi {
+                    parts.push(format!("({access}.tag == {vi})"));
+                }
+                for (j, (sub, t)) in args.iter().zip(&fields).enumerate() {
+                    let c = self.pat_test(sub, &format!("{base}.f{j}"), t)?;
+                    if c != "1" {
+                        parts.push(c);
+                    }
+                }
+                if parts.is_empty() { "1".to_string() } else { format!("({})", parts.join(" && ")) }
+            }
         })
     }
 
     fn pat_bind(&mut self, p: &'a Pattern, access: &str, ty: &Ty, out: &mut String) -> CgResult<()> {
         match &p.kind {
-            PatKind::Ident { name, .. } => {
+            PatKind::Ident { name, mutable } => {
+                if self.unit_variant_of(ty, name, *mutable).is_some() {
+                    return Ok(());
+                }
                 let ct = self.cty(ty)?;
                 let l = self.declare(name, ty.clone());
                 out.push_str(&format!("{ct} {} = {access}; ", l.cname));
@@ -1075,6 +1563,20 @@ impl<'a> Cg<'a> {
                 let Ty::Tuple(ts) = ty else { return unsupported("this pattern") };
                 for (i, (sub, t)) in ps.iter().zip(ts).enumerate() {
                     self.pat_bind(sub, &format!("{access}.f{i}"), t, out)?;
+                }
+            }
+            PatKind::Variant { path, args } => {
+                let Ty::Adt(id, targs) = ty else { return unsupported("this pattern") };
+                let name = &path.last().unwrap().name;
+                let all = self.adt_fields(*id, targs);
+                let (fields, base) = if self.is_enum(*id) {
+                    let Some(vi) = self.variant_index(*id, name) else { return unsupported("this pattern") };
+                    (all[vi].clone(), format!("{access}.u.v{vi}"))
+                } else {
+                    (all[0].clone(), access.to_string())
+                };
+                for (j, (sub, t)) in args.iter().zip(&fields).enumerate() {
+                    self.pat_bind(sub, &format!("{base}.f{j}"), t, out)?;
                 }
             }
             _ => {}
@@ -1086,7 +1588,7 @@ impl<'a> Cg<'a> {
         let st = self.ty_of(scrutinee);
         let sct = self.cty(&st)?;
         let sv = self.expr(scrutinee)?;
-        let never = matches!(ty, Ty::Never);
+        let never = Self::is_never(ty);
         let ct = self.cty(ty)?;
         let (s, r, end) = (self.fresh("scrut"), self.fresh("m"), self.fresh("mend"));
         let mut out = format!("({{ {sct} {s} = {sv}; {ct} {r} = ({ct}){{0}};\n");
@@ -1099,7 +1601,7 @@ impl<'a> Cg<'a> {
                 Some(g) => Some(self.expr(g)?),
                 None => None,
             };
-            let body_never = matches!(self.ty_of(&arm.body), Ty::Never);
+            let body_never = Self::is_never(&self.ty_of(&arm.body));
             let body = self.expr(&arm.body)?;
             let assign = if never || body_never { format!("(void)({body});") } else { format!("{r} = {body};") };
             let finish = format!("{assign} goto {end};");
@@ -1116,7 +1618,7 @@ impl<'a> Cg<'a> {
 
     fn loop_expr(&mut self, ty: &Ty, body: &'a Block) -> CgResult<String> {
         let (brk, cont) = (self.fresh("brk"), self.fresh("cont"));
-        let never = matches!(ty, Ty::Never);
+        let never = Self::is_never(ty);
         let (result, decl) = if never || Self::is_unit(ty) {
             (None, String::new())
         } else {
@@ -1144,7 +1646,7 @@ impl<'a> Cg<'a> {
 
     fn for_expr(&mut self, pat: &'a Pattern, iter: &'a Expr, guard: Option<&'a Expr>, body: &'a Block) -> CgResult<String> {
         let ExprKind::Range { start: Some(start), end: Some(end), inclusive } = &iter.kind else {
-            return unsupported("`for` over anything but a range (milestone 2)");
+            return unsupported("`for` over anything but a range (milestone 2b)");
         };
         let ty = self.ty_of(start);
         let Ty::Int(_) = ty else { return unsupported("a `for` range over non-integers") };
