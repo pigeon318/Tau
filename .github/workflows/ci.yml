@@ -39,6 +39,13 @@ jobs:
       - name: Test (interpreter and native backend)
         shell: pwsh
         run: cargo test --release
+      - name: Stack overflow handling, repeated (it used to fail intermittently)
+        shell: pwsh
+        run: |
+          1..25 | ForEach-Object {
+            cargo test --release --test native -- runaway_recursion 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Error "run $_ failed"; exit 1 }
+          }
       - name: Build tau.exe
         shell: pwsh
         run: cargo build --release

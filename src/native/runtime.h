@@ -1009,6 +1009,9 @@ static void tau_thread_setup(void) {
     ULONG_PTR lo = 0, hi = 0;
     GetCurrentThreadStackLimits(&lo, &hi);
     tau_stack_lo = (uintptr_t)lo;
+    /* keep some stack in reserve, so that the overflow handler has room to print its message */
+    ULONG guarantee = 1 << 17;
+    SetThreadStackGuarantee(&guarantee);
 #else
     pthread_attr_t at;
     void *lo = 0;
@@ -1289,8 +1292,9 @@ static LONG WINAPI tau_veh(EXCEPTION_POINTERS *ep) {
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW) {
         static const char m[] = "panic: stack overflow: the program recursed too deeply\n";
         tau_flush_stdout();
-        (void)!write(2, m, sizeof m - 1);
-        _exit(101);
+        DWORD wrote = 0;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), m, (DWORD)(sizeof m - 1), &wrote, 0);
+        ExitProcess(101);
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
