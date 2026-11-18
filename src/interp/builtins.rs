@@ -112,7 +112,11 @@ impl<'a> Interp<'a> {
 
             // ---- output and checks
             "print" => {
-                let text = self.display(&a[0])?;
+                // `print<T>`: the type argument says how to format the value
+                let text = match subst.first() {
+                    Some((_, ty)) => self.display_ty(&a[0], ty)?,
+                    None => self.display(&a[0])?,
+                };
                 let _ = writeln!(self.out, "{text}");
                 Ok(Value::Unit)
             }

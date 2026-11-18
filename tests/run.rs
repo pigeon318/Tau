@@ -528,3 +528,50 @@ fn rejected_programs_do_not_run() {
     assert!(r.outcome.is_none());
     assert!(cap.0.lock().unwrap().is_empty());
 }
+
+// ------------------------------------------------------------------ float formatting and reductions
+
+#[test]
+fn single_precision_floats_print_as_single_precision() {
+    assert_eq!(out("let x: f32 = 0.1\nprint(x)\nlet z: f32 = 1.0 / 3.0\nprint(z)\nprint(1.0 / 3.0)"), "0.1\n0.33333334\n0.3333333333333333\n");
+    assert_eq!(out("let x: f32 = 0.1\nprint(vec[x, 0.2f32])\nprint((x, 7))\nprint(\"{x}\")"), "[0.1, 0.2]\n(0.1, 7)\n0.1\n");
+    assert_eq!(out("let big: f32 = 16777216.0\nprint(big + 1.0)"), "16777216.0\n");
+}
+
+#[test]
+fn whole_floats_always_end_in_point_zero() {
+    assert_eq!(out("print(2.0)\nprint(1.0e10)\nprint(1.0e16)\nprint(1.0e20)\nprint(-3.0)"), "2.0\n10000000000.0\n10000000000000000.0\n100000000000000000000.0\n-3.0\n");
+}
+
+#[test]
+fn small_floats_never_use_scientific_notation() {
+    assert_eq!(out("print(0.0000001)\nprint(0.1 + 0.2)\nprint(1.5e-5)"), "0.0000001\n0.30000000000000004\n0.000015\n");
+}
+
+#[test]
+fn par_sum_is_defined_by_fixed_blocks_of_4096() {
+    // One huge value then many ones. A plain left-to-right sum loses every `+ 1.0`
+    // (1e16 + 1.0 rounds back to 1e16); the blocked sum adds the ones among themselves
+    // first, so they survive: block 0 = 1e16, block 1 = 4096, block 2 = 1, combined in order.
+    let src = "fn v(i: usize) -> f64 { if i == 0 { 10000000000000000.0 } else { 1.0 } }\n\
+               fn main() {\n\
+                 print(par sum(i in 0..8193) v(i))\n\
+                 let mut s = 0.0\n\
+                 for i in 0..8193 { s += v(i) }\n\
+                 print(s)\n\
+               }";
+    assert_eq!(out_prog(src), "10000000000004096.0\n10000000000000000.0\n");
+}
+
+#[test]
+fn par_sum_of_fewer_than_one_block_is_a_plain_sum() {
+    let src = "fn main() {\n print(par sum(i in 0..10) i as f64 * 0.1)\n let mut s = 0.0\n for i in 0..10 { s += i as f64 * 0.1 }\n print(s)\n}";
+    let text = out_prog(src);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], lines[1], "{text}");
+}
+
+#[test]
+fn par_min_max_any_all_do_not_depend_on_blocking() {
+    assert_eq!(out("print(par max(i in 0..10000) (i * 7919) % 10007)\nprint(par min(i in 1..10000) (i * 7919) % 10007)\nprint(par any(i in 0..10000) i == 9999)\nprint(par all(i in 0..10000) i < 9999)"), "10006\n1\ntrue\nfalse\n");
+}

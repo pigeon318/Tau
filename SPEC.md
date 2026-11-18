@@ -569,6 +569,11 @@ have a catch-all arm), on `bool` both values; on anything else it needs a catch-
 everywhere, and `std.fs`, `std.io`, `std.map`, `math.linalg`, `math.fft` are reached with `use`.
 Functions declared without a body are provided by the runtime. User definitions shadow the prelude.
 
+**Types may not contain themselves.** `enum List { Nil, Cons(i64, List) }` has no finite size and is an
+error, whether the recursion is direct, through `Option`, a tuple, an array, a generic wrapper, or between
+two types. Recursion through a `Vec` is fine (`struct Tree { children: Vec<Tree> }`). A `Box` type is
+not available yet.
+
 **Not checked yet** (deliberately deferred): `pub`/privacy across modules (there is one file today);
 duplicate or overlapping impls (the first match wins); associated types; closure capture analysis;
 `struct`/`enum`/`impl` declared inside a function; compile-time checking of symbolic tensor
@@ -657,8 +662,9 @@ Errors stop it before anything executes. Exit codes: `0` normal, `1` rejected or
 **Numbers.** Each integer type has its own range. Arithmetic that leaves the range **panics**
 ("integer overflow") in every build; `as` between integer types wraps, from float to integer
 saturates (NaN gives 0), and division by zero panics. `f32` results are rounded to single precision.
-Integer `^` panics on a negative exponent. Floats print with `.0` when whole (`2.0`), otherwise as the
-shortest text that reads back exactly.
+Integer `^` panics on a negative exponent. A float prints as the shortest digits that read back
+exactly (for an `f32`, exactly *as an `f32`*: `0.1f32` prints `0.1`), never in scientific notation, and
+with `.0` added when it is a whole number, whatever its size (`1.0e16` prints `10000000000000000.0`).
 
 **Values.** `Copy` aggregates (tuples, arrays, `impl Copy` structs) are copied when read from a
 variable; `Vec`, `String`, maps and tensors are moved, never copied. Arguments for `mut` parameters
@@ -671,6 +677,12 @@ replaces the caller's value. `for x in mut v` binds `x` to a reference to each e
 **Tensors** are stored column-major. `random` uses a fixed seed, so runs are reproducible.
 `math.linalg.eig` handles symmetric matrices only (Jacobi rotations), and `math.fft` uses a radix-2
 transform when the length is a power of two, otherwise the direct O(n^2) sum.
+
+**Parallel reductions have a fixed evaluation order.** `par sum`, `prod`, `min`, `max`, `any` and `all`
+cut the iteration into blocks of 4096 items, reduce each block in order starting from its first item,
+and combine the block results in block order. This is the definition of the result, so it never depends
+on how many threads run it: a float `par sum` prints the same digits on any machine, and differs from a
+plain left-to-right loop in the last digits for long sums.
 
 **Concurrency.** `spawn`, `par for`, `par sum`... and `on` run **one after another on a single
 thread**: results are the same as a parallel run would give for programs the borrow checker accepts,

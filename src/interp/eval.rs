@@ -6,6 +6,9 @@ use std::rc::Rc;
 use super::*;
 use crate::ast::BinOp;
 
+/// Items per block in a parallel reduction (see `par_reduce`).
+pub const PAR_BLOCK: usize = 4096;
+
 fn int_range(it: IntTy) -> (i128, i128) {
     match it {
         IntTy::I8 => (i8::MIN as i128, i8::MAX as i128),
@@ -144,7 +147,8 @@ impl<'a> Interp<'a> {
                         StrPiece::Lit(l) => s.push_str(l),
                         StrPiece::Interp(inner) => {
                             let v = self.eval(inner, f)?;
-                            s.push_str(&self.display(&v)?);
+                            let ty = self.ty_of(inner, f);
+                            s.push_str(&self.display_ty(&v, &ty)?);
                         }
                     }
                 }
@@ -965,45 +969,61 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// Combine two partial results of a reduction.
+    fn reduce_pair(&mut self, op: &str, a: Value<'a>, x: Value<'a>, ty: &Ty) -> R<'a, Value<'a>> {
+        Ok(match op {
+            "sum" => self.bin_values(BinOp::Add, a, x, ty)?,
+            "prod" => self.bin_values(BinOp::Mul, a, x, ty)?,
+            "min" => {
+                if self.values_cmp(&x, &a)? == Some(std::cmp::Ordering::Less) { x } else { a }
+            }
+            "max" => {
+                if self.values_cmp(&x, &a)? == Some(std::cmp::Ordering::Greater) { x } else { a }
+            }
+            "any" => Value::Bool(matches!(a, Value::Bool(true)) || matches!(x, Value::Bool(true))),
+            "all" => Value::Bool(matches!(a, Value::Bool(true)) && matches!(x, Value::Bool(true))),
+            other => return panic(format!("unknown reduction `{other}`")),
+        })
+    }
+
+    /// A parallel reduction. The iteration is cut into blocks of `PAR_BLOCK` items; each block
+    /// is reduced in order starting from its first item, and the block results are combined in
+    /// block order. This is the definition of the result, so it does not depend on how many
+    /// threads a parallel implementation uses: floating-point sums come out the same on any
+    /// machine.
     fn par_reduce(&mut self, e: &'a Expr, op: &str, pat: &'a Pattern, iter: &'a Expr, body: &'a Expr, f: &Frame<'a>) -> R<'a, Value<'a>> {
         let ty = self.ty_of(e, f);
         let it = self.eval(iter, f)?;
-        let mut acc: Option<Value<'a>> = None;
-        let visit = |this: &mut Self, item: Value<'a>, acc: &mut Option<Value<'a>>| -> R<'a, ()> {
-            let fr = f.child();
-            this.bind(pat, &item, &fr, &fr.env)?;
-            let x = this.eval_val(body, &fr)?;
-            *acc = Some(match acc.take() {
-                None => x,
-                Some(a) => match op {
-                    "sum" => this.bin_values(BinOp::Add, a, x, &ty)?,
-                    "prod" => this.bin_values(BinOp::Mul, a, x, &ty)?,
-                    "min" => {
-                        if this.values_cmp(&x, &a)? == Some(std::cmp::Ordering::Less) { x } else { a }
-                    }
-                    "max" => {
-                        if this.values_cmp(&x, &a)? == Some(std::cmp::Ordering::Greater) { x } else { a }
-                    }
-                    "any" => Value::Bool(matches!(a, Value::Bool(true)) || matches!(x, Value::Bool(true))),
-                    "all" => Value::Bool(matches!(a, Value::Bool(true)) && matches!(x, Value::Bool(true))),
-                    other => return panic(format!("unknown reduction `{other}`")),
-                },
-            });
-            Ok(())
+        let mut blocks: Vec<Value<'a>> = Vec::new();
+        let mut cur: Option<Value<'a>> = None;
+        let mut in_block = 0usize;
+        let mut items: Box<dyn Iterator<Item = Value<'a>>> = match it {
+            Value::Range(a, b) => Box::new((a..b).map(Value::Int)),
+            other => Box::new(self.sequence(other)?.into_iter()),
         };
-        match it {
-            Value::Range(a, b) => {
-                let mut i = a;
-                while i < b {
-                    visit(self, Value::Int(i), &mut acc)?;
-                    i += 1;
-                }
+        while let Some(item) = items.next() {
+            let fr = f.child();
+            self.bind(pat, &item, &fr, &fr.env)?;
+            let x = self.eval_val(body, &fr)?;
+            cur = Some(match cur.take() {
+                None => x,
+                Some(a) => self.reduce_pair(op, a, x, &ty)?,
+            });
+            in_block += 1;
+            if in_block == PAR_BLOCK {
+                blocks.push(cur.take().unwrap());
+                in_block = 0;
             }
-            other => {
-                for item in self.sequence(other)? {
-                    visit(self, item, &mut acc)?;
-                }
-            }
+        }
+        if let Some(c) = cur {
+            blocks.push(c);
+        }
+        let mut acc: Option<Value<'a>> = None;
+        for b in blocks {
+            acc = Some(match acc.take() {
+                None => b,
+                Some(a) => self.reduce_pair(op, a, b, &ty)?,
+            });
         }
         match acc {
             Some(v) => Ok(v),
