@@ -11,7 +11,10 @@ The design lives in [`SPEC.md`](SPEC.md).
 **Tau programs run.** The compiler reads Tau source, resolves names, infers types, checks traits,
 generics, operators and mutability, then checks ownership (use after move, conflicting borrows,
 views that outlive their data, race-free `spawn` and `par for`), and an interpreter runs what is
-accepted. There is no native code generator yet, and `par`/`spawn` run on a single thread.
+accepted. A **native backend** (Tau to C, compiled by the system `clang`/`gcc`) is under way: it
+currently handles scalars, tuples, strings, functions, control flow, checked arithmetic and panics,
+about 100× faster than the interpreter; everything else still runs on the interpreter, and `par`/`spawn`
+run on a single thread. See [`docs/native/DESIGN.md`](docs/native/DESIGN.md).
 
 | Stage | Deliverable | State |
 |---|---|---|
@@ -19,7 +22,7 @@ accepted. There is no native code generator yet, and `par`/`spawn` run on a sing
 | 2 | Name resolution, type checker | done |
 | 3 | Borrow checker | done |
 | 3.5 | Interpreter (`tau run`) | done |
-| 4 | LLVM code generation (native, fast) | next |
+| 4 | Native code generation via C (see `docs/native/DESIGN.md`) | milestone 1 of 6 done |
 | 5 | Std library, tensors | |
 | 6 | Thread pool, `par` | |
 | 7 | Package manager, `tau test`, `tau fmt` | |
@@ -44,6 +47,12 @@ cargo test
 cargo build --release && ./target/release/tau run examples/run/nbody.tau   # much faster
 
 ./target/debug/tau test examples/tests/stack.tau               # run the #[test] functions
+
+# native backend (needs clang or gcc)
+./target/release/tau run examples/run/collatz.tau              # native when the program is supported, else interpreted
+./target/release/tau run examples/run/collatz.tau --native     # native only: say why if it cannot be compiled
+./target/release/tau run examples/run/collatz.tau --interp     # the reference interpreter
+./target/release/tau build examples/run/collatz.tau --emit-c   # show the generated C
 ```
 
 ## Layout
@@ -59,6 +68,7 @@ cargo build --release && ./target/release/tau run examples/run/nbody.tau   # muc
 | `src/program.rs` | What is known about structs, enums, traits, functions and impls |
 | `src/check/` | The checker: `collect` (names, imports, signatures), `lower` (types), `traits` (impl and method lookup), `expr`, `pat` |
 | `src/interp/` | The interpreter: `eval` (expressions, patterns), `builtins`, `tensor` (matrices, linear algebra, FFT), `value` |
+| `src/native/` | The native backend: `cg` (checked AST to C), `runtime.h` (the C runtime), and the driver that compiles, caches and runs |
 | `src/borrowck/` | The borrow checker: `lower` (AST to an event CFG), `analysis` (liveness and dataflow, the checks), `mir` |
 | `src/prelude/*.tau` | The built-in library's signatures, written in Tau |
 | `examples/` | Programs from the spec; every one must parse |

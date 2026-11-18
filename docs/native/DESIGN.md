@@ -1,8 +1,8 @@
 # Tau native backend: design proposal
 
-**Status:** design approved (decisions in §19). Milestone 0, the prerequisites in the existing compiler,
-is done (§14). No backend code exists yet; the only new code besides M0 is the three measurement spikes in
-[`spikes/`](spikes/).
+**Status:** design approved (decisions in §19). Milestone 0 (prerequisites, §14) and **milestone 1**
+(scalars, tuples, strings, functions, control flow, checked arithmetic, panics, `print`) are done; see §17
+for what M1 turned out to need. The measurement spikes are in [`spikes/`](spikes/).
 
 **Summary.** Compile Tau to **C**, then let the system C compiler (`clang`, else `gcc`) produce the
 executable. Between the checked AST and the C text sits a small monomorphic, explicitly-dropped IR.
@@ -350,12 +350,36 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
 | # | Scope | Done when |
 |---|---|---|
 | **M0** | Prerequisites (§14, items 1 to 3) | **done**: interpreter and checker changes, with tests |
-| **M1** | Scalars, functions, control flow, checked arithmetic, panics, `print` of scalars/strings | `hello`, `fizzbuzz`, `primes`, `collatz`, recursion tests |
-| **M2** | Tuples, structs, enums, `Option`/`Result`/`?`, `match`, arrays, `Vec`, slices, `String`, `str`, `Map`, ownership and drops (incl. §14 item 5) | `sort`, `bank`, `wordcount`, `errors`, `shapes`, `ownership` |
+| **M1** | Scalars, tuples, functions, control flow, checked arithmetic, panics, `print` of scalars/strings/tuples | **done**: `hello`, `fizzbuzz`, `collatz`, 36 differential tests (`tests/native.rs`) including a 10,000-value float-printing fuzz |
+| **M2** | Structs, enums, `Option`/`Result`/`?`, `match` on them, arrays, `Vec`, slices, `String`, `str`, `Map`, ownership and drops (incl. §14 item 5) | `primes`, `sort`, `bank`, `wordcount`, `errors`, `shapes`, `ownership` |
 | **M3** | Generics, traits, default methods, operators, `Display`/`Eq`/`Ord`, closures, `fn` values (incl. §14 items 4 and 6) | `nbody`, `traits`, `borrowing`, closure tests |
 | **M4** | Tensors, maths library, `linalg`, FFT | `tensors`, matrix and FFT tests |
 | **M5** | Thread pool, `par for`/`par sum`/`par_chunks`, `spawn`/`join`, task panics | `parallel`, `integrate`; ≥3.5× on 4 cores |
 | **M6** | `tau build`/`run`/`test` integration, caching, error messages, docs, benchmark suite | all of the above, native by default |
+
+### What M1 changed in the plan
+
+- **No TIR yet.** The generator emits C straight from the checked AST, using GNU statement expressions
+  (`({ ... })`) so Tau's expression-oriented blocks, `if`, `match` and `loop ... break value` map directly,
+  and `goto` for `break`/`continue`. This is enough while everything is monomorphic and nothing needs
+  dropping; the TIR in §6 arrives with generics (M3) or drop elaboration (M2), whichever needs it first.
+- **Anything unsupported is reported, never miscompiled.** The generator returns `Unsupported("... milestone N")`
+  and `tau run` falls back to the interpreter (`-v` says why; `--native` makes it an error).
+- **Flags that matter for matching the interpreter**: `-ffp-contract=off` (no fused multiply-add),
+  `-fno-optimize-sibling-calls` (runaway recursion must overflow the stack and panic, not become a loop),
+  `-fwrapv`. Verified by `runaway_recursion_is_a_stack_overflow_panic`.
+- **Two interpreter/checker bugs found by the differential tests, fixed**: integer literals that do not fit
+  their type were silently accepted (`let a: i8 = 200`); they are now a compile error, with `-128i8` still
+  fine. `abs` of the most negative integer did not overflow.
+- **Float printing** needed more than "shortest `%.*e` that round-trips": at a power of two the interval of
+  values reading back as `x` is narrower below, so the right digits can be the *neighbour* of the correctly
+  rounded ones; and an exact tie must round up (Rust) where `printf` rounds to even. Both found by the fuzz.
+- **Sanitizers**: `TAU_CC=gcc TAU_SANITIZE=1 cargo test --test native` runs the whole differential suite
+  under UBSan and aborts on the first report (it found a stack buffer overflow in the float printer).
+  AddressSanitizer needs the runtime's 1 GB stack thread and alternate signal stack to be switched off in
+  sanitizer builds; planned for M2, when there is heap ownership worth checking.
+- **Known, accepted differences**: the native stack is 1 GB, so very deep (but finite) recursion that makes
+  the interpreter report a stack overflow still succeeds natively.
 
 M1 to M3 are the bulk of the work; M4 and M5 are mostly runtime code; M6 is polish.
 
