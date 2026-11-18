@@ -1736,7 +1736,7 @@ impl<'a> Cg<'a> {
             let v = v?;
             self.protos.push_str(&format!("static {ct} {name}(void);\n"));
             self.bodies.push_str(&format!(
-                "static {ct} {name}(void) {{\n{hoisted}  static int done; static {ct} v;\n  if (__atomic_load_n(&done, __ATOMIC_ACQUIRE)) return v;\n  pthread_mutex_lock(&tau_const_mu);\n  if (!done) {{ v = {v}; __atomic_store_n(&done, 1, __ATOMIC_RELEASE); }}\n  pthread_mutex_unlock(&tau_const_mu);\n  return v;\n}}\n"
+                "static {ct} {name}(void) {{\n{hoisted}  static int done; static {ct} v;\n  if (__atomic_load_n(&done, __ATOMIC_ACQUIRE)) return v;\n  tau_const_lock();\n  if (!done) {{ v = {v}; __atomic_store_n(&done, 1, __ATOMIC_RELEASE); }}\n  tau_const_unlock();\n  return v;\n}}\n"
             ));
         }
         Ok(format!("{name}()"))
@@ -2845,7 +2845,7 @@ static {vect} {top}({mt} *m, uint64_t n) {{
   if (m->len == 0 || n == 0) return r;
   size_t *idx = (size_t *)malloc(m->len * sizeof(size_t));
   for (size_t i = 0; i < m->len; i++) idx[i] = i;
-  qsort_r(idx, m->len, sizeof(size_t), {cmpf}, m);
+  tau_sort_idx(idx, m->len, {cmpf}, m);
   size_t cnt = n < m->len ? (size_t)n : m->len;
   r.ptr = ({pt} *)malloc(cnt * sizeof({pt}));
   r.len = r.cap = cnt;
