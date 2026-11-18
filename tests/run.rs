@@ -419,7 +419,8 @@ fn file_round_trip() {
     let path = dir.join("note.txt");
     let src = format!(
         "use std.fs\nfn main() -> Result<(), IoError> {{\n fs.write(\"{p}\", \"hello file\")?\n print(fs.exists(\"{p}\"))\n let t = fs.read(\"{p}\")?\n print(t)\n Ok(())\n}}",
-        p = path.display()
+        // forward slashes: a backslash would start an escape in a Tau string, and Windows accepts `/`
+        p = path.display().to_string().replace('\\', "/")
     );
     assert_eq!(out_prog(&src), "true\nhello file\n");
     std::fs::remove_dir_all(&dir).ok();
