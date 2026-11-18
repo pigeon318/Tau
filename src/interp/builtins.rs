@@ -89,7 +89,16 @@ impl<'a> Interp<'a> {
             }
             "atan2" => Ok(fl(self.f64_of(&a[0])?.atan2(self.f64_of(&a[1])?))),
             "abs" => Ok(match &a[0] {
-                Value::Int(i) => Value::Int(i.abs()),
+                Value::Int(i) => {
+                    let r = i.abs();
+                    if let Ty::Int(it) = ret {
+                        let (_, hi) = super::eval::int_range(*it);
+                        if r > hi {
+                            return panic(format!("integer overflow: {r} does not fit in {}", it.name()));
+                        }
+                    }
+                    Value::Int(r)
+                }
                 Value::Float(x) => Value::Float(x.abs()),
                 Value::Complex(p, q) => Value::Complex(p.hypot(*q), 0.0),
                 other => return panic(format!("cannot take abs of a {}", other.type_name())),

@@ -9,7 +9,11 @@ USAGE:
     tau parse <file> --ast     ... and print the full AST
     tau parse <file> --sexp    ... and print each top-level function body as an S-expression
     tau check <file>           type-check and borrow-check a file
-    tau run <file>             check a program and run it
+    tau run <file>             check a program and run it (natively when possible)
+    tau run <file> --native    ... natively only: fail if the program cannot be compiled to C
+    tau run <file> --interp    ... with the interpreter only
+    tau build <file>           compile a program to a native executable (cached) and print its path
+    tau build <file> --emit-c  print the generated C instead
     tau test <file> [filter]   run the #[test] functions (those whose name contains `filter`)
     tau check <file> --types   ... and list the inferred type of every binding
 ";
@@ -97,34 +101,38 @@ fn main() -> ExitCode {
                 }
             }
         },
-        "run" => {
-            let out = Box::new(std::io::BufWriter::new(std::io::stdout()));
-            match tau::run_source(&src, out) {
-                Err(d) => {
-                    eprint!("{}", d.render(&src, file));
-                    ExitCode::from(1)
+        "build" => match tau::native::emit_c(&src) {
+            Err(e) => report_native_error(&e, &src, file),
+            Ok(c) if flags.contains(&"--emit-c") => {
+                print!("{c}");
+                ExitCode::SUCCESS
+            }
+            Ok(c) => match tau::native::compile_c(&c) {
+                Ok(exe) => {
+                    println!("{}", exe.display());
+                    ExitCode::SUCCESS
                 }
-                Ok(r) if !r.diagnostics.is_empty() => {
-                    for d in &r.diagnostics {
-                        eprint!("{}", d.render(&src, file));
-                        eprintln!();
-                    }
-                    eprintln!("{} error(s); the program was not run", r.diagnostics.len());
-                    ExitCode::from(1)
-                }
-                Ok(r) => match r.outcome {
-                    Some(tau::interp::Outcome::Panic(m)) => {
-                        eprintln!("panic: {m}");
-                        ExitCode::from(101)
-                    }
-                    Some(tau::interp::Outcome::Error(m)) => {
-                        eprintln!("error: {m}");
-                        ExitCode::from(1)
-                    }
-                    _ => ExitCode::SUCCESS,
+                Err(e) => report_native_error(&e, &src, file),
+            },
+        },
+        "run" if !flags.contains(&"--interp") => {
+            let verbose = flags.contains(&"-v");
+            let forced = flags.contains(&"--native");
+            match tau::native::build_source(&src) {
+                Ok(exe) => match tau::native::exec(&exe) {
+                    Ok(code) => ExitCode::from(code as u8),
+                    Err(e) => report_native_error(&e, &src, file),
                 },
+                Err(tau::native::NativeError::Unsupported(why)) if !forced => {
+                    if verbose {
+                        eprintln!("note: running with the interpreter: {why}");
+                    }
+                    run_interpreted(&src, file)
+                }
+                Err(e) => report_native_error(&e, &src, file),
             }
         }
+        "run" => run_interpreted(&src, file),
         "test" => {
             let filter = args.get(2).map(String::as_str);
             match tau::test_source(&src, filter, u64::MAX) {
@@ -167,4 +175,50 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn run_interpreted(src: &str, file: &str) -> ExitCode {
+    let out = Box::new(std::io::BufWriter::new(std::io::stdout()));
+    match tau::run_source(&src, out) {
+        Err(d) => {
+            eprint!("{}", d.render(&src, file));
+            ExitCode::from(1)
+        }
+        Ok(r) if !r.diagnostics.is_empty() => {
+            for d in &r.diagnostics {
+                eprint!("{}", d.render(&src, file));
+                eprintln!();
+            }
+            eprintln!("{} error(s); the program was not run", r.diagnostics.len());
+            ExitCode::from(1)
+        }
+        Ok(r) => match r.outcome {
+            Some(tau::interp::Outcome::Panic(m)) => {
+                eprintln!("panic: {m}");
+                ExitCode::from(101)
+            }
+            Some(tau::interp::Outcome::Error(m)) => {
+                eprintln!("error: {m}");
+                ExitCode::from(1)
+            }
+            _ => ExitCode::SUCCESS,
+        },
+    }
+}
+
+fn report_native_error(e: &tau::native::NativeError, src: &str, file: &str) -> ExitCode {
+    use tau::native::NativeError::*;
+    match e {
+        Parse(d) => eprint!("{}", d.render(src, file)),
+        Rejected(ds) => {
+            for d in ds {
+                eprint!("{}", d.render(src, file));
+                eprintln!();
+            }
+            eprintln!("{} error(s); the program was not built", ds.len());
+        }
+        Unsupported(why) => eprintln!("error: {why}\nhint: `tau run --interp` runs it with the interpreter"),
+        Other(m) => eprintln!("error: {m}"),
+    }
+    ExitCode::from(1)
 }

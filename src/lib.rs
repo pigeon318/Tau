@@ -11,6 +11,7 @@ pub mod diag;
 pub mod infer;
 pub mod interp;
 pub mod lexer;
+pub mod native;
 pub mod parser;
 pub mod prelude;
 pub mod program;

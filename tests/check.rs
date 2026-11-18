@@ -61,6 +61,17 @@ fn integer_literals_default_to_i64() {
 }
 
 #[test]
+fn integer_literals_must_fit_their_type() {
+    em("let a: i8 = 200", "the literal `200` does not fit in `i8`");
+    em("let a: u8 = 256", "does not fit in `u8`");
+    em("let a: i8 = -129", "does not fit in `i8`");
+    em("let a = 9223372036854775808", "does not fit in `i64`");
+    em("let a: u8 = 1\nlet b = a + 300", "does not fit in `u8`");
+    // the extreme values themselves are fine, and so is negating a literal
+    ok("fn main() {\n let a: i8 = -128\n let b: i8 = 127\n let c: u8 = 255\n let d: i64 = -9223372036854775808\n let e: u128 = 340282366920938463463374607431768211455\n let f: i128 = -170141183460469231731687303715884105728\n}");
+}
+
+#[test]
 fn float_literals_default_to_f64() {
     assert_eq!(m("let x = 2.5", "x"), "f64");
 }

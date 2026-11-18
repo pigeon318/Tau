@@ -226,6 +226,9 @@ pub(crate) struct Body {
     pub obligations: Vec<Obligation>,
     pub touched: Vec<NodeKey>,
     pub touched_pats: Vec<NodeKey>,
+    /// Integer literals (node, value, span, directly negated?), checked against their final
+    /// type once inference is done.
+    pub int_lits: Vec<(NodeKey, u128, Span, bool)>,
     pub local_fns: Vec<HashMap<String, ValueItem>>,
     /// Index into `results.bindings` where this body's bindings start.
     pub bind_start: usize,
@@ -549,6 +552,23 @@ impl<'a> Checker<'a> {
                 self.results.expr_res.insert(k, Res::Variant(a, i, args));
             }
         }
+        let lits = std::mem::take(&mut self.body.int_lits);
+        if self.body.cx.module == self.user {
+            for (k, value, span, negated) in lits {
+                let Some(Ty::Int(it)) = self.results.expr_ty.get(&k).cloned() else { continue };
+                let (bits, signed) = int_shape(it);
+                let max: u128 = if signed { (1u128 << (bits - 1)) - 1 } else if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
+                let limit = if negated && signed { max + 1 } else { max };
+                if value > limit {
+                    let range = if signed {
+                        format!("-{} to {}", max + 1, max)
+                    } else {
+                        format!("0 to {max}")
+                    };
+                    self.err_hint(span, format!("the literal `{value}` does not fit in `{}`", it.name()), format!("`{}` holds {range}", it.name()));
+                }
+            }
+        }
         let pats = std::mem::take(&mut self.body.touched_pats);
         for k in pats {
             if let Some(t) = self.results.pat_ty.get(&k).cloned() {
@@ -578,5 +598,22 @@ impl<'a> Checker<'a> {
         }
         self.infer = Infer::default();
         self.body = Body::default();
+    }
+}
+
+/// Width in bits and signedness of an integer type.
+fn int_shape(it: IntTy) -> (u32, bool) {
+    use IntTy::*;
+    match it {
+        I8 => (8, true),
+        I16 => (16, true),
+        I32 => (32, true),
+        I64 | Isize => (64, true),
+        I128 => (128, true),
+        U8 => (8, false),
+        U16 => (16, false),
+        U32 => (32, false),
+        U64 | Usize => (64, false),
+        U128 => (128, false),
     }
 }
