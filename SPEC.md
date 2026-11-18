@@ -630,6 +630,41 @@ local variable or an `own` parameter.
 
 ---
 
+## 14d. Running programs (the interpreter)
+
+`tau run file.tau` checks a program (types, then borrowing) and, only if it is accepted, runs it.
+Errors stop it before anything executes. Exit codes: `0` normal, `1` rejected or `main` returned an
+`Err`, `101` panic.
+
+**Numbers.** Each integer type has its own range. Arithmetic that leaves the range **panics**
+("integer overflow") in every build; `as` between integer types wraps, from float to integer
+saturates (NaN gives 0), and division by zero panics. `f32` results are rounded to single precision.
+Integer `^` panics on a negative exponent. Floats print with `.0` when whole (`2.0`), otherwise as the
+shortest text that reads back exactly.
+
+**Values.** `Copy` aggregates (tuples, arrays, `impl Copy` structs) are copied when read from a
+variable; `Vec`, `String`, maps and tensors are moved, never copied. Arguments for `mut` parameters
+are references to the caller's variable, field or element, so assigning to a `mut` parameter
+replaces the caller's value. `for x in mut v` binds `x` to a reference to each element.
+
+**Maps.** `m[k]` on a missing key panics, except that `m[k] += x` starts a missing entry at zero.
+`top(n)` returns the `n` entries with the largest values, ties ordered by key.
+
+**Tensors** are stored column-major. `random` uses a fixed seed, so runs are reproducible.
+`math.linalg.eig` handles symmetric matrices only (Jacobi rotations), and `math.fft` uses a radix-2
+transform when the length is a power of two, otherwise the direct O(n^2) sum.
+
+**Concurrency.** `spawn`, `par for`, `par sum`... and `on` run **one after another on a single
+thread**: results are the same as a parallel run would give for programs the borrow checker accepts,
+but nothing is faster. A panic inside a task is reported by `join()` instead of ending the program.
+There is no cluster yet, so `on` runs locally.
+
+**Limits.** Deep recursion ends in a "stack overflow" panic rather than a crash. The interpreter is a
+tree walker: roughly 0.5 microseconds per simple expression, so about two million loop iterations per
+second. It exists to run and test programs; the native backend is where speed will come from.
+
+---
+
 ## 15. v1 scope and build plan
 
 ### In v1

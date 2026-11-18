@@ -1,7 +1,7 @@
 //! Tau: a low-level, math/science-focused language.
 //!
 //! Stage 1: lexer, parser and AST. Stage 2: name resolution and type checking.
-//! Stage 3: the borrow checker.
+//! Stage 3: the borrow checker. Then an interpreter, so programs can run.
 //! See `SPEC.md` for the language design.
 
 pub mod ast;
@@ -9,6 +9,7 @@ pub mod borrowck;
 pub mod check;
 pub mod diag;
 pub mod infer;
+pub mod interp;
 pub mod lexer;
 pub mod parser;
 pub mod prelude;
@@ -37,4 +38,44 @@ pub fn analyze_source(src: &str) -> Result<CheckResult, Diagnostic> {
     let user = parse_module(src)?;
     let lib = prelude::load();
     Ok(analyze(&lib, &user))
+}
+
+/// Stack for the interpreter thread (address space is reserved lazily).
+const STACK_BYTES: usize = 1 << 30;
+
+/// The result of `run_source`: either the program was rejected, or it ran.
+pub struct RunResult {
+    /// Type or borrow errors. If non-empty the program did not run.
+    pub diagnostics: Vec<Diagnostic>,
+    pub outcome: Option<interp::Outcome>,
+}
+
+/// Check and then run a program, writing its output to `out`. The interpreter runs on
+/// a thread with a large stack, because evaluating deeply recursive programs recurses
+/// in the host too.
+pub fn run_source(src: &str, out: Box<dyn std::io::Write + Send>) -> Result<RunResult, Diagnostic> {
+    run_source_limited(src, out, u64::MAX)
+}
+
+/// Like `run_source`, but the program is stopped with a panic after `max_steps`
+/// expressions have been evaluated (used to test programs that might not terminate).
+pub fn run_source_limited(src: &str, out: Box<dyn std::io::Write + Send>, max_steps: u64) -> Result<RunResult, Diagnostic> {
+    let src = src.to_string();
+    let worker = std::thread::Builder::new()
+        .stack_size(STACK_BYTES)
+        .spawn(move || -> Result<RunResult, Diagnostic> {
+            let user = parse_module(&src)?;
+            let lib = prelude::load();
+            let result = analyze(&lib, &user);
+            if !result.diagnostics.is_empty() {
+                return Ok(RunResult { diagnostics: result.diagnostics, outcome: None });
+            }
+            let paths = lib.iter().map(|m| m.path.clone()).collect();
+            let outcome = interp::run_main(&user, &result, paths, out, STACK_BYTES, max_steps);
+            Ok(RunResult { diagnostics: Vec::new(), outcome: Some(outcome) })
+        })
+        .expect("cannot start the interpreter thread");
+    worker.join().unwrap_or_else(|_| {
+        Ok(RunResult { diagnostics: Vec::new(), outcome: Some(interp::Outcome::Panic("the interpreter crashed".to_string())) })
+    })
 }

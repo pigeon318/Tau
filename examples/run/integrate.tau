@@ -1,0 +1,11 @@
+// Trapezoid rule for the integral of sin(x) from 0 to pi, in parallel.
+
+fn integrate(f: fn(f64) -> f64, a: f64, b: f64, n: usize) -> f64 {
+    let h = (b - a) / n as f64
+    let s = par sum(i in 1..n) f(a + i as f64 * h)
+    h * (s + 0.5 * (f(a) + f(b)))
+}
+
+fn main() {
+    print(integrate(|x| sin(x), 0.0, PI, 1000000))
+}

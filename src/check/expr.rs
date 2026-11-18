@@ -534,7 +534,7 @@ impl<'a> Checker<'a> {
         match self.lookup_body_value(name) {
             Some(ValueItem::Fn(fid)) => {
                 let inst = self.instantiate(fid, &[], explicit, e.span);
-                self.record_res(e, Res::Fn(fid, inst.subst.iter().map(|s| s.1.clone()).collect()));
+                self.record_res(e, Res::Fn(fid, inst.subst.clone()));
                 Ty::Fn(inst.params.into_iter().map(|p| p.2).collect(), Box::new(inst.ret))
             }
             Some(ValueItem::Const(cid)) => {
@@ -761,7 +761,7 @@ impl<'a> Checker<'a> {
         }
         let name = format!("`{}`", self.prog.fn_(fid).name);
         self.check_args(args, &inst.params, span, &name);
-        let tys = inst.subst.iter().map(|s| s.1.clone()).collect();
+        let tys = inst.subst.clone();
         self.record_res(node, Res::Fn(fid, tys));
         if is_callee {
             let fn_ty = Ty::Fn(inst.params.iter().map(|p| p.2.clone()).collect(), Box::new(inst.ret.clone()));
@@ -926,7 +926,7 @@ impl<'a> Checker<'a> {
         }
         let what = format!("method `{}`", name.name);
         self.check_args(args, &inst.params, e.span, &what);
-        let tys = inst.subst.iter().map(|s| s.1.clone()).collect();
+        let tys = inst.subst.clone();
         self.record_res(e, Res::Fn(pick.fn_id, tys));
         inst.ret
     }
@@ -981,6 +981,11 @@ impl<'a> Checker<'a> {
                     self.expr_coerce(a, &Ty::usize());
                 }
                 let _ = elem;
+                self.record_res(e, Res::Builtin(match name.name.as_str() {
+                    "zeros" => "tensor.zeros",
+                    "ones" => "tensor.ones",
+                    _ => "tensor.random",
+                }));
                 return ty.clone();
             }
         }
@@ -1016,7 +1021,7 @@ impl<'a> Checker<'a> {
                     }
                     Some(ValueItem::Fn(fid)) => {
                         let inst = self.instantiate(fid, &[], None, e.span);
-                        self.record_res(e, Res::Fn(fid, inst.subst.iter().map(|s| s.1.clone()).collect()));
+                        self.record_res(e, Res::Fn(fid, inst.subst.clone()));
                         Ty::Fn(inst.params.into_iter().map(|p| p.2).collect(), Box::new(inst.ret))
                     }
                     _ => {
@@ -1149,7 +1154,7 @@ impl<'a> Checker<'a> {
                 let it = self.expr(&indices[0], None);
                 match self.lookup_op("Index", &st, Some(&it), e.span) {
                     Some((fid, inst)) => {
-                        let tys = inst.subst.iter().map(|s| s.1.clone()).collect();
+                        let tys = inst.subst.clone();
                         self.record_res(e, Res::Fn(fid, tys));
                         inst.ret
                     }
@@ -1416,7 +1421,7 @@ impl<'a> Checker<'a> {
                 Ty::Tensor(..) | Ty::Error => st,
                 Ty::Adt(..) | Ty::Param(_) => match self.lookup_op("Neg", &st, None, e.span) {
                     Some((fid, inst)) => {
-                        let tys = inst.subst.iter().map(|s| s.1.clone()).collect();
+                        let tys = inst.subst.clone();
                         self.record_res(e, Res::Fn(fid, tys));
                         inst.ret
                     }
@@ -1465,7 +1470,7 @@ impl<'a> Checker<'a> {
                 let tn = if is_eq { "Eq" } else { "Ord" };
                 return match self.lookup_op(tn, &l, Some(&r), e.span) {
                     Some((fid, inst)) => {
-                        let tys = inst.subst.iter().map(|s| s.1.clone()).collect();
+                        let tys = inst.subst.clone();
                         self.record_res(e, Res::Fn(fid, tys));
                         Ty::Bool
                     }
@@ -1534,7 +1539,7 @@ impl<'a> Checker<'a> {
         if matches!(l, Ty::Adt(..) | Ty::Param(_)) {
             return match self.lookup_op(tn, &l, Some(&r), e.span) {
                 Some((fid, inst)) => {
-                    let tys = inst.subst.iter().map(|s| s.1.clone()).collect();
+                    let tys = inst.subst.clone();
                     self.record_res(e, Res::Fn(fid, tys));
                     inst.ret
                 }

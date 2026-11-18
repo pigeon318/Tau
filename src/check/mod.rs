@@ -31,6 +31,29 @@ use crate::types::Dim;
 
 // ------------------------------------------------------------------ public results
 
+/// A fast hasher for `NodeKey`s: they are addresses, so there is nothing to defend
+/// against, and the interpreter looks them up for every expression it evaluates.
+#[derive(Default, Clone, Copy)]
+pub struct PtrHasher(u64);
+
+impl std::hash::Hasher for PtrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0 ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    fn write_usize(&mut self, n: usize) {
+        let k = ((n as u64) >> 3).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = k ^ (k >> 32);
+    }
+}
+
+/// A map keyed by AST node.
+pub type NodeMap<V> = HashMap<NodeKey, V, std::hash::BuildHasherDefault<PtrHasher>>;
+
 /// Identifies an AST node by address.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeKey(pub usize);
@@ -45,9 +68,11 @@ impl NodeKey {
 #[derive(Clone, Debug)]
 pub enum Res {
     Local(u32),
-    /// A function, method or overloaded operator, with its generic arguments
-    /// (the impl's/trait's generics first, then the function's own).
-    Fn(FnId, Vec<Ty>),
+    /// A function, method or overloaded operator, with the types its generic
+    /// parameters were instantiated to (the impl's/trait's first, then its own).
+    Fn(FnId, Vec<(GenericId, Ty)>),
+    /// A construct the runtime implements directly (tensor constructors).
+    Builtin(&'static str),
     Const(ConstId),
     StructCtor(AdtId, Vec<Ty>),
     Variant(AdtId, usize, Vec<Ty>),
@@ -63,12 +88,14 @@ pub struct Binding {
 
 #[derive(Default, Debug)]
 pub struct Results {
-    pub expr_ty: HashMap<NodeKey, Ty>,
-    pub expr_res: HashMap<NodeKey, Res>,
+    pub expr_ty: NodeMap<Ty>,
+    pub expr_res: NodeMap<Res>,
     /// The type of every pattern (and so of every binding it introduces).
-    pub pat_ty: HashMap<NodeKey, Ty>,
+    pub pat_ty: NodeMap<Ty>,
     /// Which function each `fn` declaration became.
-    pub fn_decl: HashMap<NodeKey, FnId>,
+    pub fn_decl: NodeMap<FnId>,
+    /// Which constant each `const` declaration became.
+    pub const_decl: NodeMap<ConstId>,
     /// Every binding (parameters, `let`s, pattern variables) in the user's module.
     pub bindings: Vec<Binding>,
 }
@@ -479,7 +506,7 @@ impl<'a> Checker<'a> {
                 self.results.expr_ty.insert(k, r);
             }
             if let Some(Res::Fn(f, args)) = self.results.expr_res.get(&k).cloned() {
-                let args = args.iter().map(|a| self.infer.zonk(a)).collect();
+                let args = args.iter().map(|(g, a)| (*g, self.infer.zonk(a))).collect();
                 self.results.expr_res.insert(k, Res::Fn(f, args));
             }
             if let Some(Res::StructCtor(a, args)) = self.results.expr_res.get(&k).cloned() {
