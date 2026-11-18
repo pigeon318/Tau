@@ -15,7 +15,7 @@ accepted. A **native backend** (Tau to C, compiled by the system `clang` or `gcc
 everything except `on` blocks and a few corner cases: scalars, structs, enums, generics, traits, closures,
 `Vec`/`String`/arrays/slices/`Map`, tensors, complex numbers, linear algebra, FFT, files, ownership, checked
 arithmetic, and `par for`/`par sum`/`spawn` on a thread pool whose results never depend on the number of
-cores. It is typically 50 to 100 times faster than the interpreter, which remains the reference and the
+cores. It is typically 10 to 200 times faster than the interpreter, which remains the reference and the
 fallback (used automatically when a program needs something native cannot do, or no C compiler is installed).
 See [`docs/native/DESIGN.md`](docs/native/DESIGN.md).
 

@@ -704,7 +704,7 @@ locally (on the interpreter).
 **Limits.** Deep recursion ends in a "stack overflow" panic rather than a crash. The interpreter is a
 tree walker: roughly 0.5 microseconds per simple expression, so about two million loop iterations per
 second. It exists as the reference and for programs the native backend cannot build; the native backend runs
-typically 50 to 100 times faster (see `examples/bench/`).
+typically 10 to 200 times faster (see `examples/bench/`).
 
 ---
 
