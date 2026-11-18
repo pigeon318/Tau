@@ -1,0 +1,9 @@
+// error: cannot move `p.name`
+// Parameters are borrowed by default, so their contents cannot be taken.
+// Declare `own p: Person` to take ownership.
+
+struct Person { name: String, age: i64 }
+
+fn take_name(p: Person) -> String {
+    p.name
+}

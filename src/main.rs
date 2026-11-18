@@ -1,14 +1,16 @@
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-tau (stage 2: parser and type checker)
+tau (parser, type checker, borrow checker and interpreter)
 
 USAGE:
     tau tokens <file>          print the token stream
     tau parse <file>           check that a file parses
     tau parse <file> --ast     ... and print the full AST
     tau parse <file> --sexp    ... and print each top-level function body as an S-expression
-    tau check <file>           type-check a file
+    tau check <file>           type-check and borrow-check a file
+    tau run <file>             check a program and run it
+    tau test <file> [filter]   run the #[test] functions (those whose name contains `filter`)
     tau check <file> --types   ... and list the inferred type of every binding
 ";
 
@@ -66,7 +68,7 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        "check" => match tau::check_source(&src) {
+        "check" => match tau::analyze_source(&src) {
             Err(d) => {
                 eprint!("{}", d.render(&src, file));
                 ExitCode::from(1)
@@ -95,6 +97,71 @@ fn main() -> ExitCode {
                 }
             }
         },
+        "run" => {
+            let out = Box::new(std::io::BufWriter::new(std::io::stdout()));
+            match tau::run_source(&src, out) {
+                Err(d) => {
+                    eprint!("{}", d.render(&src, file));
+                    ExitCode::from(1)
+                }
+                Ok(r) if !r.diagnostics.is_empty() => {
+                    for d in &r.diagnostics {
+                        eprint!("{}", d.render(&src, file));
+                        eprintln!();
+                    }
+                    eprintln!("{} error(s); the program was not run", r.diagnostics.len());
+                    ExitCode::from(1)
+                }
+                Ok(r) => match r.outcome {
+                    Some(tau::interp::Outcome::Panic(m)) => {
+                        eprintln!("panic: {m}");
+                        ExitCode::from(101)
+                    }
+                    Some(tau::interp::Outcome::Error(m)) => {
+                        eprintln!("error: {m}");
+                        ExitCode::from(1)
+                    }
+                    _ => ExitCode::SUCCESS,
+                },
+            }
+        }
+        "test" => {
+            let filter = args.get(2).map(String::as_str);
+            match tau::test_source(&src, filter, u64::MAX) {
+                Err(d) => {
+                    eprint!("{}", d.render(&src, file));
+                    ExitCode::from(1)
+                }
+                Ok(r) if !r.diagnostics.is_empty() => {
+                    for d in &r.diagnostics {
+                        eprint!("{}", d.render(&src, file));
+                        eprintln!();
+                    }
+                    eprintln!("{} error(s); no tests were run", r.diagnostics.len());
+                    ExitCode::from(1)
+                }
+                Ok(r) => {
+                    println!("running {} test{}", r.results.len(), if r.results.len() == 1 { "" } else { "s" });
+                    for t in &r.results {
+                        println!("test {} ... {}", t.name, if t.passed { "ok" } else { "FAILED" });
+                    }
+                    let failed: Vec<_> = r.results.iter().filter(|t| !t.passed).collect();
+                    if !failed.is_empty() {
+                        println!("\nfailures:");
+                        for t in &failed {
+                            println!("\n---- {} ----", t.name);
+                            if !t.output.is_empty() {
+                                print!("{}", t.output);
+                            }
+                            println!("{}", t.message);
+                        }
+                    }
+                    let passed = r.results.len() - failed.len();
+                    println!("\ntest result: {}. {} passed; {} failed", if failed.is_empty() { "ok" } else { "FAILED" }, passed, failed.len());
+                    if failed.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(1) }
+                }
+            }
+        }
         _ => {
             eprint!("{USAGE}");
             ExitCode::from(2)

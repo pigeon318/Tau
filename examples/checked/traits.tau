@@ -40,7 +40,7 @@ impl Eq for Dog {
     fn eq(self, o: Dog) -> bool { self.age == o.age }
 }
 
-fn largest<T: Ord>(a: T, b: T) -> T {
+fn largest<T: Ord>(own a: T, own b: T) -> T {
     if a < b { b } else { a }
 }
 

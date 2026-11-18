@@ -1,0 +1,9 @@
+// error: cannot borrow `v` as mutable
+// The closure `len` reads `v`, so `v` is borrowed for as long as `len` is used.
+
+fn main() {
+    let mut v = vec[1, 2, 3]
+    let len = || v.len
+    v.push(4)
+    print(len())
+}
