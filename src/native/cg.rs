@@ -36,11 +36,16 @@ struct Local {
     ty: Ty,
     /// A `mut` parameter: the C variable is a pointer to the caller's value.
     by_ptr: bool,
+    /// This local owns heap memory and is dropped when its scope ends (unless moved out,
+    /// which zeroes it, so dropping is always safe).
+    owns: bool,
 }
 
 struct LoopCtx {
     brk: String,
     cont: String,
+    /// `scopes.len()` when the loop started: `break`/`continue` drop everything above it.
+    depth: usize,
     /// The C variable holding the value of a `loop ... break value`.
     result: Option<String>,
 }
@@ -77,6 +82,11 @@ pub struct Cg<'a> {
     cur_ret: Ty,
     /// The generic arguments of the instance being generated.
     sub: Subst,
+    /// Declarations of temporaries hoisted to the top of the current function.
+    hoisted: String,
+    /// Temporaries (name, type) created while compiling the current statement; dropped when
+    /// it ends.
+    temps: Vec<Vec<(String, Ty)>>,
 }
 
 /// Translate a checked program to a complete C source file (runtime included).
@@ -99,6 +109,8 @@ pub fn translate(user: &Module, check: &CheckResult) -> Result<String, NativeErr
         loops: Vec::new(),
         cur_ret: Ty::unit(),
         sub: Vec::new(),
+        hoisted: String::new(),
+        temps: Vec::new(),
     };
     for item in &user.items {
         cg.register_item(item);
@@ -202,10 +214,19 @@ impl<'a> Cg<'a> {
                 let parts: CgResult<Vec<String>> = ts.iter().map(|t| self.mangle(t)).collect();
                 format!("T{}_{}", ts.len(), parts?.join("_"))
             }
+            Ty::Array(t, Some(n)) => format!("A{n}_{}", self.mangle(t)?),
+            Ty::Slice(t) => format!("S_{}", self.mangle(t)?),
             Ty::Adt(id, args) => {
                 let def = self.prog.adt(*id);
-                if def.module == 0 && matches!(def.name.as_str(), "Vec" | "String" | "Range" | "Ptr" | "Task" | "Cluster" | "Map") {
-                    return unsupported(self.describe(ty));
+                if def.module == 0 {
+                    match def.name.as_str() {
+                        "String" => return Ok("String".to_string()),
+                        "Vec" => return Ok(format!("Vec_{}", self.mangle(&args[0])?)),
+                        "Range" | "Ptr" | "Task" | "Cluster" | "Map" | "IoError" | "TaskPanicked" => {
+                            return unsupported(self.describe(ty));
+                        }
+                        _ => {}
+                    }
                 }
                 let mut s = format!("{}{}", def.name, id.0);
                 for a in args {
@@ -269,6 +290,43 @@ impl<'a> Cg<'a> {
                 self.type_names.insert(key, name.clone());
                 name
             }
+            Ty::Array(t, Some(n)) => {
+                let key = self.mangle(ty)?;
+                if let Some(nm) = self.type_names.get(&key) {
+                    return Ok(nm.clone());
+                }
+                let et = self.cty(t)?;
+                let name = format!("arr_{key}");
+                self.types.push_str(&format!("typedef struct {{ {et} v[{}]; }} {name};\n", (*n).max(1)));
+                self.type_names.insert(key, name.clone());
+                name
+            }
+            Ty::Slice(t) => {
+                let key = self.mangle(ty)?;
+                if let Some(nm) = self.type_names.get(&key) {
+                    return Ok(nm.clone());
+                }
+                let et = self.cty(t)?;
+                let name = format!("sl_{key}");
+                self.types.push_str(&format!("typedef struct {{ {et} *ptr; size_t len; }} {name};\n"));
+                self.type_names.insert(key, name.clone());
+                name
+            }
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "String") => {
+                let _ = args;
+                "tau_buf".to_string()
+            }
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Vec") => {
+                let key = self.mangle(ty)?;
+                if let Some(nm) = self.type_names.get(&key) {
+                    return Ok(nm.clone());
+                }
+                let et = self.cty(&args[0])?;
+                let name = format!("vec_{key}");
+                self.types.push_str(&format!("typedef struct {{ {et} *ptr; size_t len, cap; }} {name};\n"));
+                self.type_names.insert(key, name.clone());
+                name
+            }
             Ty::Adt(id, args) => {
                 let key = self.mangle(ty)?;
                 if let Some(n) = self.type_names.get(&key) {
@@ -313,6 +371,161 @@ impl<'a> Cg<'a> {
             }
             other => return unsupported(self.describe(other)),
         })
+    }
+
+    fn is_builtin_adt(&self, id: AdtId, name: &str) -> bool {
+        let d = self.prog.adt(id);
+        d.module == 0 && d.name == name
+    }
+
+    fn vec_elem(&self, ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Vec") => Some(args[0].clone()),
+            _ => None,
+        }
+    }
+
+    fn is_string(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Adt(id, _) if self.is_builtin_adt(*id, "String"))
+    }
+
+    // ------------------------------------------------------------ ownership
+
+    /// Does a value of this type own heap memory that must be freed?
+    fn needs_drop(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Tuple(ts) => ts.iter().any(|t| self.needs_drop(t)),
+            Ty::Array(t, _) => self.needs_drop(t),
+            Ty::Adt(id, args) => {
+                let d = self.prog.adt(*id);
+                if d.module == 0 && matches!(d.name.as_str(), "String" | "Vec" | "Map") {
+                    return true;
+                }
+                self.adt_fields(*id, args).iter().flatten().any(|t| self.needs_drop(t))
+            }
+            _ => false,
+        }
+    }
+
+    /// The name of the function that frees a value of this type (and zeroes it), generating
+    /// it on first use. `None` when the type owns nothing.
+    fn drop_fn(&mut self, ty: &Ty) -> CgResult<Option<String>> {
+        if !self.needs_drop(ty) {
+            return Ok(None);
+        }
+        let m = self.mangle(ty)?;
+        let name = format!("tau_drop_{m}");
+        if !self.helpers.insert(name.clone()) {
+            return Ok(Some(name));
+        }
+        let ct = self.cty(ty)?;
+        self.protos.push_str(&format!("static void {name}({ct} *p);\n"));
+        let mut body = String::new();
+        match ty {
+            Ty::Tuple(ts) => {
+                for (i, t) in ts.iter().enumerate() {
+                    if let Some(f) = self.drop_fn(t)? {
+                        body.push_str(&format!("{f}(&p->f{i});\n"));
+                    }
+                }
+            }
+            Ty::Array(t, Some(n)) => {
+                if let Some(f) = self.drop_fn(t)? {
+                    body.push_str(&format!("for (size_t i = 0; i < {n}; i++) {f}(&p->v[i]);\n"));
+                }
+            }
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "String") => {
+                let _ = args;
+                body.push_str("free(p->ptr);\n");
+            }
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Vec") => {
+                if let Some(f) = self.drop_fn(&args[0])? {
+                    body.push_str(&format!("for (size_t i = 0; i < p->len; i++) {f}(&p->ptr[i]);\n"));
+                }
+                body.push_str("free(p->ptr);\n");
+            }
+            Ty::Adt(id, args) => {
+                let all = self.adt_fields(*id, args);
+                if self.is_enum(*id) {
+                    body.push_str("switch (p->tag) {\n");
+                    for (vi, fields) in all.iter().enumerate() {
+                        let mut inner = String::new();
+                        for (i, t) in fields.iter().enumerate() {
+                            if let Some(f) = self.drop_fn(t)? {
+                                inner.push_str(&format!("{f}(&p->u.v{vi}.f{i}); "));
+                            }
+                        }
+                        if !inner.is_empty() {
+                            body.push_str(&format!("case {vi}: {inner}break;\n"));
+                        }
+                    }
+                    body.push_str("default: break;\n}\n");
+                } else {
+                    for (i, t) in all[0].iter().enumerate() {
+                        if let Some(f) = self.drop_fn(t)? {
+                            body.push_str(&format!("{f}(&p->f{i});\n"));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        body.push_str(&format!("memset(p, 0, sizeof({ct}));\n"));
+        self.bodies.push_str(&format!("static void {name}({ct} *p) {{\n{body}}}\n"));
+        Ok(Some(name))
+    }
+
+    /// A statement dropping the value in the C lvalue `place` (empty if the type owns nothing).
+    fn drop_stmt(&mut self, place: &str, ty: &Ty) -> CgResult<String> {
+        Ok(match self.drop_fn(ty)? {
+            Some(f) => format!("{f}(&{place}); "),
+            None => String::new(),
+        })
+    }
+
+    /// Statements dropping every owning local in `scopes[from..]`, innermost first.
+    fn scope_drops(&mut self, from: usize) -> CgResult<String> {
+        let mut locals = Vec::new();
+        for sc in self.scopes[from.min(self.scopes.len())..].iter().rev() {
+            for l in sc.iter().rev() {
+                if l.owns {
+                    locals.push((l.cname.clone(), l.ty.clone()));
+                }
+            }
+        }
+        let mut out = String::new();
+        for (c, t) in locals {
+            out.push_str(&self.drop_stmt(&c, &t)?);
+        }
+        Ok(out)
+    }
+
+    /// Run `f` collecting the temporaries it creates; returns its result and the statements
+    /// that drop those temporaries.
+    fn with_temps<R>(&mut self, f: impl FnOnce(&mut Self) -> CgResult<R>) -> CgResult<(R, String)> {
+        self.temps.push(Vec::new());
+        let r = f(self);
+        let made = self.temps.pop().unwrap_or_default();
+        let r = r?;
+        let mut drops = String::new();
+        for (name, ty) in made.into_iter().rev() {
+            drops.push_str(&self.drop_stmt(&name, &ty)?);
+        }
+        Ok((r, drops))
+    }
+
+    /// A hoisted, zero-initialised temporary of type `ty`, dropped at the end of the current
+    /// statement. Returns its C name.
+    fn new_temp(&mut self, ty: &Ty) -> CgResult<String> {
+        let ct = self.cty(ty)?;
+        let name = self.fresh("tmp");
+        self.hoisted.push_str(&format!("  {ct} {name} = {{0}};\n"));
+        if self.needs_drop(ty) {
+            if let Some(last) = self.temps.last_mut() {
+                last.push((name.clone(), ty.clone()));
+            }
+        }
+        Ok(name)
     }
 
     /// Name used in the runtime's per-integer-type helpers (`tau_add_i64`, ...).
@@ -385,6 +598,7 @@ impl<'a> Cg<'a> {
         mode == ParamMode::Mut && !matches!(ty, Ty::Slice(_) | Ty::Str)
     }
 
+
     fn gen_fn(&mut self, inst: Inst) -> CgResult<()> {
         let def = self.prog.fn_(inst.fid).clone();
         let Some(decl) = self.decls.get(&inst.fid).copied() else {
@@ -399,6 +613,8 @@ impl<'a> Cg<'a> {
         self.scopes.clear();
         self.scopes.push(Vec::new());
         self.loops.clear();
+        self.temps.clear();
+        self.hoisted.clear();
         self.cur_ret = ret_ty.clone();
         let mut params = Vec::new();
         if let Some(mode) = def.sig.self_mode {
@@ -407,7 +623,8 @@ impl<'a> Cg<'a> {
             let cname = self.fresh("p_self");
             let ptr = Self::by_ptr(mode, &st);
             params.push(if ptr { format!("{ct} *{cname}") } else { format!("{ct} {cname}") });
-            self.scopes.last_mut().unwrap().push(Local { name: "self".to_string(), cname, ty: st, by_ptr: ptr });
+            let owns = mode == ParamMode::Own && self.needs_drop(&st);
+            self.scopes.last_mut().unwrap().push(Local { name: "self".to_string(), cname, ty: st, by_ptr: ptr, owns });
         }
         for (p, pd) in decl.params.iter().filter(|p| p.name.name != "self").zip(&def.sig.params) {
             let ty = pd.ty.subst(&self.sub);
@@ -415,22 +632,27 @@ impl<'a> Cg<'a> {
             let cname = self.fresh(&format!("p_{}", p.name.name));
             let ptr = Self::by_ptr(pd.mode, &ty);
             params.push(if ptr { format!("{ct} *{cname}") } else { format!("{ct} {cname}") });
-            self.scopes.last_mut().unwrap().push(Local { name: p.name.name.clone(), cname, ty, by_ptr: ptr });
+            let owns = pd.mode == ParamMode::Own && self.needs_drop(&ty);
+            self.scopes.last_mut().unwrap().push(Local { name: p.name.name.clone(), cname, ty, by_ptr: ptr, owns });
         }
         let plist = if params.is_empty() { "void".to_string() } else { params.join(", ") };
         let value = self.block_value(body)?;
         let body_ty = self.block_ty(body);
+        let pdrops = self.scope_drops(0)?;
         let tail = if Self::is_unit(&ret_ty) || Self::is_never(&ret_ty) {
-            format!("(void)({value}); return 0;")
+            format!("(void)({value}); {pdrops}return 0;")
         } else if Self::is_never(&body_ty) {
             format!("(void)({value}); tau_panic_cstr(\"unreachable\");")
-        } else {
+        } else if pdrops.is_empty() {
             format!("return {value};")
+        } else {
+            format!("{ret_c} r_ = {value}; {pdrops}return r_;")
         };
         self.scopes.clear();
         self.sub.clear();
+        let hoisted = std::mem::take(&mut self.hoisted);
         self.protos.push_str(&format!("static {ret_c} {}({plist});\n", inst.name));
-        self.bodies.push_str(&format!("static {ret_c} {}({plist}) {{\n  {tail}\n}}\n", inst.name));
+        self.bodies.push_str(&format!("static {ret_c} {}({plist}) {{\n{hoisted}  {tail}\n}}\n", inst.name));
         Ok(())
     }
 
@@ -449,7 +671,17 @@ impl<'a> Cg<'a> {
 
     fn declare(&mut self, name: &str, ty: Ty) -> Local {
         let cname = self.fresh(name);
-        let l = Local { name: name.to_string(), cname, ty, by_ptr: false };
+        let l = Local { name: name.to_string(), cname, ty, by_ptr: false, owns: false };
+        self.scopes.last_mut().unwrap().push(l.clone());
+        l
+    }
+
+    /// Like `declare`, for a local that owns its value (a `let`, or a by-value binding out of
+    /// an owned temporary): it is dropped at the end of its scope.
+    fn declare_owned(&mut self, name: &str, ty: Ty) -> Local {
+        let cname = self.fresh(name);
+        let owns = self.needs_drop(&ty);
+        let l = Local { name: name.to_string(), cname, ty, by_ptr: false, owns };
         self.scopes.last_mut().unwrap().push(l.clone());
         l
     }
@@ -471,6 +703,7 @@ impl<'a> Cg<'a> {
         }
     }
 
+
     fn block_value(&mut self, b: &'a Block) -> CgResult<String> {
         self.scopes.push(Vec::new());
         for s in &b.stmts {
@@ -483,50 +716,89 @@ impl<'a> Cg<'a> {
         }
         let mut out = String::from("({ ");
         let n = b.stmts.len();
-        let mut tail: Option<String> = None;
+        let mut tail: Option<(String, String, Ty)> = None;
         for (i, s) in b.stmts.iter().enumerate() {
             match s {
-                Stmt::Let { pat, init, .. } => out.push_str(&self.let_stmt(pat, init.as_ref())?),
+                Stmt::Let { pat, init, .. } => {
+                    let code = self.let_stmt(pat, init.as_ref())?;
+                    out.push_str(&code);
+                }
                 Stmt::Expr(e) => {
-                    let v = self.expr(e)?;
+                    let ety = self.ty_of(e);
                     if i + 1 == n {
-                        tail = Some(v);
+                        let (v, drops) = self.with_temps(|c| c.owned(e))?;
+                        tail = Some((v, drops, ety));
                     } else {
-                        out.push_str(&format!("(void)({v});\n"));
+                        let (v, drops) = self.with_temps(|c| c.owned(e))?;
+                        if self.needs_drop(&ety) {
+                            let ct = self.cty(&ety)?;
+                            let t = self.fresh("dv");
+                            let d = self.drop_stmt(&t, &ety)?;
+                            out.push_str(&format!("{{ {ct} {t} = {v}; {d}}} {drops}\n"));
+                        } else {
+                            out.push_str(&format!("(void)({v}); {drops}\n"));
+                        }
                     }
                 }
                 Stmt::Item(_) => {}
             }
         }
+        let sdrops = self.scope_drops(self.scopes.len() - 1)?;
         self.scopes.pop();
-        out.push_str(&tail.unwrap_or_else(|| "((tau_unit)0)".to_string()));
-        out.push_str("; })");
+        match tail {
+            None => {
+                out.push_str(&sdrops);
+                out.push_str("((tau_unit)0); })");
+            }
+            Some((v, drops, ety)) => {
+                if drops.is_empty() && sdrops.is_empty() {
+                    out.push_str(&v);
+                    out.push_str("; })");
+                } else if Self::is_unit(&ety) || Self::is_never(&ety) {
+                    out.push_str(&format!("(void)({v}); {drops}{sdrops}((tau_unit)0); }})"));
+                } else {
+                    let ct = self.cty(&ety)?;
+                    let r = self.fresh("bv");
+                    out.push_str(&format!("{ct} {r} = {v}; {drops}{sdrops}{r}; }})"));
+                }
+            }
+        }
         Ok(out)
     }
+
 
     fn let_stmt(&mut self, pat: &'a Pattern, init: Option<&'a Expr>) -> CgResult<String> {
         let ty = self.pat_ty(pat);
         let ct = self.cty(&ty)?;
         match init {
             Some(e) => {
-                let v = self.expr(e)?;
+                if matches!(pat.kind, PatKind::Wild) && self.is_place(e) {
+                    // `let _ = place` neither moves nor drops it
+                    let v = self.expr(e)?;
+                    return Ok(format!("(void)({v});\n"));
+                }
+                let (v, drops) = self.with_temps(|c| c.convert(e, &ty))?;
                 match &pat.kind {
                     PatKind::Ident { name, .. } => {
-                        let l = self.declare(name, ty);
-                        Ok(format!("{ct} {} = {v};\n", l.cname))
+                        let l = self.declare_owned(name, ty);
+                        Ok(format!("{ct} {} = {v}; {drops}\n", l.cname))
                     }
-                    PatKind::Wild => Ok(format!("(void)({v});\n")),
+                    PatKind::Wild => {
+                        let t = self.fresh("dv");
+                        let d = self.drop_stmt(&t, &ty)?;
+                        Ok(format!("{{ {ct} {t} = {v}; {d}}} {drops}\n"))
+                    }
                     _ => {
-                        let tmp = self.fresh("let");
-                        let mut s = format!("{ct} {tmp} = {v};\n");
-                        self.bind_irrefutable(pat, &tmp, &ty, &mut s)?;
+                        let tmp = self.declare_owned("let", ty.clone());
+                        let mut s = format!("{ct} {} = {v}; {drops}\n", tmp.cname);
+                        self.bind_irrefutable(pat, &tmp.cname, &ty, &mut s)?;
                         Ok(s)
                     }
                 }
             }
             None => match &pat.kind {
                 PatKind::Ident { name, .. } => {
-                    let l = self.declare(name, ty);
+                    let l = self.declare_owned(name, ty);
                     Ok(format!("{ct} {} = ({ct}){{0}};\n", l.cname))
                 }
                 _ => unsupported("an uninitialised destructuring `let`"),
@@ -534,14 +806,18 @@ impl<'a> Cg<'a> {
         }
     }
 
-    /// Bind a pattern that always matches (`let (a, b) = ...`, `let Point(x, y) = ...`).
+
     fn bind_irrefutable(&mut self, pat: &'a Pattern, access: &str, ty: &Ty, out: &mut String) -> CgResult<()> {
         match &pat.kind {
             PatKind::Wild => Ok(()),
             PatKind::Ident { name, .. } => {
                 let ct = self.cty(ty)?;
-                let l = self.declare(name, ty.clone());
+                // the value is moved out of the (owned) source, which is zeroed in that place
+                let l = self.declare_owned(name, ty.clone());
                 out.push_str(&format!("{ct} {} = {access};\n", l.cname));
+                if l.owns {
+                    out.push_str(&format!("memset(&{access}, 0, sizeof({ct}));\n"));
+                }
                 Ok(())
             }
             PatKind::Tuple(ps) => {
@@ -568,12 +844,31 @@ impl<'a> Cg<'a> {
 
     // ------------------------------------------------------------ expression helpers
 
-    /// A place that can be assigned to or borrowed `mut`: its C lvalue text.
+
     fn place(&mut self, e: &'a Expr) -> CgResult<(String, Ty)> {
         match &e.kind {
             ExprKind::Ident(name) => {
                 let Some(l) = self.lookup(name) else { return unsupported(format!("assigning to `{name}`")) };
                 Ok((if l.by_ptr { format!("(*{})", l.cname) } else { l.cname.clone() }, l.ty))
+            }
+            ExprKind::MutBorrow(inner) => self.place(inner),
+            ExprKind::Index { base, indices } if indices.len() == 1 && !matches!(indices[0].kind, ExprKind::Range { .. }) => {
+                let bt = self.ty_of(base);
+                let elem = match &bt {
+                    Ty::Array(t, Some(_)) | Ty::Slice(t) => (**t).clone(),
+                    other => match self.vec_elem(other) {
+                        Some(t) => t,
+                        None => return unsupported("indexing this type (milestone 4)"),
+                    },
+                };
+                let (b, _) = self.place(base)?;
+                let view = self.view(&b, &bt)?;
+                let vt = self.cty(&Ty::Slice(Box::new(elem.clone())))?;
+                let it = self.expr(&indices[0])?;
+                Ok((
+                    format!("(*({{ {vt} s_ = {view}; __int128 i_ = (__int128)({it}); if (i_ < 0 || (uint64_t)i_ >= s_.len) tau_oob(s_.len, i_); &s_.ptr[i_]; }}))"),
+                    elem,
+                ))
             }
             ExprKind::Field { base, name } => {
                 let (b, bt) = self.place(base)?;
@@ -582,7 +877,7 @@ impl<'a> Cg<'a> {
                         Ok(i) if i < ts.len() => Ok((format!("{b}.f{i}"), ts[i].clone())),
                         _ => unsupported("assigning to this field"),
                     },
-                    Ty::Adt(id, args) if !self.is_enum(*id) => {
+                    Ty::Adt(id, args) if !self.is_enum(*id) && self.prog.adt(*id).module != 0 => {
                         let def = self.prog.adt(*id);
                         let AdtKind::Struct(fs) = &def.kind else { return unsupported("this field") };
                         let Some(i) = fs.iter().position(|f| f.name == name.name) else {
@@ -594,21 +889,128 @@ impl<'a> Cg<'a> {
                     _ => unsupported("assigning to this field"),
                 }
             }
-            _ => unsupported("assigning to this kind of place"),
+            // any other expression: evaluate it into a temporary and use that
+            _ => {
+                let ty = self.ty_of(e);
+                let v = self.expr(e)?;
+                let t = self.new_temp(&ty)?;
+                Ok((format!("(*({{ {t} = {v}; &{t}; }}))"), ty))
+            }
         }
+    }
+
+
+    /// Is this expression a place (a variable, or a field or element of one)? Reading a place
+    /// does not give an owned value: moving out of it has to zero it.
+    fn is_place(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Ident(n) => self.lookup(n).is_some(),
+            ExprKind::MutBorrow(i) => self.is_place(i),
+            ExprKind::Field { base, .. } => {
+                !matches!(self.res.expr_res.get(&NodeKey::of(e)), Some(Res::Const(_) | Res::Variant(..) | Res::Fn(..))) && self.is_place(base)
+            }
+            ExprKind::Index { base, indices } => indices.len() == 1 && !matches!(indices[0].kind, ExprKind::Range { .. }) && self.is_place(base),
+            _ => false,
+        }
+    }
+
+    /// The value of `e` as an owned value: if it is a place holding something that owns heap
+    /// memory, the value is moved out and the place zeroed (so it is not dropped twice).
+    fn owned(&mut self, e: &'a Expr) -> CgResult<String> {
+        let ty = self.ty_of(e);
+        if self.needs_drop(&ty) && self.is_place(e) {
+            let (place, _) = self.place(e)?;
+            let ct = self.cty(&ty)?;
+            return Ok(format!("({{ {ct} mv_ = {place}; memset(&{place}, 0, sizeof({ct})); mv_; }})"));
+        }
+        self.expr(e)
+    }
+
+    /// `e` for reading only (an argument passed by borrow, a receiver, an operand): a place is
+    /// used in place; a computed value that owns memory goes into a temporary dropped at the
+    /// end of the statement.
+    fn borrow(&mut self, e: &'a Expr) -> CgResult<String> {
+        let ty = self.ty_of(e);
+        if self.needs_drop(&ty) && !self.is_place(e) {
+            let v = self.expr(e)?;
+            let t = self.new_temp(&ty)?;
+            return Ok(format!("(*({{ {t} = {v}; &{t}; }}))"));
+        }
+        self.expr(e)
+    }
+
+    /// A view (slice or `str`) of the C lvalue `place` of type `ty`.
+    fn view(&mut self, place: &str, ty: &Ty) -> CgResult<String> {
+        Ok(match ty {
+            Ty::Slice(_) | Ty::Str => place.to_string(),
+            Ty::Array(t, Some(n)) => {
+                let st = self.cty(&Ty::Slice(t.clone()))?;
+                format!("(({st}){{ ({place}).v, {n} }})")
+            }
+            t if self.is_string(t) => format!("((tau_str){{ ({place}).ptr, ({place}).len }})"),
+            t => match self.vec_elem(t) {
+                Some(el) => {
+                    let st = self.cty(&Ty::Slice(Box::new(el)))?;
+                    format!("(({st}){{ ({place}).ptr, ({place}).len }})")
+                }
+                None => return unsupported(format!("viewing {} as a slice", self.describe(t))),
+            },
+        })
+    }
+
+    /// Does a value of type `from` convert implicitly to `to` by taking a view?
+    fn coerces_to_view(&self, from: &Ty, to: &Ty) -> bool {
+        match (from, to) {
+            (Ty::Array(a, _), Ty::Slice(b)) => a == b,
+            (f, Ty::Slice(b)) => self.vec_elem(f).map(|e| e == **b).unwrap_or(false),
+            (f, Ty::Str) => self.is_string(f),
+            _ => false,
+        }
+    }
+
+    /// `e` as an owned value of type `to`, applying the implicit conversions the checker allows.
+    fn convert(&mut self, e: &'a Expr, to: &Ty) -> CgResult<String> {
+        let from = self.ty_of(e);
+        if self.coerces_to_view(&from, to) {
+            let b = self.borrow(e)?;
+            return self.view(&b, &from);
+        }
+        self.owned(e)
+    }
+
+    /// `e` passed to a parameter of type `to`: by borrow (a view if the types differ).
+    fn borrowed_as(&mut self, e: &'a Expr, to: &Ty) -> CgResult<String> {
+        let from = self.ty_of(e);
+        if self.coerces_to_view(&from, to) {
+            let b = self.borrow(e)?;
+            return self.view(&b, &from);
+        }
+        self.borrow(e)
     }
 
     fn is_trivial(e: &Expr) -> bool {
         matches!(e.kind, ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_))
     }
 
-    /// Evaluate operands left to right. Returns declarations to run first and the operand
-    /// names to use afterwards. Literals are used in place; if fewer than two operands could
-    /// have side effects the order cannot matter.
+
     fn ordered(&mut self, es: &[&'a Expr]) -> CgResult<(String, Vec<String>)> {
+        self.ordered_with(es, None, false)
+    }
+
+    /// Operands evaluated left to right: read-only (`owned == false`) or as owned values
+    /// converted to `tys` (for building aggregates). Returns declarations to run first and the
+    /// operand texts to use afterwards. Literals are used in place; if fewer than two operands
+    /// could have side effects the order cannot matter.
+    fn ordered_with(&mut self, es: &[&'a Expr], tys: Option<&[Ty]>, owned: bool) -> CgResult<(String, Vec<String>)> {
         let mut exprs = Vec::new();
-        for e in es {
-            exprs.push(self.expr(e)?);
+        for (i, e) in es.iter().enumerate() {
+            let c = if owned {
+                let to = tys.and_then(|t| t.get(i).cloned()).unwrap_or_else(|| self.ty_of(e));
+                self.convert(e, &to)?
+            } else {
+                self.borrow(e)?
+            };
+            exprs.push(c);
         }
         let effectful = es.iter().filter(|e| !Self::is_trivial(e) && !matches!(e.kind, ExprKind::Ident(_))).count();
         let non_lit = es.iter().filter(|e| !Self::is_trivial(e)).count();
@@ -617,11 +1019,12 @@ impl<'a> Cg<'a> {
         }
         let mut decls = String::new();
         let mut names = Vec::new();
-        for (e, c) in es.iter().zip(exprs) {
+        for (i, (e, c)) in es.iter().zip(exprs).enumerate() {
             if Self::is_trivial(e) {
                 names.push(c);
             } else {
-                let t = self.cty(&self.ty_of(e))?;
+                let ty = tys.and_then(|t| t.get(i).cloned()).unwrap_or_else(|| self.ty_of(e));
+                let t = self.cty(&ty)?;
                 let tmp = self.fresh("op");
                 decls.push_str(&format!("{t} {tmp} = {c}; "));
                 names.push(tmp);
@@ -645,7 +1048,7 @@ impl<'a> Cg<'a> {
 
     // ------------------------------------------------------------ formatting
 
-    /// A statement that appends `value` (of type `ty`) to the buffer `buf`.
+
     fn fmt_stmt(&mut self, buf: &str, value: &str, ty: &Ty) -> CgResult<String> {
         Ok(match ty {
             Ty::Int(it) => format!("tau_fmt_{}({buf}, {value});", Self::int_suffix(*it)),
@@ -656,12 +1059,124 @@ impl<'a> Cg<'a> {
             Ty::Str => format!("tau_fmt_str({buf}, {value});"),
             Ty::Never => format!("tau_fmt_unit({buf}, {value});"),
             Ty::Tuple(ts) if ts.is_empty() => format!("tau_fmt_unit({buf}, {value});"),
-            Ty::Tuple(_) => {
-                let name = self.tuple_helper(ty, "fmt")?;
+            t if self.is_string(t) => format!("{{ tau_buf *sv_ = &({value}); tau_buf_push({buf}, sv_->ptr, sv_->len); }}"),
+            Ty::Tuple(_) | Ty::Array(..) | Ty::Slice(_) | Ty::Adt(..) => {
+                let name = self.fmt_helper(ty)?;
                 format!("{name}({buf}, {value});")
             }
             other => return unsupported(format!("printing {}", self.describe(other))),
         })
+    }
+
+    /// The implementation of trait method `method` of the (prelude) trait `trait_name` for the
+    /// concrete type `ty`, if there is one.
+    fn trait_impl_fn(&self, trait_name: &str, method: &str, ty: &Ty) -> Option<(FnId, Subst)> {
+        let tr = self.prog.find_trait(trait_name)?;
+        for imp in &self.prog.impls {
+            if imp.trait_ref.as_ref().map(|t| t.trait_) != Some(tr) {
+                continue;
+            }
+            let mut binds = Vec::new();
+            if !match_ty(&imp.self_ty, ty, &mut binds) {
+                continue;
+            }
+            if let Some((_, f)) = imp.methods.iter().find(|(n, _)| n == method) {
+                return Some((*f, binds));
+            }
+        }
+        None
+    }
+
+    /// Make sure the printing function for a tuple, array, slice, `Vec` or user type exists;
+    /// returns its name.
+    fn fmt_helper(&mut self, ty: &Ty) -> CgResult<String> {
+        let m = self.mangle(ty)?;
+        let ct = self.cty(ty)?;
+        let name = format!("tau_fmt_{m}");
+        if !self.helpers.insert(name.clone()) {
+            return Ok(name);
+        }
+        self.protos.push_str(&format!("static void {name}(tau_buf *b, {ct} v);\n"));
+        let mut body = String::new();
+        match ty {
+            Ty::Tuple(ts) => {
+                body.push_str("tau_buf_char(b, '(');\n");
+                for (i, t) in ts.iter().enumerate() {
+                    if i > 0 {
+                        body.push_str("tau_buf_cstr(b, \", \");\n");
+                    }
+                    body.push_str(&self.fmt_stmt("b", &format!("v.f{i}"), t)?);
+                    body.push('\n');
+                }
+                if ts.len() == 1 {
+                    body.push_str("tau_buf_char(b, ',');\n");
+                }
+                body.push_str("tau_buf_char(b, ')');\n");
+            }
+            Ty::Array(..) | Ty::Slice(_) | Ty::Adt(..) if self.seq_elem(ty).is_some() => {
+                let (el, ptr, len) = self.seq_parts(ty, "v")?;
+                let f = self.fmt_stmt("b", "x_", &el)?;
+                let ect = self.cty(&el)?;
+                body.push_str(&format!(
+                    "tau_buf_char(b, '[');\nfor (size_t i = 0; i < {len}; i++) {{ if (i > 0) tau_buf_cstr(b, \", \"); {ect} x_ = {ptr}[i]; {f} }}\ntau_buf_char(b, ']');\n"
+                ));
+            }
+            Ty::Adt(..) => {
+                // a user type: call its `Display` implementation, which returns a String
+                let Some((fid, binds)) = self.trait_impl_fn("Display", "fmt", ty) else {
+                    return unsupported(format!("printing {} (it has no Display impl)", self.describe(ty)));
+                };
+                let fname = self.request(fid, binds)?;
+                body.push_str(&format!("tau_buf s_ = {fname}(v); tau_buf_push(b, s_.ptr, s_.len); free(s_.ptr);\n"));
+            }
+            _ => return unsupported(format!("printing {}", self.describe(ty))),
+        }
+        self.bodies.push_str(&format!("static void {name}(tau_buf *b, {ct} v) {{\n{body}}}\n"));
+        Ok(name)
+    }
+
+    /// Element type if `ty` is a sequence (array, slice, `Vec`).
+    fn seq_elem(&self, ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::Array(t, Some(_)) | Ty::Slice(t) => Some((**t).clone()),
+            t => self.vec_elem(t),
+        }
+    }
+
+    /// (element type, pointer expression, length expression) of the sequence value `v`.
+    fn seq_parts(&mut self, ty: &Ty, v: &str) -> CgResult<(Ty, String, String)> {
+        Ok(match ty {
+            Ty::Array(t, Some(n)) => ((**t).clone(), format!("{v}.v"), format!("{n}")),
+            Ty::Slice(t) => ((**t).clone(), format!("{v}.ptr"), format!("{v}.len")),
+            t => match self.vec_elem(t) {
+                Some(el) => (el, format!("{v}.ptr"), format!("{v}.len")),
+                None => return unsupported("this sequence"),
+            },
+        })
+    }
+
+    /// Make sure the `eq`/`cmp` helper for a sequence type exists; returns its name.
+    fn seq_helper(&mut self, ty: &Ty, kind: &str) -> CgResult<String> {
+        let m = self.mangle(ty)?;
+        let ct = self.cty(ty)?;
+        let name = format!("tau_{kind}_{m}");
+        if !self.helpers.insert(name.clone()) {
+            return Ok(name);
+        }
+        let (el, pa, la) = self.seq_parts(ty, "a")?;
+        let (_, pb, lb) = self.seq_parts(ty, "b")?;
+        if kind == "eq" {
+            self.protos.push_str(&format!("static bool {name}({ct} a, {ct} b);\n"));
+            let e = self.eq_expr(&format!("{pa}[i]"), &format!("{pb}[i]"), &el)?;
+            self.bodies.push_str(&format!("static bool {name}({ct} a, {ct} b) {{ if ({la} != {lb}) return 0; for (size_t i = 0; i < {la}; i++) if (!{e}) return 0; return 1; }}\n"));
+        } else {
+            self.protos.push_str(&format!("static int {name}({ct} a, {ct} b);\n"));
+            let c = self.cmp_expr(&format!("{pa}[i]"), &format!("{pb}[i]"), &el)?;
+            self.bodies.push_str(&format!(
+                "static int {name}({ct} a, {ct} b) {{ size_t n = {la} < {lb} ? {la} : {lb}; for (size_t i = 0; i < n; i++) {{ int c = {c}; if (c != 0) return c; }} return ({la} > {lb}) - ({la} < {lb}); }}\n"
+            ));
+        }
+        Ok(name)
     }
 
     /// Make sure the `fmt`/`eq`/`cmp` helper for a tuple type exists; returns its name.
@@ -713,6 +1228,7 @@ impl<'a> Cg<'a> {
         Ok(name)
     }
 
+
     fn eq_expr(&mut self, a: &str, b: &str, ty: &Ty) -> CgResult<String> {
         Ok(match ty {
             Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char => format!("({a} == {b})"),
@@ -723,11 +1239,20 @@ impl<'a> Cg<'a> {
                 let n = self.tuple_helper(ty, "eq")?;
                 format!("{n}({a}, {b})")
             }
+            t if self.is_string(t) => format!("tau_str_eq((tau_str){{ ({a}).ptr, ({a}).len }}, (tau_str){{ ({b}).ptr, ({b}).len }})"),
+            t if self.seq_elem(t).is_some() => {
+                let n = self.seq_helper(ty, "eq")?;
+                format!("{n}({a}, {b})")
+            }
+            Ty::Adt(..) => match self.trait_impl_fn("Eq", "eq", ty) {
+                Some((fid, binds)) => format!("{}({a}, {b})", self.request(fid, binds)?),
+                None => return unsupported(format!("comparing {} (it has no Eq impl)", self.describe(ty))),
+            },
             other => return unsupported(format!("comparing {}", self.describe(other))),
         })
     }
 
-    /// -1, 0, 1, or 2 when the values are unordered (a NaN).
+
     fn cmp_expr(&mut self, a: &str, b: &str, ty: &Ty) -> CgResult<String> {
         Ok(match ty {
             Ty::Int(_) | Ty::Bool | Ty::Char => format!("(({a} > {b}) - ({a} < {b}))"),
@@ -739,6 +1264,18 @@ impl<'a> Cg<'a> {
                 let n = self.tuple_helper(ty, "cmp")?;
                 format!("{n}({a}, {b})")
             }
+            t if self.is_string(t) => format!("tau_str_cmp((tau_str){{ ({a}).ptr, ({a}).len }}, (tau_str){{ ({b}).ptr, ({b}).len }})"),
+            t if self.seq_elem(t).is_some() => {
+                let n = self.seq_helper(ty, "cmp")?;
+                format!("{n}({a}, {b})")
+            }
+            Ty::Adt(..) => match self.trait_impl_fn("Ord", "lt", ty) {
+                Some((fid, binds)) => {
+                    let f = self.request(fid, binds)?;
+                    format!("({f}({a}, {b}) ? -1 : {f}({b}, {a}) ? 1 : 0)")
+                }
+                None => return unsupported(format!("ordering {} (it has no Ord impl)", self.describe(ty))),
+            },
             other => return unsupported(format!("ordering {}", self.describe(other))),
         })
     }
@@ -769,7 +1306,11 @@ impl<'a> Cg<'a> {
                 }
                 let ct = self.cty(&ty)?;
                 let refs: Vec<&'a Expr> = es.iter().collect();
-                let (decls, names) = self.ordered(&refs)?;
+                let tys = match &ty {
+                    Ty::Tuple(ts) => ts.clone(),
+                    _ => Vec::new(),
+                };
+                let (decls, names) = self.ordered_with(&refs, Some(&tys), true)?;
                 Ok(Self::wrap(decls, format!("(({ct}){{{}}})", names.join(", "))))
             }
             ExprKind::Unary { op, expr } => self.unary(e, &ty, *op, expr),
@@ -796,42 +1337,52 @@ impl<'a> Cg<'a> {
             }
             ExprKind::Return(v) => {
                 let ret = self.cur_ret.clone();
+                let drops = self.scope_drops(0)?;
                 let val = match v {
                     Some(x) => {
-                        let c = self.expr(x)?;
-                        if Self::is_unit(&ret) || Self::is_never(&ret) { format!("(void)({c}); return 0;") } else { format!("return {c};") }
+                        let c = self.convert(x, &ret)?;
+                        if Self::is_unit(&ret) || Self::is_never(&ret) {
+                            format!("(void)({c}); {drops}return 0;")
+                        } else {
+                            let ct = self.cty(&ret)?;
+                            format!("{ct} rv_ = {c}; {drops}return rv_;")
+                        }
                     }
-                    None => "return 0;".to_string(),
+                    None => format!("{drops}return 0;"),
                 };
                 Ok(format!("({{ {val} ((tau_unit)0); }})"))
             }
             ExprKind::Break(v) => {
                 let Some(ctx) = self.loops.last() else { return unsupported("`break` here") };
-                let (brk, result) = (ctx.brk.clone(), ctx.result.clone());
+                let (brk, result, depth) = (ctx.brk.clone(), ctx.result.clone(), ctx.depth);
                 let assign = match (v, result) {
                     (Some(x), Some(r)) => {
-                        let c = self.expr(x)?;
+                        let c = self.owned(x)?;
                         format!("{r} = {c}; ")
                     }
                     (Some(x), None) => {
-                        let c = self.expr(x)?;
+                        let c = self.owned(x)?;
                         format!("(void)({c}); ")
                     }
                     _ => String::new(),
                 };
-                Ok(format!("({{ {assign}goto {brk}; ((tau_unit)0); }})"))
+                let drops = self.scope_drops(depth)?;
+                Ok(format!("({{ {assign}{drops}goto {brk}; ((tau_unit)0); }})"))
             }
             ExprKind::Continue => {
                 let Some(ctx) = self.loops.last() else { return unsupported("`continue` here") };
-                Ok(format!("({{ goto {}; ((tau_unit)0); }})", ctx.cont))
+                let (cont, depth) = (ctx.cont.clone(), ctx.depth);
+                let drops = self.scope_drops(depth)?;
+                Ok(format!("({{ {drops}goto {cont}; ((tau_unit)0); }})"))
             }
             ExprKind::Try(inner) => self.try_expr(&ty, inner),
             ExprKind::MutBorrow(inner) => self.expr(inner),
             ExprKind::Imag(_) => unsupported("complex numbers (milestone 4)"),
-            ExprKind::Array(_) | ExprKind::ArrayRepeat { .. } => unsupported("arrays (milestone 2b)"),
-            ExprKind::Index { .. } => unsupported("indexing (milestone 2b)"),
+            ExprKind::Array(es) => self.array_literal(&ty, es),
+            ExprKind::ArrayRepeat { value, .. } => self.array_repeat(&ty, value),
+            ExprKind::Index { base, indices } => self.index_expr(e, &ty, base, indices),
             ExprKind::Closure { .. } => unsupported("closures (milestone 3)"),
-            ExprKind::Range { .. } => unsupported("ranges outside a `for` loop (milestone 2b)"),
+            ExprKind::Range { .. } => unsupported("ranges outside a `for` loop or an index"),
             ExprKind::ParReduce { .. } | ExprKind::Spawn(_) | ExprKind::On { .. } => unsupported("parallel constructs (milestone 5)"),
             ExprKind::TypeApp { .. } => unsupported("this expression"),
         }
@@ -874,14 +1425,18 @@ impl<'a> Cg<'a> {
             let saved_scopes = std::mem::replace(&mut self.scopes, vec![Vec::new()]);
             let saved_loops = std::mem::take(&mut self.loops);
             let saved_sub = std::mem::take(&mut self.sub);
+            let saved_hoisted = std::mem::take(&mut self.hoisted);
+            let saved_temps = std::mem::take(&mut self.temps);
             let v = self.expr(&decl.value);
+            let hoisted = std::mem::replace(&mut self.hoisted, saved_hoisted);
+            self.temps = saved_temps;
             self.scopes = saved_scopes;
             self.loops = saved_loops;
             self.sub = saved_sub;
             let v = v?;
             self.protos.push_str(&format!("static {ct} {name}(void);\n"));
             self.bodies.push_str(&format!(
-                "static {ct} {name}(void) {{ static bool done; static {ct} v; if (!done) {{ v = {v}; done = true; }} return v; }}\n"
+                "static {ct} {name}(void) {{\n{hoisted}  static bool done; static {ct} v; if (!done) {{ v = {v}; done = true; }} return v;\n}}\n"
             ));
         }
         Ok(format!("{name}()"))
@@ -895,9 +1450,9 @@ impl<'a> Cg<'a> {
             return Ok(c_str_literal(""));
         }
         let b = self.fresh("sb");
-        let mut s = format!("({{ tau_buf *{b} = (tau_buf *)calloc(1, sizeof(tau_buf)); ");
+        let mut s = format!("({{ tau_buf {b}_v = {{0}}; tau_buf *{b} = &{b}_v; ");
         s.push_str(&self.interp_into(&b, pieces)?);
-        s.push_str(&format!("(tau_str){{ {b}->ptr, {b}->len }}; }})"));
+        s.push_str(&format!("tau_str {b}_r = tau_intern({b}_v.ptr, {b}_v.len); free({b}_v.ptr); {b}_r; }})"));
         Ok(s)
     }
 
@@ -914,7 +1469,7 @@ impl<'a> Cg<'a> {
                 StrPiece::Interp(inner) => {
                     let ty = self.ty_of(inner);
                     let ct = self.cty(&ty)?;
-                    let v = self.expr(inner)?;
+                    let v = self.borrow(inner)?;
                     let tmp = self.fresh("fv");
                     s.push_str(&format!("{{ {ct} {tmp} = {v}; "));
                     s.push_str(&self.fmt_stmt(buf, &tmp, &ty)?);
@@ -949,6 +1504,98 @@ impl<'a> Cg<'a> {
         })
     }
 
+
+    /// `[a, b, c]`
+    fn array_literal(&mut self, ty: &Ty, es: &'a [Expr]) -> CgResult<String> {
+        let Ty::Array(t, Some(n)) = ty else { return unsupported("an array of unknown length") };
+        let ct = self.cty(ty)?;
+        if es.is_empty() {
+            return Ok(format!("(({ct}){{ {{ 0 }} }})"));
+        }
+        let refs: Vec<&'a Expr> = es.iter().collect();
+        let tys: Vec<Ty> = (0..es.len()).map(|_| (**t).clone()).collect();
+        let (decls, names) = self.ordered_with(&refs, Some(&tys), true)?;
+        let _ = n;
+        let r = self.fresh("arr");
+        let mut s = format!("({{ {decls}{ct} {r} = {{ {{ 0 }} }}; ");
+        for (i, v) in names.iter().enumerate() {
+            s.push_str(&format!("{r}.v[{i}] = {v}; "));
+        }
+        s.push_str(&format!("{r}; }})"));
+        Ok(s)
+    }
+
+    /// `[value; N]`
+    fn array_repeat(&mut self, ty: &Ty, value: &'a Expr) -> CgResult<String> {
+        let Ty::Array(t, Some(n)) = ty else { return unsupported("an array of unknown length") };
+        if self.needs_drop(t) {
+            return unsupported("repeating a value that owns memory");
+        }
+        let ct = self.cty(ty)?;
+        let et = self.cty(t)?;
+        let v = self.expr(value)?;
+        Ok(format!("({{ {et} v_ = {v}; {ct} r_ = {{ {{ 0 }} }}; for (size_t i_ = 0; i_ < {n}; i_++) r_.v[i_] = v_; r_; }})"))
+    }
+
+    /// `vec[a, b, c]`
+    fn vec_literal(&mut self, ty: &Ty, es: &'a [Expr]) -> CgResult<String> {
+        let Some(el) = self.vec_elem(ty) else { return unsupported("this `vec` literal") };
+        let ct = self.cty(ty)?;
+        if es.is_empty() {
+            return Ok(format!("(({ct}){{0}})"));
+        }
+        let et = self.cty(&el)?;
+        let refs: Vec<&'a Expr> = es.iter().collect();
+        let tys: Vec<Ty> = (0..es.len()).map(|_| el.clone()).collect();
+        let (decls, names) = self.ordered_with(&refs, Some(&tys), true)?;
+        let n = es.len();
+        let r = self.fresh("vl");
+        let mut s = format!("({{ {decls}{ct} {r} = {{0}}; {r}.ptr = ({et} *)malloc({n} * sizeof({et})); {r}.len = {r}.cap = {n}; ");
+        for (i, v) in names.iter().enumerate() {
+            s.push_str(&format!("{r}.ptr[{i}] = {v}; "));
+        }
+        s.push_str(&format!("{r}; }})"));
+        Ok(s)
+    }
+
+    /// `base[i]`, `base[a..b]`, `vec[...]`, or an overloaded index.
+    fn index_expr(&mut self, e: &'a Expr, ty: &Ty, base: &'a Expr, indices: &'a [Expr]) -> CgResult<String> {
+        if matches!(&base.kind, ExprKind::Ident(n) if n == "vec") && self.lookup("vec").is_none() && self.res.expr_res.get(&NodeKey::of(base)).is_none() {
+            return self.vec_literal(ty, indices);
+        }
+        if let Some(Res::Fn(fid, subst)) = self.res.expr_res.get(&NodeKey::of(e)) {
+            let subst = self.apply_sub(subst);
+            return self.call_resolved(*fid, &subst, None, &[base, &indices[0]]);
+        }
+        if indices.len() != 1 {
+            return unsupported("indexing with several indices (tensors, milestone 4)");
+        }
+        if let ExprKind::Range { start, end, inclusive } = &indices[0].kind {
+            let bt = self.ty_of(base);
+            let Some(el) = self.seq_elem(&bt) else { return unsupported("slicing this type") };
+            let (b, _) = self.place(base)?;
+            let view = self.view(&b, &bt)?;
+            let st = self.cty(&Ty::Slice(Box::new(el)))?;
+            let lo = match start {
+                Some(x) => format!("(__int128)({})", self.expr(x)?),
+                None => "(__int128)0".to_string(),
+            };
+            let hi = match end {
+                Some(x) => format!("(__int128)({}){}", self.expr(x)?, if *inclusive { " + 1" } else { "" }),
+                None => "(__int128)s_.len".to_string(),
+            };
+            return Ok(format!(
+                "({{ {st} s_ = {view}; __int128 a_ = {lo}; __int128 b_ = {hi}; if (b_ > (__int128)s_.len) b_ = (__int128)s_.len; if (a_ < 0 || a_ > b_) tau_slice_oob(a_, b_, s_.len); ({st}){{ s_.ptr + a_, (size_t)(b_ - a_) }}; }})"
+            ));
+        }
+        let bt = self.ty_of(base);
+        if self.seq_elem(&bt).is_none() {
+            return unsupported("indexing this type (milestone 4)");
+        }
+        let (p, _) = self.place(e)?;
+        Ok(p)
+    }
+
     fn field(&mut self, e: &'a Expr, base: &'a Expr, name: &str) -> CgResult<String> {
         match self.res.expr_res.get(&NodeKey::of(e)) {
             Some(Res::Const(cid)) => return self.const_ref(*cid),
@@ -963,7 +1610,14 @@ impl<'a> Cg<'a> {
             _ => {}
         }
         let bt = self.ty_of(base);
-        let b = self.expr(base)?;
+        if name == "len" && (self.seq_elem(&bt).is_some() || self.is_string(&bt) || matches!(bt, Ty::Str)) {
+            let b = self.borrow(base)?;
+            return Ok(match &bt {
+                Ty::Array(_, Some(n)) => format!("((void)({b}), (uint64_t){n}ULL)"),
+                _ => format!("((uint64_t)({b}).len)"),
+            });
+        }
+        let b = self.borrow(base)?;
         match &bt {
             Ty::Tuple(ts) => match name.parse::<usize>() {
                 Ok(i) if i < ts.len() => Ok(format!("({b}).f{i}")),
@@ -1095,28 +1749,35 @@ impl<'a> Cg<'a> {
         })
     }
 
+
     fn assign(&mut self, e: &'a Expr, op: Option<BinOp>, lhs: &'a Expr, rhs: &'a Expr) -> CgResult<String> {
         let lt = self.ty_of(lhs);
         let rty = self.ty_of(rhs);
-        let rt = self.cty(&rty)?;
         let lct = self.cty(&lt)?;
         let rv = self.fresh("rv");
-        let r = self.expr(rhs)?;
-        let (target, _) = self.place(lhs)?;
-        Ok(match op {
-            None => format!("({{ {rt} {rv} = {r}; {target} = {rv}; ((tau_unit)0); }})"),
+        let ptr = self.fresh("dst");
+        match op {
+            None => {
+                let r = self.convert(rhs, &lt)?;
+                let (target, _) = self.place(lhs)?;
+                let drop = self.drop_stmt(&format!("*{ptr}"), &lt)?;
+                Ok(format!("({{ {lct} {rv} = {r}; {lct} *{ptr} = &{target}; {drop}*{ptr} = {rv}; ((tau_unit)0); }})"))
+            }
             Some(bop) => {
+                let rt = self.cty(&rty)?;
+                let r = self.expr(rhs)?;
+                let (target, _) = self.place(lhs)?;
                 if let Some(Res::Fn(fid, subst)) = self.res.expr_res.get(&NodeKey::of(e)) {
                     // `a += b` on a user type is `a = add(a, b)`
                     let subst = self.apply_sub(subst);
                     let cur = self.fresh("cur");
                     let call = self.call_with_values(*fid, &subst, &[(cur.clone(), lt.clone()), (rv.clone(), rty.clone())])?;
-                    return Ok(format!("({{ {rt} {rv} = {r}; {lct} {cur} = {target}; {target} = {call}; ((tau_unit)0); }})"));
+                    return Ok(format!("({{ {rt} {rv} = {r}; {lct} *{ptr} = &{target}; {lct} {cur} = *{ptr}; *{ptr} = {call}; ((tau_unit)0); }})"));
                 }
-                let value = self.arith(bop, &target, &rv, &lt)?;
-                format!("({{ {rt} {rv} = {r}; {target} = {value}; ((tau_unit)0); }})")
+                let value = self.arith(bop, &format!("(*{ptr})"), &rv, &lt)?;
+                Ok(format!("({{ {rt} {rv} = {r}; {lct} *{ptr} = &{target}; *{ptr} = {value}; ((tau_unit)0); }})"))
             }
-        })
+        }
     }
 
     fn cast(&mut self, v: &str, from: &Ty, to: &Ty) -> CgResult<String> {
@@ -1230,28 +1891,45 @@ impl<'a> Cg<'a> {
     fn construct_call(&mut self, e: &'a Expr, adt: AdtId, variant: Option<usize>, args: &'a [Expr]) -> CgResult<String> {
         let ty = self.ty_of(e);
         let refs: Vec<&'a Expr> = args.iter().collect();
-        let (decls, names) = self.ordered(&refs)?;
+        let ftys = match &ty {
+            Ty::Adt(id, targs) => {
+                let all = self.adt_fields(*id, targs);
+                match variant {
+                    Some(i) => all[i].clone(),
+                    None => all[0].clone(),
+                }
+            }
+            _ => Vec::new(),
+        };
+        let (decls, names) = self.ordered_with(&refs, Some(&ftys), true)?;
         let v = self.construct(adt, variant, &ty, names)?;
         Ok(Self::wrap(decls, v))
     }
 
-    /// A call of `fid` where the receiver (if any) and the arguments are source expressions.
+
     fn call_resolved(&mut self, fid: FnId, subst: &[(GenericId, Ty)], recv: Option<&'a Expr>, args: &[&'a Expr]) -> CgResult<String> {
         let target = self.resolve(fid, subst)?;
         let (tfid, tsub) = match &target {
             Target::User { fid, sub, .. } | Target::Builtin { fid, sub, .. } => (*fid, sub.clone()),
         };
-        let sig = self.prog.fn_(tfid).sig.clone();
+        let tdef = self.prog.fn_(tfid).clone();
+        let sig = tdef.sig.clone();
+        // the type `self` has in the callee (a receiver may need converting to it)
+        let self_target = match tdef.parent {
+            Parent::Impl(i) => Some(self.prog.impl_(i).self_ty.subst(&tsub)),
+            Parent::Trait(t) => Some(Ty::Param(self.prog.trait_(t).self_generic).subst(&tsub)),
+            Parent::Free => None,
+        };
         // operands in call order, with how each one is passed
         let mut ops: Vec<(&'a Expr, ParamMode, Ty)> = Vec::new();
         let mut it = args.iter();
         if let (Some(r), Some(mode)) = (recv, sig.self_mode) {
-            let st = self.ty_of(r);
+            let st = self_target.clone().unwrap_or_else(|| self.ty_of(r));
             ops.push((r, mode, st));
         } else if sig.self_mode.is_some() {
             // an operator function: the first operand plays the receiver
             if let Some(a) = it.next() {
-                let st = self.ty_of(a);
+                let st = self_target.clone().unwrap_or_else(|| self.ty_of(a));
                 ops.push((a, sig.self_mode.unwrap(), st));
             }
         }
@@ -1262,8 +1940,7 @@ impl<'a> Cg<'a> {
             ops.push((*a, mode, ty));
         }
         if let Target::Builtin { key, .. } = &target {
-            let exprs: Vec<&'a Expr> = ops.iter().map(|o| o.0).collect();
-            return self.builtin(key, &tsub, &exprs);
+            return self.builtin(key, &tsub, &ops);
         }
         let Target::User { name, .. } = target else { unreachable!() };
         let (decls, names) = self.ordered_args(&ops)?;
@@ -1291,29 +1968,27 @@ impl<'a> Cg<'a> {
         }
     }
 
-    /// Arguments in order; `mut` arguments become pointers to their place.
+
     fn ordered_args(&mut self, ops: &[(&'a Expr, ParamMode, Ty)]) -> CgResult<(String, Vec<String>)> {
         let mut decls = String::new();
         let mut names = Vec::new();
         let temps = ops.len() >= 2 && ops.iter().filter(|o| !Self::is_trivial(o.0) && !matches!(o.0.kind, ExprKind::Ident(_))).count() >= 1 && ops.iter().filter(|o| !Self::is_trivial(o.0)).count() >= 2;
         for (a, mode, pty) in ops {
             if Self::by_ptr(*mode, pty) {
-                let inner: &'a Expr = match &a.kind {
-                    ExprKind::MutBorrow(x) => x,
-                    _ => a,
-                };
-                let (place, _) = self.place(inner)?;
-                // a `mut` parameter is already a pointer: hand it on as is
-                let ptr = match (&inner.kind, place.strip_prefix("(*").and_then(|p| p.strip_suffix(')'))) {
-                    (ExprKind::Ident(_), Some(p)) => p.to_string(),
-                    _ => format!("&{place}"),
-                };
-                names.push(ptr);
+                names.push(self.mut_ptr(a)?);
                 continue;
             }
-            let v = self.expr(a)?;
+            // `mut x` at the call site only marks the borrow; `x` is what is evaluated
+            let a: &'a Expr = match &a.kind {
+                ExprKind::MutBorrow(x) => x,
+                _ => a,
+            };
+            let v = match mode {
+                ParamMode::Own => self.convert(a, pty)?,
+                _ => self.borrowed_as(a, pty)?,
+            };
             if temps && !Self::is_trivial(a) {
-                let t = self.cty(&self.ty_of(a))?;
+                let t = self.cty(pty)?;
                 let tmp = self.fresh("arg");
                 decls.push_str(&format!("{t} {tmp} = {v}; "));
                 names.push(tmp);
@@ -1324,7 +1999,23 @@ impl<'a> Cg<'a> {
         Ok((decls, names))
     }
 
-    fn builtin(&mut self, key: &str, subst: &[(GenericId, Ty)], args: &[&'a Expr]) -> CgResult<String> {
+    /// A pointer to the place `a` (the argument of a `mut` parameter).
+    fn mut_ptr(&mut self, a: &'a Expr) -> CgResult<String> {
+        let inner: &'a Expr = match &a.kind {
+            ExprKind::MutBorrow(x) => x,
+            _ => a,
+        };
+        let (place, _) = self.place(inner)?;
+        // a `mut` parameter is already a pointer: hand it on as is
+        Ok(match (&inner.kind, place.strip_prefix("(*").and_then(|p| p.strip_suffix(')'))) {
+            (ExprKind::Ident(_), Some(p)) => p.to_string(),
+            _ => format!("&{place}"),
+        })
+    }
+
+
+    fn builtin(&mut self, key: &str, subst: &[(GenericId, Ty)], ops: &[(&'a Expr, ParamMode, Ty)]) -> CgResult<String> {
+        let args: Vec<&'a Expr> = ops.iter().map(|o| o.0).collect();
         let targ = subst.first().map(|(_, t)| t.clone());
         let name = key;
         match name {
@@ -1338,7 +2029,7 @@ impl<'a> Cg<'a> {
                     }
                 }
                 let ct = self.cty(&ty)?;
-                let v = self.expr(a)?;
+                let v = self.borrow(a)?;
                 let f = self.fmt_stmt("o_", "pv_", &ty)?;
                 Ok(format!("({{ {ct} pv_ = {v}; tau_buf *o_ = tau_out_begin(); {f} tau_buf_char(o_, '\\n'); tau_out_end(); ((tau_unit)0); }})"))
             }
@@ -1359,7 +2050,7 @@ impl<'a> Cg<'a> {
                 ))
             }
             "panic" => {
-                let m = self.expr(args[0])?;
+                let m = self.borrowed_as(args[0], &Ty::Str)?;
                 Ok(format!("({{ tau_panic_str({m}); ((tau_unit)0); }})"))
             }
             "sqrt" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "exp" | "ln" | "log10" | "floor" | "ceil" | "round" => {
@@ -1402,11 +2093,112 @@ impl<'a> Cg<'a> {
                 };
                 Ok(Self::wrap(decls, format!("({{ {ct} a_ = {}; {ct} b_ = {}; {test} ? a_ : b_; }})", n[0], n[1])))
             }
+            "sum" | "slice::sum" => {
+                let Some(t) = targ else { return unsupported("`sum` on this type") };
+                let Ty::Slice(_) = &ops[0].2 else { return unsupported("`sum` on this type") };
+                let st = self.cty(&ops[0].2)?;
+                let ct = self.cty(&t)?;
+                let v = self.borrowed_as(ops[0].0, &ops[0].2)?;
+                let zero = match &t {
+                    Ty::Float(_) => "0.0".to_string(),
+                    _ => "0".to_string(),
+                };
+                let add = self.arith(BinOp::Add, "acc_", "s_.ptr[i_]", &t)?;
+                Ok(format!("({{ {st} s_ = {v}; {ct} acc_ = ({ct}){zero}; for (size_t i_ = 0; i_ < s_.len; i_++) acc_ = {add}; acc_; }})"))
+            }
+            "slice::is_empty" => {
+                let v = self.borrowed_as(ops[0].0, &ops[0].2)?;
+                Ok(format!("(({v}).len == 0)"))
+            }
+            "slice::to_vec" => {
+                let Ty::Slice(el) = &ops[0].2 else { return unsupported("`to_vec` on this type") };
+                if self.needs_drop(el) {
+                    return unsupported("`to_vec` of elements that own memory");
+                }
+                let vt = self.cty(&Ty::Adt(self.vec_adt()?, vec![(**el).clone()]))?;
+                let et = self.cty(el)?;
+                let v = self.borrowed_as(ops[0].0, &ops[0].2)?;
+                let sty = self.cty(&ops[0].2)?;
+                Ok(format!(
+                    "({{ {sty} s_ = {v}; {vt} r_ = {{0}}; if (s_.len > 0) {{ r_.ptr = ({et} *)malloc(s_.len * sizeof({et})); memcpy(r_.ptr, s_.ptr, s_.len * sizeof({et})); r_.len = r_.cap = s_.len; }} r_; }})"
+                ))
+            }
+            "Vec::new" => {
+                let Some(el) = targ else { return unsupported("`Vec.new` here") };
+                let vt = self.cty(&Ty::Adt(self.vec_adt()?, vec![el]))?;
+                Ok(format!("(({vt}){{0}})"))
+            }
+            "Vec::push" => {
+                let Some(el) = targ else { return unsupported("`push` here") };
+                let f = self.vec_helper(&el, "push")?;
+                let p = self.mut_ptr(ops[0].0)?;
+                let x = self.convert(ops[1].0, &ops[1].2)?;
+                let et = self.cty(&el)?;
+                Ok(format!("({{ {}", format!("{}* v_ = {p}; {et} x_ = {x}; {f}(v_, x_); ((tau_unit)0); }})", self.cty(&Ty::Adt(self.vec_adt()?, vec![el.clone()]))?)))
+            }
+            "Vec::pop" => {
+                let Some(el) = targ else { return unsupported("`pop` here") };
+                let f = self.vec_helper(&el, "pop")?;
+                let p = self.mut_ptr(ops[0].0)?;
+                Ok(format!("{f}({p})"))
+            }
+            "String::new" => Ok("((tau_buf){0})".to_string()),
+            "String::from" | "str::to_string" => {
+                let v = self.borrowed_as(ops[0].0, &Ty::Str)?;
+                Ok(format!("({{ tau_str s_ = {v}; tau_buf b_ = {{0}}; tau_buf_push(&b_, s_.ptr, s_.len); b_; }})"))
+            }
+            "String::push_str" => {
+                let p = self.mut_ptr(ops[0].0)?;
+                let v = self.borrowed_as(ops[1].0, &Ty::Str)?;
+                Ok(format!("({{ tau_buf *b_ = {p}; tau_str s_ = {v}; tau_buf_push(b_, s_.ptr, s_.len); ((tau_unit)0); }})"))
+            }
+            "str::lowercase" | "str::uppercase" => {
+                let v = self.borrowed_as(ops[0].0, &Ty::Str)?;
+                let up = if name == "str::uppercase" { 1 } else { 0 };
+                Ok(format!("tau_str_case({v}, {up})"))
+            }
+            "str::split_whitespace" => {
+                let v = self.borrowed_as(ops[0].0, &Ty::Str)?;
+                let vt = self.cty(&Ty::Adt(self.vec_adt()?, vec![Ty::Str]))?;
+                let f = self.vec_helper(&Ty::Str, "push")?;
+                Ok(format!("({{ tau_str s_ = {v}; {vt} r_ = {{0}}; size_t i_ = 0; while (i_ < s_.len) {{ while (i_ < s_.len && tau_is_space(s_.ptr[i_])) i_++; size_t j_ = i_; while (j_ < s_.len && !tau_is_space(s_.ptr[j_])) j_++; if (j_ > i_) {f}(&r_, (tau_str){{ s_.ptr + i_, j_ - i_ }}); i_ = j_; }} r_; }})"))
+            }
             other => unsupported(format!("the library function `{other}`")),
         }
     }
 
+    fn vec_adt(&self) -> CgResult<AdtId> {
+        self.prog.find_adt("Vec").ok_or_else(|| NativeError::plain("the prelude has no Vec"))
+    }
+
+    /// The C helper `push` or `pop` for `Vec<el>`, generated on first use.
+    fn vec_helper(&mut self, el: &Ty, kind: &str) -> CgResult<String> {
+        let vty = Ty::Adt(self.vec_adt()?, vec![el.clone()]);
+        let m = self.mangle(&vty)?;
+        let name = format!("tau_vec_{kind}_{m}");
+        if !self.helpers.insert(name.clone()) {
+            return Ok(name);
+        }
+        let vt = self.cty(&vty)?;
+        let et = self.cty(el)?;
+        if kind == "push" {
+            self.protos.push_str(&format!("static void {name}({vt} *v, {et} x);\n"));
+            self.bodies.push_str(&format!(
+                "static void {name}({vt} *v, {et} x) {{ if (v->len == v->cap) {{ size_t c = v->cap ? v->cap * 2 : 4; v->ptr = ({et} *)realloc(v->ptr, c * sizeof({et})); if (!v->ptr) tau_panic_cstr(\"out of memory\"); v->cap = c; }} v->ptr[v->len++] = x; }}\n"
+            ));
+        } else {
+            let opt = Ty::Adt(self.prog.find_adt("Option").ok_or_else(|| NativeError::plain("the prelude has no Option"))?, vec![el.clone()]);
+            let ot = self.cty(&opt)?;
+            self.protos.push_str(&format!("static {ot} {name}({vt} *v);\n"));
+            self.bodies.push_str(&format!(
+                "static {ot} {name}({vt} *v) {{ if (v->len == 0) return ({ot}){{ .tag = 1 }}; return ({ot}){{ .tag = 0, .u.v0 = {{ v->ptr[--v->len] }} }}; }}\n"
+            ));
+        }
+        Ok(name)
+    }
+
     // ------------------------------------------------------------ `?`
+
 
     fn try_expr(&mut self, ty: &Ty, inner: &'a Expr) -> CgResult<String> {
         let it = self.ty_of(inner);
@@ -1419,13 +2211,14 @@ impl<'a> Cg<'a> {
         let ret = self.cur_ret.clone();
         let rct = self.cty(&ret)?;
         let Ty::Adt(rid, _) = &ret else { return unsupported("`?` in a function that does not return Option or Result") };
-        let v = self.expr(inner)?;
+        let v = self.owned(inner)?;
         let t = self.fresh("try");
+        let drops = self.scope_drops(0)?;
         // the failing variant is index 1 (`None`, `Err`); its payload (if any) is passed on
         let propagate = if *rid == *id && name == "Result" {
-            format!("return (({rct}){{ .tag = 1, .u.v1 = {{ {t}.u.v1.f0 }} }});")
+            format!("{rct} er_ = (({rct}){{ .tag = 1, .u.v1 = {{ {t}.u.v1.f0 }} }}); {drops}return er_;")
         } else {
-            format!("return (({rct}){{ .tag = 1 }});")
+            format!("{rct} er_ = (({rct}){{ .tag = 1 }}); {drops}return er_;")
         };
         let vct = self.cty(ty)?;
         let value = if Self::is_unit(ty) { "((tau_unit)0)".to_string() } else { format!("(({vct}){t}.u.v0.f0)") };
@@ -1434,8 +2227,9 @@ impl<'a> Cg<'a> {
 
     // ------------------------------------------------------------ control flow
 
+
     fn if_expr(&mut self, ty: &Ty, cond: &'a Expr, then: &'a Block, else_: Option<&'a Expr>) -> CgResult<String> {
-        let c = self.expr(cond)?;
+        let c = self.cond_expr(cond)?;
         let never = Self::is_never(ty);
         let ct = self.cty(ty)?;
         let r = self.fresh("if");
@@ -1451,6 +2245,12 @@ impl<'a> Cg<'a> {
         }
         s.push_str(&format!(" {r}; }})"));
         Ok(s)
+    }
+
+    /// A condition, with the temporaries it creates dropped once it has been evaluated.
+    fn cond_expr(&mut self, cond: &'a Expr) -> CgResult<String> {
+        let (c, drops) = self.with_temps(|s| s.expr(cond))?;
+        Ok(if drops.is_empty() { c } else { format!("({{ bool c_ = {c}; {drops}c_; }})") })
     }
 
     fn pat_has_bindings(&self, p: &Pattern, ty: &Ty) -> bool {
@@ -1549,20 +2349,27 @@ impl<'a> Cg<'a> {
         })
     }
 
-    fn pat_bind(&mut self, p: &'a Pattern, access: &str, ty: &Ty, out: &mut String) -> CgResult<()> {
+
+    fn pat_bind(&mut self, p: &'a Pattern, access: &str, ty: &Ty, out: &mut String, owned: bool) -> CgResult<()> {
         match &p.kind {
             PatKind::Ident { name, mutable } => {
                 if self.unit_variant_of(ty, name, *mutable).is_some() {
                     return Ok(());
                 }
                 let ct = self.cty(ty)?;
-                let l = self.declare(name, ty.clone());
-                out.push_str(&format!("{ct} {} = {access}; ", l.cname));
+                if owned && self.needs_drop(ty) {
+                    // the value is moved out of the owned scrutinee, whose copy is zeroed
+                    let l = self.declare_owned(name, ty.clone());
+                    out.push_str(&format!("{ct} {} = {access}; memset(&{access}, 0, sizeof({ct})); ", l.cname));
+                } else {
+                    let l = self.declare(name, ty.clone());
+                    out.push_str(&format!("{ct} {} = {access}; ", l.cname));
+                }
             }
             PatKind::Tuple(ps) => {
                 let Ty::Tuple(ts) = ty else { return unsupported("this pattern") };
                 for (i, (sub, t)) in ps.iter().zip(ts).enumerate() {
-                    self.pat_bind(sub, &format!("{access}.f{i}"), t, out)?;
+                    self.pat_bind(sub, &format!("{access}.f{i}"), t, out, owned)?;
                 }
             }
             PatKind::Variant { path, args } => {
@@ -1576,7 +2383,7 @@ impl<'a> Cg<'a> {
                     (all[0].clone(), access.to_string())
                 };
                 for (j, (sub, t)) in args.iter().zip(&fields).enumerate() {
-                    self.pat_bind(sub, &format!("{base}.f{j}"), t, out)?;
+                    self.pat_bind(sub, &format!("{base}.f{j}"), t, out, owned)?;
                 }
             }
             _ => {}
@@ -1584,9 +2391,39 @@ impl<'a> Cg<'a> {
         Ok(())
     }
 
+    /// Does binding this pattern take ownership of something (a binding of a type that owns memory)?
+    fn pat_binds_owned(&self, p: &Pattern, ty: &Ty) -> bool {
+        match &p.kind {
+            PatKind::Ident { name, mutable } => self.unit_variant_of(ty, name, *mutable).is_none() && self.needs_drop(ty),
+            PatKind::Tuple(ps) => match ty {
+                Ty::Tuple(ts) => ps.iter().zip(ts).any(|(x, t)| self.pat_binds_owned(x, t)),
+                _ => false,
+            },
+            PatKind::Variant { path, args } => match ty {
+                Ty::Adt(id, targs) => {
+                    let all = self.adt_fields(*id, targs);
+                    let name = &path.last().unwrap().name;
+                    let fields = if self.is_enum(*id) {
+                        match self.variant_index(*id, name) {
+                            Some(vi) => all[vi].clone(),
+                            None => return false,
+                        }
+                    } else {
+                        all[0].clone()
+                    };
+                    args.iter().zip(&fields).any(|(x, t)| self.pat_binds_owned(x, t))
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+
     fn match_expr(&mut self, ty: &Ty, scrutinee: &'a Expr, arms: &'a [MatchArm]) -> CgResult<String> {
         let st = self.ty_of(scrutinee);
         let sct = self.cty(&st)?;
+        let owned_src = self.needs_drop(&st) && !self.is_place(scrutinee);
         let sv = self.expr(scrutinee)?;
         let never = Self::is_never(ty);
         let ct = self.cty(ty)?;
@@ -1595,16 +2432,20 @@ impl<'a> Cg<'a> {
         for arm in arms {
             self.scopes.push(Vec::new());
             let test = self.pat_test(&arm.pat, &s, &st)?;
+            if owned_src && arm.guard.is_some() && self.pat_binds_owned(&arm.pat, &st) {
+                return unsupported("a match guard on a pattern that takes ownership of part of a temporary");
+            }
             let mut binds = String::new();
-            self.pat_bind(&arm.pat, &s, &st, &mut binds)?;
+            self.pat_bind(&arm.pat, &s, &st, &mut binds, owned_src)?;
             let guard = match &arm.guard {
-                Some(g) => Some(self.expr(g)?),
+                Some(g) => Some(self.cond_expr(g)?),
                 None => None,
             };
             let body_never = Self::is_never(&self.ty_of(&arm.body));
-            let body = self.expr(&arm.body)?;
+            let body = self.owned(&arm.body)?;
             let assign = if never || body_never { format!("(void)({body});") } else { format!("{r} = {body};") };
-            let finish = format!("{assign} goto {end};");
+            let adrops = self.scope_drops(self.scopes.len() - 1)?;
+            let finish = format!("{assign} {adrops}goto {end};");
             let inner = match guard {
                 Some(g) => format!("if ({g}) {{ {finish} }}"),
                 None => finish,
@@ -1612,9 +2453,11 @@ impl<'a> Cg<'a> {
             out.push_str(&format!("if ({test}) {{ {binds}{inner} }}\n"));
             self.scopes.pop();
         }
-        out.push_str(&format!("tau_panic_cstr(\"no match arm matched the value\");\n{end}: ; {r}; }})"));
+        let sdrop = if owned_src { self.drop_stmt(&s, &st)? } else { String::new() };
+        out.push_str(&format!("tau_panic_cstr(\"no match arm matched the value\");\n{end}: ; {sdrop}{r}; }})"));
         Ok(out)
     }
+
 
     fn loop_expr(&mut self, ty: &Ty, body: &'a Block) -> CgResult<String> {
         let (brk, cont) = (self.fresh("brk"), self.fresh("cont"));
@@ -1626,7 +2469,8 @@ impl<'a> Cg<'a> {
             let r = self.fresh("lv");
             (Some(r.clone()), format!("{ct} {r} = ({ct}){{0}}; "))
         };
-        self.loops.push(LoopCtx { brk: brk.clone(), cont: cont.clone(), result: result.clone() });
+        let depth = self.scopes.len();
+        self.loops.push(LoopCtx { brk: brk.clone(), cont: cont.clone(), depth, result: result.clone() });
         let b = self.block_value(body);
         self.loops.pop();
         let b = b?;
@@ -1634,26 +2478,72 @@ impl<'a> Cg<'a> {
         Ok(format!("({{ {decl}for (;;) {{ (void)({b}); {cont}: ; }} {brk}: ; {value}; }})"))
     }
 
+
     fn while_expr(&mut self, cond: &'a Expr, body: &'a Block) -> CgResult<String> {
         let (brk, cont) = (self.fresh("brk"), self.fresh("cont"));
-        self.loops.push(LoopCtx { brk: brk.clone(), cont: cont.clone(), result: None });
-        let c = self.expr(cond);
+        let depth = self.scopes.len();
+        self.loops.push(LoopCtx { brk: brk.clone(), cont: cont.clone(), depth, result: None });
+        let c = self.cond_expr(cond);
         let b = self.block_value(body);
         self.loops.pop();
         let (c, b) = (c?, b?);
         Ok(format!("({{ for (;;) {{ if (!({c})) goto {brk}; (void)({b}); {cont}: ; }} {brk}: ; ((tau_unit)0); }})"))
     }
 
+
     fn for_expr(&mut self, pat: &'a Pattern, iter: &'a Expr, guard: Option<&'a Expr>, body: &'a Block) -> CgResult<String> {
-        let ExprKind::Range { start: Some(start), end: Some(end), inclusive } = &iter.kind else {
-            return unsupported("`for` over anything but a range (milestone 2b)");
+        let (inner, mut_iter): (&'a Expr, bool) = match &iter.kind {
+            ExprKind::MutBorrow(i) => (i, true),
+            _ => (iter, false),
         };
+        if let ExprKind::Range { start: Some(start), end: Some(end), inclusive } = &inner.kind {
+            return self.for_range(pat, start, end, *inclusive, guard, body);
+        }
+        let it_ty = self.ty_of(inner);
+        let Some(elem) = self.seq_elem(&it_ty) else {
+            return unsupported(format!("`for` over {}", self.describe(&it_ty)));
+        };
+        let place = if self.is_place(inner) { self.place(inner)?.0 } else { self.borrow(inner)? };
+        let view = self.view(&place, &it_ty)?;
+        let st = self.cty(&Ty::Slice(Box::new(elem.clone())))?;
+        let ect = self.cty(&elem)?;
+        let (s, i) = (self.fresh("seq"), self.fresh("k"));
+        let (brk, cont) = (self.fresh("brk"), self.fresh("cont"));
+        let depth = self.scopes.len();
+        self.scopes.push(Vec::new());
+        let mut bind = String::new();
+        match &pat.kind {
+            PatKind::Ident { name, .. } if mut_iter => {
+                let cname = self.fresh(name);
+                bind.push_str(&format!("{ect} *{cname} = &{s}.ptr[{i}]; "));
+                self.scopes.last_mut().unwrap().push(Local { name: name.clone(), cname, ty: elem.clone(), by_ptr: true, owns: false });
+            }
+            PatKind::Wild => {}
+            _ if mut_iter => return unsupported("a pattern in a `for ... in mut` loop"),
+            _ => self.pat_bind(pat, &format!("{s}.ptr[{i}]"), &elem, &mut bind, false)?,
+        }
+        self.loops.push(LoopCtx { brk: brk.clone(), cont: cont.clone(), depth, result: None });
+        let g = match guard {
+            Some(g) => self.cond_expr(g).map(|c| format!("if (!({c})) goto {cont}; ")),
+            None => Ok(String::new()),
+        };
+        let b = self.block_value(body);
+        self.loops.pop();
+        self.scopes.pop();
+        let (g, b) = (g?, b?);
+        Ok(format!(
+            "({{ {st} {s} = {view}; for (size_t {i} = 0; {i} < {s}.len; {i}++) {{ {bind}{g}(void)({b}); {cont}: ; }} {brk}: ; ((tau_unit)0); }})"
+        ))
+    }
+
+    fn for_range(&mut self, pat: &'a Pattern, start: &'a Expr, end: &'a Expr, inclusive: bool, guard: Option<&'a Expr>, body: &'a Block) -> CgResult<String> {
         let ty = self.ty_of(start);
         let Ty::Int(_) = ty else { return unsupported("a `for` range over non-integers") };
         let ct = self.cty(&ty)?;
         let (decls, n) = self.ordered(&[start, end])?;
         let (lo, hi, i) = (self.fresh("lo"), self.fresh("hi"), self.fresh("i"));
         let (brk, cont) = (self.fresh("brk"), self.fresh("cont"));
+        let depth = self.scopes.len();
         self.scopes.push(Vec::new());
         let mut bind = String::new();
         match &pat.kind {
@@ -1664,21 +2554,21 @@ impl<'a> Cg<'a> {
             PatKind::Wild => {}
             _ => return unsupported("this pattern in a `for` loop"),
         }
-        self.loops.push(LoopCtx { brk: brk.clone(), cont: cont.clone(), result: None });
+        self.loops.push(LoopCtx { brk: brk.clone(), cont: cont.clone(), depth, result: None });
         let g = match guard {
-            Some(g) => self.expr(g).map(|c| format!("if (!({c})) goto {cont}; ")),
+            Some(g) => self.cond_expr(g).map(|c| format!("if (!({c})) goto {cont}; ")),
             None => Ok(String::new()),
         };
         let b = self.block_value(body);
         self.loops.pop();
         self.scopes.pop();
         let (g, b) = (g?, b?);
-        let head = if *inclusive {
+        let head = if inclusive {
             format!("if ({lo} <= {hi}) for ({ct} {i} = {lo};; {i}++)")
         } else {
             format!("for ({ct} {i} = {lo}; {i} < {hi}; {i}++)")
         };
-        let tail = if *inclusive { format!("if ({i} == {hi}) goto {brk};") } else { String::new() };
+        let tail = if inclusive { format!("if ({i} == {hi}) goto {brk};") } else { String::new() };
         Ok(format!(
             "({{ {decls}{ct} {lo} = {}; {ct} {hi} = {}; {head} {{ {bind}{g}(void)({b}); {cont}: ; {tail} }} {brk}: ; ((tau_unit)0); }})",
             n[0], n[1]
