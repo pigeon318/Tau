@@ -333,7 +333,7 @@ fn fizzbuzz_example() {
 #[test]
 fn unsupported_programs_say_so_instead_of_miscompiling() {
     for src in [
-        "use std.map.Map\nfn main() { let m = Map<str, i64>.new()\n print(m.contains(\"a\")) }",
+        "fn main() { let z = 3i\n print(z) }",
         "fn main() { let f = |x: i64| x + 1\n print(f(1)) }",
         "fn main() { let t = Tensor<f64, [2]>.ones()\n print(t) }",
     ] {
@@ -540,4 +540,60 @@ fn slices_and_borrowing() {
 #[test]
 fn display_of_user_types() {
     same("struct P { x: i64, y: i64 }\nimpl Display for P {\n fn fmt(self) -> String {\n let mut s = String.new()\n s.push_str(\"P(\")\n s.push_str(\"x\")\n s.push_str(\")\")\n s\n }\n}\nfn main() {\n let p = P(1, 2)\n print(p)\n print(\"p = {p}\")\n print(vec[P(1, 2), P(3, 4)])\n}");
+}
+
+// ------------------------------------------------------------------ maps, files, programs
+
+#[test]
+fn run_examples_match_their_expected_output() {
+    if !have_cc() {
+        return;
+    }
+    for name in ["primes", "sort", "bank", "collatz", "nbody", "wordcount"] {
+        let src = std::fs::read_to_string(format!("examples/run/{name}.tau")).unwrap();
+        let want = std::fs::read_to_string(format!("examples/run/{name}.expected")).unwrap();
+        let got = same(&src);
+        assert_eq!(got, want, "{name}: output differs from the Python reference");
+    }
+}
+
+#[test]
+fn maps() {
+    same("use std.map.Map\nfn main() {\n let mut m = Map<str, i64>.new()\n m[\"b\"] = 2\n m[\"a\"] = 1\n m[\"b\"] += 5\n m[\"c\"] += 1\n print(m[\"b\"])\n print(m[\"a\"])\n print(m[\"c\"])\n print(m.contains(\"a\"))\n print(m.contains(\"z\"))\n}");
+    same("use std.map.Map\nfn main() {\n let mut m = Map<str, i64>.new()\n m[\"a\"] = 1\n print(m[\"missing\"])\n}");
+    same("use std.map.Map\nfn main() {\n let mut counts = Map<String, usize>.new()\n let text = \"the cat and the dog and the bird\"\n for w in text.split_whitespace() {\n counts[w.uppercase()] += 1\n }\n for (w, n) in counts.top(3) {\n print(\"{w}: {n}\")\n }\n print(counts.top(100).len)\n print(counts.top(0).len)\n}");
+    same("use std.map.Map\nfn main() {\n let mut m = Map<i64, f64>.new()\n for i in 0..50 { m[i % 7] += 0.5 }\n for (k, v) in m.top(7) { print(\"{k} {v}\") }\n}");
+    same("use std.map.Map\nfn main() {\n let mut m = Map<(i64, i64), str>.new()\n m[(1, 2)] = \"x\"\n m[(2, 1)] = \"y\"\n m[(1, 2)] = \"z\"\n print(m[(1, 2)])\n print(m[(2, 1)])\n print(m.contains((3, 3)))\n}");
+    same("use std.map.Map\nfn main() {\n let mut m = Map<str, Vec<i64>>.new()\n m[\"a\"].push(1)\n m[\"a\"].push(2)\n m[\"b\"].push(3)\n print(m[\"a\"])\n print(m[\"b\"].len)\n}");
+    same("use std.map.Map\nfn main() {\n let mut m = Map<String, String>.new()\n m[String.from(\"k\")] = String.from(\"one\")\n m[String.from(\"k\")] = String.from(\"two\")\n print(m[String.from(\"k\")])\n let mut big = Map<i64, i64>.new()\n for i in 0..20000 { big[i] = i * 2 }\n print(big[19999])\n print(big.contains(20000))\n}");
+}
+
+#[test]
+fn files_and_main_results() {
+    same("use std.fs\nfn main() -> Result<(), IoError> {\n let path = \"/tmp/tau-native-test.txt\"\n fs.write(path, \"alpha\\nbeta\\n\")?\n print(fs.exists(path))\n let t = fs.read(path)?\n print(t.len)\n print(t)\n print(fs.exists(\"/tmp/tau-no-such-file\"))\n Ok(())\n}");
+    if !have_cc() {
+        return;
+    }
+    // main returning Err: the message goes to stderr, exit status 1, stdout is kept
+    let src = "use std.fs\nfn main() -> Result<(), IoError> {\n print(\"before\")\n let t = fs.read(\"/tmp/tau-no-such-file\")?\n print(t)\n Ok(())\n}";
+    let got = native::run_captured(src).unwrap();
+    assert_eq!(got.stdout, "before\n");
+    assert_eq!(got.code, 1);
+    assert_eq!(got.stderr, "error: io error: No such file or directory (os error 2)\n");
+    let cap = Capture(Arc::new(Mutex::new(Vec::new())));
+    let r = tau::run_source(src, Box::new(cap.clone())).unwrap();
+    match r.outcome.unwrap() {
+        Outcome::Error(m) => assert_eq!(m, "io error: No such file or directory (os error 2)"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn clones_of_owned_values() {
+    same("fn main() {\n let v = vec[String.from(\"a\"), String.from(\"bb\")]\n let w = v[0..2].to_vec()\n print(w)\n let u = v[1..2].to_vec()\n print(u)\n print(v)\n}");
+}
+
+#[test]
+fn computed_values_are_evaluated_exactly_once() {
+    same("fn mk(tag: str) -> Vec<i64> {\n print(tag)\n vec[1, 2, 3]\n}\nfn name() -> String {\n print(\"name\")\n String.from(\"abc\")\n}\nfn main() {\n for x in mk(\"loop\") { print(x) }\n print(sum(mk(\"sum\")))\n print(mk(\"len\").len)\n print(mk(\"idx\")[1])\n print(mk(\"slice\")[1..3])\n print(name().len)\n print(name().uppercase())\n let n = name()\n print(n)\n}");
 }

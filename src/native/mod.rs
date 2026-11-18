@@ -47,7 +47,8 @@ pub fn emit_c(src: &str) -> Result<String, NativeError> {
         return Err(NativeError::Rejected(result.diagnostics));
     }
     // The checker's side tables are keyed by node address, so `user` must stay put.
-    cg::translate(&user, &result)
+    let paths = lib.iter().map(|m| m.path.clone()).collect();
+    cg::translate(&user, &result, paths)
 }
 
 /// The C compiler to use: `$TAU_CC`, else the first of clang, gcc, cc that exists.
