@@ -71,7 +71,13 @@ fn cache_dir() -> PathBuf {
             return PathBuf::from(d);
         }
     }
-    if let Ok(h) = std::env::var("HOME") {
+    if cfg!(windows) {
+        if let Ok(d) = std::env::var("LOCALAPPDATA") {
+            if !d.is_empty() {
+                return Path::new(&d).join("tau").join("cache");
+            }
+        }
+    } else if let Ok(h) = std::env::var("HOME") {
         if !h.is_empty() {
             return Path::new(&h).join(".cache").join("tau");
         }
@@ -86,13 +92,24 @@ fn cache_dir() -> PathBuf {
 ///  * `-fwrapv`: nothing in generated code relies on signed overflow being undefined.
 const CFLAGS: &[&str] = &["-O2", "-std=gnu11", "-ffp-contract=off", "-fno-optimize-sibling-calls", "-fwrapv", "-w"];
 
+/// Extra flags on Windows (MinGW-w64): C99 `printf`/`strtod`, and no dependence on the compiler's DLLs.
+#[cfg(windows)]
+const PLATFORM_FLAGS: &[&str] = &["-D__USE_MINGW_ANSI_STDIO=1", "-static"];
+#[cfg(not(windows))]
+const PLATFORM_FLAGS: &[&str] = &[];
+
+/// The file name of a compiled program with this key.
+fn exe_name(key: &str) -> String {
+    format!("tau-{key}{}", std::env::consts::EXE_SUFFIX)
+}
+
 /// Keep the cache from growing without bound: when it holds more than `max` programs, remove the
 /// least recently used until `keep` remain.
 pub fn prune_cache(dir: &Path, max: usize, keep: usize) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let mut entries: Vec<(std::time::SystemTime, PathBuf)> = rd
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().starts_with("tau-") && e.path().extension().is_none())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("tau-") && matches!(e.path().extension().and_then(|x| x.to_str()), None | Some("exe")))
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .collect();
     if entries.len() <= max {
@@ -136,7 +153,7 @@ pub fn compile_c(c_src: &str) -> Result<PathBuf, NativeError> {
     let mut h = DefaultHasher::new();
     (&cc, CFLAGS, extra, c_src).hash(&mut h);
     let key = format!("{:016x}", h.finish());
-    let exe = dir.join(format!("tau-{key}"));
+    let exe = dir.join(exe_name(&key));
     if exe.exists() {
         // remember that it is in use, so pruning removes the ones nobody runs
         if let Ok(f) = std::fs::OpenOptions::new().append(true).open(&exe) {
@@ -152,6 +169,7 @@ pub fn compile_c(c_src: &str) -> Result<PathBuf, NativeError> {
         .args(CFLAGS)
         .args(extra)
         .arg(&c_path)
+        .args(PLATFORM_FLAGS)
         .arg("-o")
         .arg(&tmp_exe)
         .args(["-lm", "-lpthread"])

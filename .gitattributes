@@ -1,0 +1,4 @@
+# Tau sources, expected outputs and docs use LF everywhere (a CRLF checkout on Windows would
+# change what the programs print and break the .expected comparisons)
+* text=auto eol=lf
+*.exe binary
