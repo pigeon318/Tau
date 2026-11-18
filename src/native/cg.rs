@@ -87,10 +87,15 @@ pub struct Cg<'a> {
     /// Temporaries (name, type) created while compiling the current statement; dropped when
     /// it ends.
     temps: Vec<Vec<(String, Ty)>>,
+    /// Dotted path of each library module (`"prelude"`, `"std.fs"`, ...), by module index.
+    mod_paths: Vec<String>,
+    /// Set while compiling the target of an assignment: `m[k] = v` and `m[k] += v` create a
+    /// missing map entry, any other use of `m[k]` panics if it is missing.
+    insert_ctx: bool,
 }
 
 /// Translate a checked program to a complete C source file (runtime included).
-pub fn translate(user: &Module, check: &CheckResult) -> Result<String, NativeError> {
+pub fn translate(user: &Module, check: &CheckResult, mod_paths: Vec<String>) -> Result<String, NativeError> {
     let mut cg = Cg {
         prog: &check.program,
         res: &check.results,
@@ -111,6 +116,8 @@ pub fn translate(user: &Module, check: &CheckResult) -> Result<String, NativeErr
         sub: Vec::new(),
         hoisted: String::new(),
         temps: Vec::new(),
+        mod_paths,
+        insert_ctx: false,
     };
     for item in &user.items {
         cg.register_item(item);
@@ -123,16 +130,17 @@ pub fn translate(user: &Module, check: &CheckResult) -> Result<String, NativeErr
         return Err(NativeError::plain("the program has no `fn main()`"));
     };
     let main_name = cg.request(main, Vec::new())?;
+    let wrapper = cg.main_wrapper(main, &main_name)?;
     while let Some(inst) = cg.queue.pop() {
         cg.gen_fn(inst)?;
     }
     Ok(format!(
-        "{}\n/* ===== generated from Tau ===== */\n{}\n{}\n{}\nstatic void tau_run_main(void) {{ {}(); }}\n",
+        "{}\n/* ===== generated from Tau ===== */\n{}\n{}\n{}\n{}\n",
         super::RUNTIME,
         cg.types,
         cg.protos,
         cg.bodies,
-        main_name
+        wrapper
     ))
 }
 
@@ -222,11 +230,14 @@ impl<'a> Cg<'a> {
                     match def.name.as_str() {
                         "String" => return Ok("String".to_string()),
                         "Vec" => return Ok(format!("Vec_{}", self.mangle(&args[0])?)),
-                        "Range" | "Ptr" | "Task" | "Cluster" | "Map" | "IoError" | "TaskPanicked" => {
+                        "Range" | "Ptr" | "Task" | "Cluster" | "TaskPanicked" => {
                             return unsupported(self.describe(ty));
                         }
                         _ => {}
                     }
+                }
+                if let Some((k, v)) = self.map_kv(ty) {
+                    return Ok(format!("Map_{}_{}", self.mangle(&k)?, self.mangle(&v)?));
                 }
                 let mut s = format!("{}{}", def.name, id.0);
                 for a in args {
@@ -316,6 +327,18 @@ impl<'a> Cg<'a> {
                 let _ = args;
                 "tau_buf".to_string()
             }
+            t if self.map_kv(t).is_some() => {
+                let (k, v) = self.map_kv(t).unwrap();
+                let key = self.mangle(ty)?;
+                if let Some(nm) = self.type_names.get(&key) {
+                    return Ok(nm.clone());
+                }
+                let (kt, vt) = (self.cty(&k)?, self.cty(&v)?);
+                let name = format!("map_{key}");
+                self.types.push_str(&format!("typedef struct {{ {kt} *keys; {vt} *vals; size_t len, cap; int64_t *tab; size_t tabcap; }} {name};\n"));
+                self.type_names.insert(key, name.clone());
+                name
+            }
             Ty::Adt(id, args) if self.is_builtin_adt(*id, "Vec") => {
                 let key = self.mangle(ty)?;
                 if let Some(nm) = self.type_names.get(&key) {
@@ -378,6 +401,42 @@ impl<'a> Cg<'a> {
         d.module == 0 && d.name == name
     }
 
+    /// `Map<K, V>` (declared in `std.map`)
+    fn map_kv(&self, ty: &Ty) -> Option<(Ty, Ty)> {
+        match ty {
+            Ty::Adt(id, args) => {
+                let d = self.prog.adt(*id);
+                if d.name == "Map" && self.mod_paths.get(d.module).map(|p| p == "std.map").unwrap_or(false) {
+                    Some((args[0].clone(), args[1].clone()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// `IoError` (declared in the prelude)
+    fn is_io_error(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Adt(id, _) if self.is_builtin_adt(*id, "IoError"))
+    }
+
+    /// The `main` wrapper the runtime calls: runs `main`, and if it returned `Err`, prints
+    /// `error: ...` to stderr and exits with status 1 (as `tau run` does).
+    fn main_wrapper(&mut self, main: FnId, main_name: &str) -> CgResult<String> {
+        let ret = self.prog.fn_(main).sig.ret.clone();
+        if let Ty::Adt(id, args) = &ret {
+            if self.is_builtin_adt(*id, "Result") {
+                let rct = self.cty(&ret)?;
+                let f = self.fmt_stmt("&m_", "r_.u.v1.f0", &args[1])?;
+                return Ok(format!(
+                    "static int tau_run_main(void) {{ {rct} r_ = {main_name}(); if (r_.tag == 1) {{ tau_buf m_ = {{0}}; {f} tau_flush_stdout(); (void)!write(2, \"error: \", 7); if (m_.len) (void)!write(2, m_.ptr, m_.len); (void)!write(2, \"\\n\", 1); return 1; }} return 0; }}"
+                ));
+            }
+        }
+        Ok(format!("static int tau_run_main(void) {{ (void){main_name}(); return 0; }}"))
+    }
+
     fn vec_elem(&self, ty: &Ty) -> Option<Ty> {
         match ty {
             Ty::Adt(id, args) if self.is_builtin_adt(*id, "Vec") => Some(args[0].clone()),
@@ -398,7 +457,10 @@ impl<'a> Cg<'a> {
             Ty::Array(t, _) => self.needs_drop(t),
             Ty::Adt(id, args) => {
                 let d = self.prog.adt(*id);
-                if d.module == 0 && matches!(d.name.as_str(), "String" | "Vec" | "Map") {
+                if d.module == 0 && matches!(d.name.as_str(), "String" | "Vec") {
+                    return true;
+                }
+                if self.map_kv(ty).is_some() {
                     return true;
                 }
                 self.adt_fields(*id, args).iter().flatten().any(|t| self.needs_drop(t))
@@ -443,6 +505,16 @@ impl<'a> Cg<'a> {
                     body.push_str(&format!("for (size_t i = 0; i < p->len; i++) {f}(&p->ptr[i]);\n"));
                 }
                 body.push_str("free(p->ptr);\n");
+            }
+            t if self.map_kv(t).is_some() => {
+                let (k, v) = self.map_kv(t).unwrap();
+                if let Some(f) = self.drop_fn(&k)? {
+                    body.push_str(&format!("for (size_t i = 0; i < p->len; i++) {f}(&p->keys[i]);\n"));
+                }
+                if let Some(f) = self.drop_fn(&v)? {
+                    body.push_str(&format!("for (size_t i = 0; i < p->len; i++) {f}(&p->vals[i]);\n"));
+                }
+                body.push_str("free(p->keys); free(p->vals); free(p->tab);\n");
             }
             Ty::Adt(id, args) => {
                 let all = self.adt_fields(*id, args);
@@ -852,6 +924,22 @@ impl<'a> Cg<'a> {
                 Ok((if l.by_ptr { format!("(*{})", l.cname) } else { l.cname.clone() }, l.ty))
             }
             ExprKind::MutBorrow(inner) => self.place(inner),
+            ExprKind::Index { base, indices } if indices.len() == 1 && self.map_kv(&self.ty_of(base)).is_some() => {
+                let insert = std::mem::take(&mut self.insert_ctx);
+                let bt = self.ty_of(base);
+                let (kt, vt) = self.map_kv(&bt).unwrap();
+                let (b, _) = self.place(base)?;
+                if insert {
+                    // `m[k] = v` and `m[k] += v` create a missing entry (starting from zero)
+                    let slot = self.map_helper(&bt, "slot")?;
+                    let key = self.convert(&indices[0], &kt)?;
+                    Ok((format!("(*{slot}(&{b}, {key}))"), vt))
+                } else {
+                    let get = self.map_helper(&bt, "get")?;
+                    let key = self.borrowed_as(&indices[0], &kt)?;
+                    Ok((format!("(*{get}(&{b}, {key}))"), vt))
+                }
+            }
             ExprKind::Index { base, indices } if indices.len() == 1 && !matches!(indices[0].kind, ExprKind::Range { .. }) => {
                 let bt = self.ty_of(base);
                 let elem = match &bt {
@@ -947,11 +1035,12 @@ impl<'a> Cg<'a> {
                 let st = self.cty(&Ty::Slice(t.clone()))?;
                 format!("(({st}){{ ({place}).v, {n} }})")
             }
-            t if self.is_string(t) => format!("((tau_str){{ ({place}).ptr, ({place}).len }})"),
+            // the place is evaluated once (it may be a computed temporary)
+            t if self.is_string(t) => format!("({{ __auto_type vp_ = &({place}); (tau_str){{ vp_->ptr, vp_->len }}; }})"),
             t => match self.vec_elem(t) {
                 Some(el) => {
                     let st = self.cty(&Ty::Slice(Box::new(el)))?;
-                    format!("(({st}){{ ({place}).ptr, ({place}).len }})")
+                    format!("({{ __auto_type vp_ = &({place}); ({st}){{ vp_->ptr, vp_->len }}; }})")
                 }
                 None => return unsupported(format!("viewing {} as a slice", self.describe(t))),
             },
@@ -1120,6 +1209,9 @@ impl<'a> Cg<'a> {
                 body.push_str(&format!(
                     "tau_buf_char(b, '[');\nfor (size_t i = 0; i < {len}; i++) {{ if (i > 0) tau_buf_cstr(b, \", \"); {ect} x_ = {ptr}[i]; {f} }}\ntau_buf_char(b, ']');\n"
                 ));
+            }
+            t if self.is_io_error(t) => {
+                body.push_str("tau_buf_cstr(b, \"io error: \"); tau_buf_push(b, v.f0.ptr, v.f0.len);\n");
             }
             Ty::Adt(..) => {
                 // a user type: call its `Display` implementation, which returns a String
@@ -1750,6 +1842,15 @@ impl<'a> Cg<'a> {
     }
 
 
+    /// The place assigned to: for `m[k]` on a map this creates a missing entry.
+    fn assign_target(&mut self, lhs: &'a Expr) -> CgResult<(String, Ty)> {
+        let direct_map = matches!(&lhs.kind, ExprKind::Index { base, indices } if indices.len() == 1 && self.map_kv(&self.ty_of(base)).is_some());
+        self.insert_ctx = direct_map;
+        let r = self.place(lhs);
+        self.insert_ctx = false;
+        r
+    }
+
     fn assign(&mut self, e: &'a Expr, op: Option<BinOp>, lhs: &'a Expr, rhs: &'a Expr) -> CgResult<String> {
         let lt = self.ty_of(lhs);
         let rty = self.ty_of(rhs);
@@ -1759,14 +1860,14 @@ impl<'a> Cg<'a> {
         match op {
             None => {
                 let r = self.convert(rhs, &lt)?;
-                let (target, _) = self.place(lhs)?;
+                let (target, _) = self.assign_target(lhs)?;
                 let drop = self.drop_stmt(&format!("*{ptr}"), &lt)?;
                 Ok(format!("({{ {lct} {rv} = {r}; {lct} *{ptr} = &{target}; {drop}*{ptr} = {rv}; ((tau_unit)0); }})"))
             }
             Some(bop) => {
                 let rt = self.cty(&rty)?;
                 let r = self.expr(rhs)?;
-                let (target, _) = self.place(lhs)?;
+                let (target, _) = self.assign_target(lhs)?;
                 if let Some(Res::Fn(fid, subst)) = self.res.expr_res.get(&NodeKey::of(e)) {
                     // `a += b` on a user type is `a = add(a, b)`
                     let subst = self.apply_sub(subst);
@@ -1807,9 +1908,9 @@ impl<'a> Cg<'a> {
             let name = self.request(fid, subst.clone())?;
             return Ok(Target::User { name, fid, sub: subst });
         }
-        if def.module != 0 {
-            return unsupported(format!("the library function `{}`", def.name));
-        }
+        let Some(path) = self.mod_paths.get(def.module).cloned() else {
+            return unsupported(format!("calling `{}`", def.name));
+        };
         let key = match def.parent {
             Parent::Impl(i) => {
                 let head = match &self.prog.impl_(i).self_ty {
@@ -1820,7 +1921,8 @@ impl<'a> Cg<'a> {
                 };
                 format!("{head}::{}", def.name)
             }
-            _ => def.name.clone(),
+            _ if path == "prelude" => def.name.clone(),
+            _ => format!("{path}::{}", def.name),
         };
         Ok(Target::Builtin { key, fid, sub: subst })
     }
@@ -1940,7 +2042,8 @@ impl<'a> Cg<'a> {
             ops.push((*a, mode, ty));
         }
         if let Target::Builtin { key, .. } = &target {
-            return self.builtin(key, &tsub, &ops);
+            let ret = sig.ret.subst(&tsub);
+            return self.builtin(key, &tsub, &ret, &ops);
         }
         let Target::User { name, .. } = target else { unreachable!() };
         let (decls, names) = self.ordered_args(&ops)?;
@@ -2014,7 +2117,7 @@ impl<'a> Cg<'a> {
     }
 
 
-    fn builtin(&mut self, key: &str, subst: &[(GenericId, Ty)], ops: &[(&'a Expr, ParamMode, Ty)]) -> CgResult<String> {
+    fn builtin(&mut self, key: &str, subst: &[(GenericId, Ty)], ret: &Ty, ops: &[(&'a Expr, ParamMode, Ty)]) -> CgResult<String> {
         let args: Vec<&'a Expr> = ops.iter().map(|o| o.0).collect();
         let targ = subst.first().map(|(_, t)| t.clone());
         let name = key;
@@ -2112,15 +2215,16 @@ impl<'a> Cg<'a> {
             }
             "slice::to_vec" => {
                 let Ty::Slice(el) = &ops[0].2 else { return unsupported("`to_vec` on this type") };
-                if self.needs_drop(el) {
-                    return unsupported("`to_vec` of elements that own memory");
-                }
                 let vt = self.cty(&Ty::Adt(self.vec_adt()?, vec![(**el).clone()]))?;
                 let et = self.cty(el)?;
                 let v = self.borrowed_as(ops[0].0, &ops[0].2)?;
                 let sty = self.cty(&ops[0].2)?;
+                let copy = match self.clone_fn(el)? {
+                    Some(f) => format!("for (size_t i_ = 0; i_ < s_.len; i_++) r_.ptr[i_] = {f}(&s_.ptr[i_]);"),
+                    None => format!("memcpy(r_.ptr, s_.ptr, s_.len * sizeof({et}));"),
+                };
                 Ok(format!(
-                    "({{ {sty} s_ = {v}; {vt} r_ = {{0}}; if (s_.len > 0) {{ r_.ptr = ({et} *)malloc(s_.len * sizeof({et})); memcpy(r_.ptr, s_.ptr, s_.len * sizeof({et})); r_.len = r_.cap = s_.len; }} r_; }})"
+                    "({{ {sty} s_ = {v}; {vt} r_ = {{0}}; if (s_.len > 0) {{ r_.ptr = ({et} *)malloc(s_.len * sizeof({et})); {copy} r_.len = r_.cap = s_.len; }} r_; }})"
                 ))
             }
             "Vec::new" => {
@@ -2141,6 +2245,66 @@ impl<'a> Cg<'a> {
                 let f = self.vec_helper(&el, "pop")?;
                 let p = self.mut_ptr(ops[0].0)?;
                 Ok(format!("{f}({p})"))
+            }
+            "std.fs::read" | "std.io::read_line" => {
+                let rct = self.cty(ret)?;
+                let Ty::Adt(_, rargs) = ret else { return unsupported("this library call") };
+                let ect = self.cty(&rargs[1])?;
+                let call = if name == "std.fs::read" {
+                    let p = self.borrowed_as(ops[0].0, &Ty::Str)?;
+                    format!("tau_fs_read({p}, &s_)")
+                } else {
+                    "tau_read_line(&s_)".to_string()
+                };
+                Ok(format!(
+                    "({{ tau_buf s_ = {{0}}; int e_ = {call}; {rct} r_; if (e_) {{ {ect} ie_ = {{ tau_io_msg(e_) }}; r_ = ({rct}){{ .tag = 1, .u.v1 = {{ ie_ }} }}; }} else {{ r_ = ({rct}){{ .tag = 0, .u.v0 = {{ s_ }} }}; }} r_; }})"
+                ))
+            }
+            "std.fs::write" => {
+                let rct = self.cty(ret)?;
+                let Ty::Adt(_, rargs) = ret else { return unsupported("this library call") };
+                let ect = self.cty(&rargs[1])?;
+                let (decls, n) = {
+                    let p = self.borrowed_as(ops[0].0, &Ty::Str)?;
+                    let d = self.borrowed_as(ops[1].0, &Ty::Str)?;
+                    (String::new(), vec![p, d])
+                };
+                Ok(format!(
+                    "({{ {decls}tau_str p_ = {}; tau_str d_ = {}; int e_ = tau_fs_write(p_, d_); {rct} r_; if (e_) {{ {ect} ie_ = {{ tau_io_msg(e_) }}; r_ = ({rct}){{ .tag = 1, .u.v1 = {{ ie_ }} }}; }} else {{ r_ = ({rct}){{ .tag = 0, .u.v0 = {{ 0 }} }}; }} r_; }})",
+                    n[0], n[1]
+                ))
+            }
+            "std.fs::exists" => {
+                let p = self.borrowed_as(ops[0].0, &Ty::Str)?;
+                Ok(format!("tau_fs_exists({p})"))
+            }
+            "Map::new" => {
+                let mt = self.cty(ret)?;
+                Ok(format!("(({mt}){{0}})"))
+            }
+            "Map::contains" | "Map::index" | "Map::top" => {
+                let self_ty = ops[0].2.clone();
+                let Some((kt, _)) = self.map_kv(&self_ty) else { return unsupported("this map operation") };
+                let f = self.map_helper(&self_ty, if name == "Map::top" { "top" } else { "find" })?;
+                let m = self.borrow(ops[0].0)?;
+                let mt = self.cty(&self_ty)?;
+                match name {
+                    "Map::top" => {
+                        let n = self.expr(ops[1].0)?;
+                        Ok(format!("({{ {mt} *m_ = &({m}); uint64_t n_ = (uint64_t)({n}); {f}(m_, n_); }})"))
+                    }
+                    "Map::contains" => {
+                        let k = self.borrowed_as(ops[1].0, &kt)?;
+                        let kct = self.cty(&kt)?;
+                        Ok(format!("({{ {mt} *m_ = &({m}); {kct} k_ = {k}; {f}(m_, k_) >= 0; }})"))
+                    }
+                    _ => {
+                        let get = self.map_helper(&self_ty, "get")?;
+                        let k = self.borrowed_as(ops[1].0, &kt)?;
+                        let kct = self.cty(&kt)?;
+                        Ok(format!("(*({{ {mt} *m_ = &({m}); {kct} k_ = {k}; {get}(m_, k_); }}))"))
+                    }
+                }
             }
             "String::new" => Ok("((tau_buf){0})".to_string()),
             "String::from" | "str::to_string" => {
@@ -2165,6 +2329,204 @@ impl<'a> Cg<'a> {
             }
             other => unsupported(format!("the library function `{other}`")),
         }
+    }
+
+
+    /// An expression hashing the key `v` of type `ty`.
+    fn hash_expr(&mut self, v: &str, ty: &Ty) -> CgResult<String> {
+        Ok(match ty {
+            Ty::Int(IntTy::I128 | IntTy::U128) => format!("tau_hash_u64((uint64_t)({v}) ^ (uint64_t)((unsigned __int128)({v}) >> 64))"),
+            Ty::Int(_) | Ty::Bool | Ty::Char => format!("tau_hash_u64((uint64_t)({v}))"),
+            Ty::Str => format!("tau_hash_bytes(({v}).ptr, ({v}).len)"),
+            t if self.is_string(t) => format!("tau_hash_bytes(({v}).ptr, ({v}).len)"),
+            Ty::Tuple(ts) if !ts.is_empty() => {
+                let mut acc = String::from("0x9e3779b97f4a7c15ULL");
+                for (i, t) in ts.iter().enumerate() {
+                    let h = self.hash_expr(&format!("({v}).f{i}"), t)?;
+                    acc = format!("tau_hash_mix({acc}, {h})");
+                }
+                acc
+            }
+            other => return unsupported(format!("{} as a map key", self.describe(other))),
+        })
+    }
+
+    /// The function that clones a value of this type (a deep copy); `None` if a plain copy
+    /// is already a clone.
+    fn clone_fn(&mut self, ty: &Ty) -> CgResult<Option<String>> {
+        if !self.needs_drop(ty) {
+            return Ok(None);
+        }
+        let m = self.mangle(ty)?;
+        let name = format!("tau_clone_{m}");
+        if !self.helpers.insert(name.clone()) {
+            return Ok(Some(name));
+        }
+        let ct = self.cty(ty)?;
+        self.protos.push_str(&format!("static {ct} {name}(const {ct} *p);\n"));
+        let mut body = format!("{ct} r = *p;\n");
+        match ty {
+            Ty::Tuple(ts) => {
+                for (i, t) in ts.iter().enumerate() {
+                    if let Some(f) = self.clone_fn(t)? {
+                        body.push_str(&format!("r.f{i} = {f}(&p->f{i});\n"));
+                    }
+                }
+            }
+            Ty::Array(t, Some(n)) => {
+                if let Some(f) = self.clone_fn(t)? {
+                    body.push_str(&format!("for (size_t i = 0; i < {n}; i++) r.v[i] = {f}(&p->v[i]);\n"));
+                }
+            }
+            t if self.is_string(t) => {
+                body.push_str("r.ptr = 0; r.len = r.cap = 0; tau_buf_push(&r, p->ptr, p->len);\n");
+            }
+            t if self.vec_elem(t).is_some() => {
+                let el = self.vec_elem(t).unwrap();
+                let et = self.cty(&el)?;
+                body.push_str(&format!("r.ptr = 0; r.len = r.cap = 0; if (p->len) {{ r.ptr = ({et} *)malloc(p->len * sizeof({et})); r.len = r.cap = p->len; "));
+                match self.clone_fn(&el)? {
+                    Some(f) => body.push_str(&format!("for (size_t i = 0; i < p->len; i++) r.ptr[i] = {f}(&p->ptr[i]); }}\n")),
+                    None => body.push_str(&format!("memcpy(r.ptr, p->ptr, p->len * sizeof({et})); }}\n")),
+                }
+            }
+            Ty::Adt(id, args) if self.map_kv(ty).is_none() => {
+                let all = self.adt_fields(*id, args);
+                if self.is_enum(*id) {
+                    body.push_str("switch (p->tag) {\n");
+                    for (vi, fields) in all.iter().enumerate() {
+                        let mut inner = String::new();
+                        for (i, t) in fields.iter().enumerate() {
+                            if let Some(f) = self.clone_fn(t)? {
+                                inner.push_str(&format!("r.u.v{vi}.f{i} = {f}(&p->u.v{vi}.f{i}); "));
+                            }
+                        }
+                        if !inner.is_empty() {
+                            body.push_str(&format!("case {vi}: {inner}break;\n"));
+                        }
+                    }
+                    body.push_str("default: break;\n}\n");
+                } else {
+                    for (i, t) in all[0].iter().enumerate() {
+                        if let Some(f) = self.clone_fn(t)? {
+                            body.push_str(&format!("r.f{i} = {f}(&p->f{i});\n"));
+                        }
+                    }
+                }
+            }
+            other => return unsupported(format!("cloning {}", self.describe(other))),
+        }
+        body.push_str("return r;\n");
+        self.bodies.push_str(&format!("static {ct} {name}(const {ct} *p) {{\n{body}}}\n"));
+        Ok(Some(name))
+    }
+
+    /// The C functions implementing a `Map<K, V>` (generated together on first use) and the
+    /// name of the one asked for: `find` (index or -1), `get` (pointer, panics if missing),
+    /// `slot` (pointer, inserts a zeroed entry if missing, taking ownership of the key) or `top`.
+    fn map_helper(&mut self, mty: &Ty, kind: &str) -> CgResult<String> {
+        let (k, v) = self.map_kv(mty).ok_or_else(|| NativeError::plain("not a map"))?;
+        let m = self.mangle(mty)?;
+        let base = format!("tau_map_{{}}_{m}");
+        let name = |what: &str| base.replace("{}", what);
+        if self.helpers.insert(format!("map_family_{m}")) {
+            let mt = self.cty(mty)?;
+            let (kt, vt) = (self.cty(&k)?, self.cty(&v)?);
+            let hash = self.hash_expr("k", &k)?;
+            let eq = self.eq_expr("m->keys[i]", "k", &k)?;
+            let kdrop = self.drop_stmt("k", &k)?;
+            let (find, get, slot, rehash) = (name("find"), name("get"), name("slot"), name("rehash"));
+            self.protos.push_str(&format!(
+                "static int64_t {find}({mt} *m, {kt} k);\nstatic {vt} *{get}({mt} *m, {kt} k);\nstatic {vt} *{slot}({mt} *m, {kt} k);\nstatic void {rehash}({mt} *m, size_t ncap);\n"
+            ));
+            self.bodies.push_str(&format!(
+                "static int64_t {find}({mt} *m, {kt} k) {{
+  if (m->len == 0) return -1;
+  size_t mask = m->tabcap - 1, h = (size_t)({hash}) & mask;
+  for (;;) {{ int64_t i = m->tab[h]; if (i < 0) return -1; if ({eq}) return i; h = (h + 1) & mask; }}
+}}
+static void {rehash}({mt} *m, size_t ncap) {{
+  free(m->tab);
+  m->tab = (int64_t *)malloc(ncap * sizeof(int64_t));
+  if (!m->tab) tau_panic_cstr(\"out of memory\");
+  for (size_t i = 0; i < ncap; i++) m->tab[i] = -1;
+  m->tabcap = ncap;
+  for (size_t j = 0; j < m->len; j++) {{
+    {kt} k = m->keys[j];
+    size_t h = (size_t)({hash}) & (ncap - 1);
+    while (m->tab[h] >= 0) h = (h + 1) & (ncap - 1);
+    m->tab[h] = (int64_t)j;
+  }}
+}}
+static {vt} *{get}({mt} *m, {kt} k) {{
+  int64_t i = {find}(m, k);
+  if (i < 0) tau_panic_cstr(\"key not found in map\");
+  return &m->vals[i];
+}}
+static {vt} *{slot}({mt} *m, {kt} k) {{
+  int64_t i = {find}(m, k);
+  if (i >= 0) {{ {kdrop}return &m->vals[i]; }}
+  if (m->len == m->cap) {{
+    size_t c = m->cap ? m->cap * 2 : 4;
+    m->keys = ({kt} *)realloc(m->keys, c * sizeof({kt}));
+    m->vals = ({vt} *)realloc(m->vals, c * sizeof({vt}));
+    if (!m->keys || !m->vals) tau_panic_cstr(\"out of memory\");
+    m->cap = c;
+  }}
+  if ((m->len + 1) * 2 > m->tabcap) {rehash}(m, m->tabcap ? m->tabcap * 2 : 8);
+  m->keys[m->len] = k;
+  memset(&m->vals[m->len], 0, sizeof({vt}));
+  size_t h = (size_t)({hash}) & (m->tabcap - 1);
+  while (m->tab[h] >= 0) h = (h + 1) & (m->tabcap - 1);
+  m->tab[h] = (int64_t)m->len;
+  m->len++;
+  return &m->vals[m->len - 1];
+}}
+"
+            ));
+        }
+        if kind == "top" && self.helpers.insert(format!("map_top_{m}")) {
+            let mt = self.cty(mty)?;
+            let pair = Ty::Tuple(vec![k.clone(), v.clone()]);
+            let vecp = Ty::Adt(self.vec_adt()?, vec![pair.clone()]);
+            let (pt, vect) = (self.cty(&pair)?, self.cty(&vecp)?);
+            let by_value = self.cmp_expr("m->vals[j]", "m->vals[i]", &v)?;
+            let by_key = self.cmp_expr("m->keys[i]", "m->keys[j]", &k)?;
+            let kc = match self.clone_fn(&k)? {
+                Some(f) => format!("{f}(&m->keys[idx[i]])"),
+                None => "m->keys[idx[i]]".to_string(),
+            };
+            let vc = match self.clone_fn(&v)? {
+                Some(f) => format!("{f}(&m->vals[idx[i]])"),
+                None => "m->vals[idx[i]]".to_string(),
+            };
+            let (cmpf, top) = (name("topcmp"), name("top"));
+            self.protos.push_str(&format!("static {vect} {top}({mt} *m, uint64_t n);\n"));
+            self.bodies.push_str(&format!(
+                "static int {cmpf}(const void *a, const void *b, void *ctx) {{
+  {mt} *m = ({mt} *)ctx;
+  size_t i = *(const size_t *)a, j = *(const size_t *)b;
+  int c = {by_value};
+  if (c == 0) {{ int kc = {by_key}; return kc == 2 ? 0 : kc; }}
+  return c == 2 ? 0 : c;
+}}
+static {vect} {top}({mt} *m, uint64_t n) {{
+  {vect} r = {{0}};
+  if (m->len == 0 || n == 0) return r;
+  size_t *idx = (size_t *)malloc(m->len * sizeof(size_t));
+  for (size_t i = 0; i < m->len; i++) idx[i] = i;
+  qsort_r(idx, m->len, sizeof(size_t), {cmpf}, m);
+  size_t cnt = n < m->len ? (size_t)n : m->len;
+  r.ptr = ({pt} *)malloc(cnt * sizeof({pt}));
+  r.len = r.cap = cnt;
+  for (size_t i = 0; i < cnt; i++) r.ptr[i] = ({pt}){{ {kc}, {vc} }};
+  free(idx);
+  return r;
+}}
+"
+            ));
+        }
+        Ok(name(kind))
     }
 
     fn vec_adt(&self) -> CgResult<AdtId> {
