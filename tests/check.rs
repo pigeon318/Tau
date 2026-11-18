@@ -624,3 +624,33 @@ fn types_are_never_silently_errors_in_accepted_programs() {
         assert!(r.results.bindings.iter().all(|b| !format!("{:?}", b.ty).contains("Error")), "{src}");
     }
 }
+
+// ------------------------------------------------------------------ infinite-size types
+
+#[test]
+fn a_type_that_contains_itself_is_rejected() {
+    err("enum List {\n Nil\n Cons(i64, List)\n}", "contains itself");
+    err("struct Node { next: Node }", "contains itself");
+    err("struct Node { next: Option<Node> }", "contains itself");
+    err("struct Node { pair: (i64, Node) }", "contains itself");
+    err("struct Node { arr: [Node; 2] }", "contains itself");
+}
+
+#[test]
+fn mutually_recursive_types_are_rejected() {
+    let r = err("struct A { b: B }\nstruct B { a: A }", "contains itself");
+    assert_eq!(r.diagnostics.len(), 2, "each type is reported");
+}
+
+#[test]
+fn a_type_may_refer_to_itself_through_a_vec() {
+    ok("struct Tree {\n value: i64\n children: Vec<Tree>\n}");
+    ok("enum Json {\n Num(f64)\n List(Vec<Json>)\n}");
+    ok("struct Graph {\n edges: Vec<(usize, usize)>\n names: Vec<String>\n}");
+}
+
+#[test]
+fn recursion_through_generic_wrappers_is_found() {
+    err("struct W<T> { inner: T }\nstruct Bad { w: W<Bad> }", "contains itself");
+    ok("struct W<T> { inner: T }\nstruct Fine { w: W<i64> }");
+}

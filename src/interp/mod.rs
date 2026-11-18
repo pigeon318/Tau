@@ -523,15 +523,79 @@ impl<'a> Interp<'a> {
 
     // ------------------------------------------------------------ display
 
-    fn float_text(&self, x: f64) -> String {
+    /// The text of a float: the shortest digits that read back exactly, never in
+    /// scientific notation, and with `.0` added when the value is a whole number.
+    pub fn float_text(&self, x: f64) -> String {
         if x.is_nan() {
             "NaN".to_string()
         } else if x.is_infinite() {
             if x > 0.0 { "inf".to_string() } else { "-inf".to_string() }
-        } else if x == x.trunc() && x.abs() < 1e16 {
-            format!("{x:.1}")
         } else {
-            format!("{x}")
+            let mut s = format!("{x}");
+            if !s.contains('.') {
+                s.push_str(".0");
+            }
+            s
+        }
+    }
+
+    /// Like `float_text`, for a single-precision value: the shortest digits that read back
+    /// exactly *as an `f32`* (so `0.1f32` prints as `0.1`, not as its `f64` widening).
+    pub fn f32_text(&self, x: f32) -> String {
+        if x.is_nan() {
+            "NaN".to_string()
+        } else if x.is_infinite() {
+            if x > 0.0 { "inf".to_string() } else { "-inf".to_string() }
+        } else {
+            let mut s = format!("{x}");
+            if !s.contains('.') {
+                s.push_str(".0");
+            }
+            s
+        }
+    }
+
+    /// Display a value whose static type is known, which lets `f32`s (and containers of
+    /// them) print in single precision. Falls back to `display` for everything else.
+    pub fn display_ty(&mut self, v: &Value<'a>, ty: &Ty) -> R<'a, String> {
+        let v = self.deref(v.clone())?;
+        match (&v, ty) {
+            (Value::Float(x), Ty::Float(FloatTy::F32)) => Ok(self.f32_text(*x as f32)),
+            (Value::Complex(a, b), Ty::Complex(FloatTy::F32)) => {
+                let (re, im) = (self.f32_text(*a as f32), self.f32_text(b.abs() as f32));
+                Ok(if *b < 0.0 { format!("{re}-{im}i") } else { format!("{re}+{im}i") })
+            }
+            (Value::Tuple(s), Ty::Tuple(ts)) if s.borrow().len() == ts.len() => {
+                let items = s.borrow().clone();
+                let mut parts = Vec::new();
+                for (x, t) in items.iter().zip(ts) {
+                    parts.push(self.display_ty(x, t)?);
+                }
+                Ok(if parts.len() == 1 { format!("({},)", parts[0]) } else { format!("({})", parts.join(", ")) })
+            }
+            (Value::Array(s) | Value::Vec(s), t) => {
+                let elem = match t {
+                    Ty::Array(e, _) | Ty::Slice(e) => Some((**e).clone()),
+                    Ty::Adt(_, args) if args.len() == 1 => Some(args[0].clone()),
+                    _ => None,
+                };
+                let Some(elem) = elem else { return self.display(&v) };
+                let items = s.borrow().clone();
+                let mut parts = Vec::new();
+                for x in &items {
+                    parts.push(self.display_ty(x, &elem)?);
+                }
+                Ok(format!("[{}]", parts.join(", ")))
+            }
+            (Value::Slice(s, a, b), Ty::Slice(elem) | Ty::Array(elem, _)) => {
+                let items: Vec<Value<'a>> = s.borrow()[*a..*b].to_vec();
+                let mut parts = Vec::new();
+                for x in &items {
+                    parts.push(self.display_ty(x, elem)?);
+                }
+                Ok(format!("[{}]", parts.join(", ")))
+            }
+            _ => self.display(&v),
         }
     }
 

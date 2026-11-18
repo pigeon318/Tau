@@ -1,7 +1,8 @@
 # Tau native backend: design proposal
 
-**Status:** proposal, for review. No backend code exists yet; the only code is the three measurement
-spikes in [`spikes/`](spikes/).
+**Status:** design approved (decisions in §19). Milestone 0, the prerequisites in the existing compiler,
+is done (§14). No backend code exists yet; the only new code besides M0 is the three measurement spikes in
+[`spikes/`](spikes/).
 
 **Summary.** Compile Tau to **C**, then let the system C compiler (`clang`, else `gcc`) produce the
 executable. Between the checked AST and the C text sits a small monomorphic, explicitly-dropped IR.
@@ -290,21 +291,21 @@ Spike result: 3.9× on 4 cores for `par sum`.
 
 ---
 
-## 14. Changes to the existing compiler, before the backend
+## 14. Changes to the existing compiler, before the backend (milestone 0)
 
-These are small, each independently useful, and each keeps the interpreter the reference:
+Small, each independently useful, each keeping the interpreter the reference.
 
-1. **Deterministic `par sum`.** Evaluate float reductions in 4096-element blocks combined in order (§9).
-   Changes the printed digits of one example (`integrate`); update its `.expected` and the Python
-   reference.
-2. **Print `f32` correctly.** The interpreter currently prints an `f32` by widening it to `f64`
-   (`0.1f32` shows `0.10000000149011612`, should show `0.1`). Use the shortest text that round-trips
-   *as an `f32`*.
-3. **Export borrow-checker facts**: closure capture kinds and per-local move/drop information, as a new
-   side table rather than private state.
-4. **Reject (or `Box`) recursive types** (§8).
-5. **Expose the monomorphization inputs cleanly**: a function that, given `(FnId, substitution)`, returns
-   the resolved impl method, shared by the interpreter and the backend instead of duplicated.
+| | Change | State |
+|---|---|---|
+| 1 | **Deterministic `par` reductions.** Float `sum`/`prod` (and every reduction) are evaluated in fixed 4096-item blocks combined in order (§9). The independent Python model gives `integrate` = `1.999999999998355` (was `...84077`) and Tau now matches it. | done |
+| 2 | **Correct float printing.** An `f32` prints as the shortest text that round-trips *as an `f32`* (`0.1f32` shows `0.1`, not `0.10000000149011612`); whole floats of any size end in `.0`; never scientific notation. Printing is now type-directed, so `Vec<f32>`, tuples and tensors are right too. | done |
+| 3 | **Reject infinite-size types.** `enum List { Nil, Cons(i64, List) }` (directly, through `Option`, a tuple, an array, a generic wrapper, or mutually) is an error with a hint to use a `Vec`. `Box<T>` is deferred until Tau has a way to look inside it. | done |
+| 4 | **Export closure capture kinds** (move / mutable reference / shared reference) from the borrow checker. | moved to M3, designed against its first consumer |
+| 5 | **Export per-local move/drop facts** for drop elaboration. | moved to M2, designed against its first consumer |
+| 6 | **One shared "resolve this trait method for these types"** function used by the interpreter and the backend. | moved to M3 |
+
+Items 4 to 6 are deliberately postponed: an interface designed before its first user is usually the
+wrong shape, and each lands in the milestone that needs it.
 
 ---
 
@@ -348,10 +349,10 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
 
 | # | Scope | Done when |
 |---|---|---|
-| **M0** | Prerequisites (§14) | interpreter changes merged; backend-facing tables exposed |
+| **M0** | Prerequisites (§14, items 1 to 3) | **done**: interpreter and checker changes, with tests |
 | **M1** | Scalars, functions, control flow, checked arithmetic, panics, `print` of scalars/strings | `hello`, `fizzbuzz`, `primes`, `collatz`, recursion tests |
-| **M2** | Tuples, structs, enums, `Option`/`Result`/`?`, `match`, arrays, `Vec`, slices, `String`, `str`, `Map`, ownership and drops | `sort`, `bank`, `wordcount`, `errors`, `shapes`, `ownership` |
-| **M3** | Generics, traits, default methods, operators, `Display`/`Eq`/`Ord`, closures, `fn` values | `nbody`, `traits`, `borrowing`, closure tests |
+| **M2** | Tuples, structs, enums, `Option`/`Result`/`?`, `match`, arrays, `Vec`, slices, `String`, `str`, `Map`, ownership and drops (incl. §14 item 5) | `sort`, `bank`, `wordcount`, `errors`, `shapes`, `ownership` |
+| **M3** | Generics, traits, default methods, operators, `Display`/`Eq`/`Ord`, closures, `fn` values (incl. §14 items 4 and 6) | `nbody`, `traits`, `borrowing`, closure tests |
 | **M4** | Tensors, maths library, `linalg`, FFT | `tensors`, matrix and FFT tests |
 | **M5** | Thread pool, `par for`/`par sum`/`par_chunks`, `spawn`/`join`, task panics | `parallel`, `integrate`; ≥3.5× on 4 cores |
 | **M6** | `tau build`/`run`/`test` integration, caching, error messages, docs, benchmark suite | all of the above, native by default |
@@ -374,19 +375,20 @@ M1 to M3 are the bulk of the work; M4 and M5 are mostly runtime code; M6 is poli
 
 ---
 
-## 19. Decisions I need from you
+## 19. Decisions
 
-1. **Is requiring a system C compiler acceptable?** (clang or gcc must be installed to build native
-   programs; the interpreter remains the fallback.) The alternative is an LLVM-based backend, which is more
-   work and a heavier build, with no speed advantage.
-2. **Recursive types.** Add `Box<T>` to the language now (and reject unboxed recursion), or reject all
-   recursive types for v1?
-3. **Deterministic `par sum`.** Are you happy to define float reductions as fixed 4096-element blocks
-   combined in order (so results never depend on core count), at the price of changing the digits the
-   interpreter prints for `integrate`?
-4. **Default for `tau run`.** Native when available, or interpreter by default with `--native` opt-in?
-   (I recommend native by default, with `--interp` as the reference.)
-5. **Platforms.** Linux first (what we can test here). Is macOS/Windows needed soon? Threads and the
+Answered:
+
+1. **A system C compiler is required for native builds.** Yes. The interpreter remains the fallback when none is found.
+2. **Recursive types.** Rejected with a clear error for now; `Box<T>` comes later, together with a way to
+   look inside it (a dereference syntax or pattern), which deserves its own design.
+3. **Deterministic `par` reductions.** Yes: fixed 4096-item blocks combined in order, so a result never
+   depends on the number of cores. (Recommended and accepted; costs nothing measurable, see §2.)
+4. **`tau run` defaults to native** when a C compiler is available; `--interp` selects the reference interpreter.
+
+Still open (not blocking M1 to M3):
+
+5. **Platforms.** Linux first (what can be tested here). macOS/Windows later; threads and the
    stack-overflow handler are the platform-specific parts.
-6. **BLAS.** Our own kernels reproduce the interpreter bit-for-bit. Linking the system BLAS would make large
-   matrix products faster but changes the last digits. Opt-in later (`--blas`), or never?
+6. **BLAS.** Our own kernels reproduce the interpreter bit for bit. Linking the system BLAS would speed up
+   large matrix products but change the last digits; opt-in later (`--blas`), or never?

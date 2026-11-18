@@ -50,22 +50,40 @@ def sort():
 
 
 def fmt(x):
-    # Tau prints floats with a trailing ".0" when they are whole, else the shortest repr
-    if x == int(x) and abs(x) < 1e16:
-        return f"{x:.1f}"
-    return repr(x)
+    """Tau prints a float as the shortest digits that read back exactly, never in
+    scientific notation, with ".0" added when the value is a whole number."""
+    from decimal import Decimal
+    text = format(Decimal(repr(x)), "f")
+    return text if "." in text else text + ".0"
+
+
+BLOCK = 4096
+
+
+def blocked(values, combine):
+    """A parallel reduction: blocks of 4096 items, each reduced in order from its first
+    item, block results combined in block order (so the answer never depends on the
+    number of threads)."""
+    blocks, cur, n = [], None, 0
+    for x in values:
+        cur = x if cur is None else combine(cur, x)
+        n += 1
+        if n == BLOCK:
+            blocks.append(cur)
+            cur, n = None, 0
+    if cur is not None:
+        blocks.append(cur)
+    acc = None
+    for b in blocks:
+        acc = b if acc is None else combine(acc, b)
+    return acc
 
 
 def integrate():
     n = 1000000
     a, b = 0.0, math.pi
     h = (b - a) / float(n)
-    s = 0.0
-    first = True
-    for i in range(1, n):
-        v = math.sin(a + float(i) * h)
-        s = v if first else s + v
-        first = False
+    s = blocked((math.sin(a + float(i) * h) for i in range(1, n)), lambda p, q: p + q)
     return fmt(h * (s + 0.5 * (math.sin(a) + math.sin(b)))) + "\n"
 
 
