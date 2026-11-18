@@ -10,6 +10,7 @@ USAGE:
     tau parse <file> --sexp    ... and print each top-level function body as an S-expression
     tau check <file>           type-check and borrow-check a file
     tau run <file>             check a program and run it
+    tau test <file> [filter]   run the #[test] functions (those whose name contains `filter`)
     tau check <file> --types   ... and list the inferred type of every binding
 ";
 
@@ -122,6 +123,43 @@ fn main() -> ExitCode {
                     }
                     _ => ExitCode::SUCCESS,
                 },
+            }
+        }
+        "test" => {
+            let filter = args.get(2).map(String::as_str);
+            match tau::test_source(&src, filter, u64::MAX) {
+                Err(d) => {
+                    eprint!("{}", d.render(&src, file));
+                    ExitCode::from(1)
+                }
+                Ok(r) if !r.diagnostics.is_empty() => {
+                    for d in &r.diagnostics {
+                        eprint!("{}", d.render(&src, file));
+                        eprintln!();
+                    }
+                    eprintln!("{} error(s); no tests were run", r.diagnostics.len());
+                    ExitCode::from(1)
+                }
+                Ok(r) => {
+                    println!("running {} test{}", r.results.len(), if r.results.len() == 1 { "" } else { "s" });
+                    for t in &r.results {
+                        println!("test {} ... {}", t.name, if t.passed { "ok" } else { "FAILED" });
+                    }
+                    let failed: Vec<_> = r.results.iter().filter(|t| !t.passed).collect();
+                    if !failed.is_empty() {
+                        println!("\nfailures:");
+                        for t in &failed {
+                            println!("\n---- {} ----", t.name);
+                            if !t.output.is_empty() {
+                                print!("{}", t.output);
+                            }
+                            println!("{}", t.message);
+                        }
+                    }
+                    let passed = r.results.len() - failed.len();
+                    println!("\ntest result: {}. {} passed; {} failed", if failed.is_empty() { "ok" } else { "FAILED" }, passed, failed.len());
+                    if failed.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(1) }
+                }
             }
         }
         _ => {

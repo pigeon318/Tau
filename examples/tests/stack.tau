@@ -1,0 +1,65 @@
+// Run with: tau test examples/tests/stack.tau
+
+struct Stack {
+    items: Vec<i64>
+}
+
+impl Stack {
+    fn new() -> Stack { Stack(Vec<i64>.new()) }
+    fn push(mut self, x: i64) { self.items.push(x) }
+    fn pop(mut self) -> Option<i64> { self.items.pop() }
+    fn size(self) -> usize { self.items.len }
+}
+
+fn parse_digit(c: char) -> Result<i64, str> {
+    match c {
+        '0' => Ok(0)
+        '1' => Ok(1)
+        _ => Err("not a binary digit")
+    }
+}
+
+#[test]
+fn a_new_stack_is_empty() {
+    let s = Stack.new()
+    assert_eq(s.size(), 0)
+}
+
+#[test]
+fn last_in_first_out() {
+    let mut s = Stack.new()
+    s.push(1)
+    s.push(2)
+    s.push(3)
+    match s.pop() {
+        Some(x) => assert_eq(x, 3)
+        None => panic("the stack was empty")
+    }
+    assert_eq(s.size(), 2)
+}
+
+#[test]
+fn popping_an_empty_stack_gives_none() {
+    let mut s = Stack.new()
+    match s.pop() {
+        Some(_) => panic("expected nothing")
+        None => print("empty, as expected")
+    }
+}
+
+#[test]
+fn parsing_with_question_mark() -> Result<(), str> {
+    let a = parse_digit('1')?
+    let b = parse_digit('0')?
+    assert_eq(a + b, 1)
+    Ok(())
+}
+
+#[test]
+#[should_panic("not a binary digit")]
+fn parsing_a_bad_digit_fails() {
+    match parse_digit('7') {
+        Ok(_) => print("unexpected")
+        Err(e) => panic(e)
+    }
+}

@@ -79,3 +79,41 @@ pub fn run_source_limited(src: &str, out: Box<dyn std::io::Write + Send>, max_st
         Ok(RunResult { diagnostics: Vec::new(), outcome: Some(interp::Outcome::Panic("the interpreter crashed".to_string())) })
     })
 }
+
+/// The outcome of `test_source`.
+pub struct TestReport {
+    /// Type or borrow errors. If non-empty no test ran.
+    pub diagnostics: Vec<Diagnostic>,
+    pub results: Vec<interp::TestResult>,
+}
+
+/// Check a program and run its `#[test]` functions (those whose name contains `filter`).
+pub fn test_source(src: &str, filter: Option<&str>, max_steps: u64) -> Result<TestReport, Diagnostic> {
+    let src = src.to_string();
+    let filter = filter.map(|s| s.to_string());
+    let worker = std::thread::Builder::new()
+        .stack_size(STACK_BYTES)
+        .spawn(move || -> Result<TestReport, Diagnostic> {
+            let user = parse_module(&src)?;
+            let lib = prelude::load();
+            let result = analyze(&lib, &user);
+            if !result.diagnostics.is_empty() {
+                return Ok(TestReport { diagnostics: result.diagnostics, results: Vec::new() });
+            }
+            let paths = lib.iter().map(|m| m.path.clone()).collect();
+            let results = interp::run_tests(&user, &result, paths, STACK_BYTES, max_steps, filter.as_deref());
+            Ok(TestReport { diagnostics: Vec::new(), results })
+        })
+        .expect("cannot start the test thread");
+    worker.join().unwrap_or_else(|_| {
+        Ok(TestReport {
+            diagnostics: Vec::new(),
+            results: vec![interp::TestResult {
+                name: "<interpreter>".to_string(),
+                passed: false,
+                message: "the interpreter crashed".to_string(),
+                output: String::new(),
+            }],
+        })
+    })
+}
