@@ -26,6 +26,7 @@ typedef struct { uint8_t *ptr; size_t len, cap; } tau_buf;
 /* ---------------------------------------------------------------- buffers and output */
 
 static void tau_buf_push(tau_buf *b, const void *p, size_t n) {
+    if (n == 0) return;
     if (b->len + n > b->cap) {
         size_t c = b->cap ? b->cap * 2 : 256;
         while (c < b->len + n) c *= 2;
@@ -192,6 +193,56 @@ static void tau_fmt_char(tau_buf *b, uint32_t c) {
     tau_buf_push(b, u, n);
 }
 
+/* ---------------------------------------------------------------- sequences and strings */
+
+TAU_NORETURN TAU_COLD static void tau_oob(size_t len, __int128 idx) {
+    tau_buf m = {0};
+    tau_buf_cstr(&m, "index out of bounds: the length is ");
+    tau_fmt_u64(&m, (uint64_t)len);
+    tau_buf_cstr(&m, " but the index is ");
+    tau_fmt_i128(&m, idx);
+    tau_panic((const char *)m.ptr, m.len);
+}
+
+TAU_NORETURN TAU_COLD static void tau_slice_oob(__int128 a, __int128 b, size_t len) {
+    tau_buf m = {0};
+    tau_buf_cstr(&m, "slice ");
+    tau_fmt_i128(&m, a);
+    tau_buf_cstr(&m, "..");
+    tau_fmt_i128(&m, b);
+    tau_buf_cstr(&m, " is out of range for length ");
+    tau_fmt_u64(&m, (uint64_t)len);
+    tau_panic((const char *)m.ptr, m.len);
+}
+
+/* A string built by interpolation (`let s = "n = {n}"`) has type `str`, a view that cannot own
+ * memory, so its bytes live until the program ends. They are kept on a list so that they stay
+ * reachable (and a leak checker sees them as such). */
+static void *tau_pool_head;
+static tau_str tau_intern(const uint8_t *p, size_t n) {
+    void **blk = (void **)malloc(n + sizeof(void *));
+    if (!blk) tau_panic_cstr("out of memory");
+    *blk = tau_pool_head;
+    tau_pool_head = blk;
+    if (n) memcpy(blk + 1, p, n);
+    return (tau_str){ (const uint8_t *)(blk + 1), n };
+}
+
+static int tau_is_space(uint8_t c) { return c == ' ' || (c >= 9 && c <= 13); }
+
+/* ASCII case mapping (the interpreter maps all of Unicode; see docs/native/DESIGN.md) */
+static tau_buf tau_str_case(tau_str s, int upper) {
+    tau_buf b = {0};
+    if (s.len == 0) return b;
+    tau_buf_push(&b, s.ptr, s.len);
+    for (size_t i = 0; i < b.len; i++) {
+        uint8_t c = b.ptr[i];
+        if (upper) { if (c >= 'a' && c <= 'z') b.ptr[i] = (uint8_t)(c - 32); }
+        else { if (c >= 'A' && c <= 'Z') b.ptr[i] = (uint8_t)(c + 32); }
+    }
+    return b;
+}
+
 TAU_NORETURN TAU_COLD static void tau_bad_char(__int128 v) {
     tau_buf m = {0};
     tau_fmt_i128(&m, v);
@@ -309,7 +360,8 @@ static void *tau_thread_main(void *arg) {
         tau_stack_lo = (uintptr_t)lo;
     }
     stack_t ss;
-    ss.ss_sp = malloc(1 << 16);
+    static char tau_altstack[1 << 16];
+    ss.ss_sp = tau_altstack;
     ss.ss_size = 1 << 16;
     ss.ss_flags = 0;
     sigaltstack(&ss, 0);

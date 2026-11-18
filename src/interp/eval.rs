@@ -483,7 +483,10 @@ impl<'a> Interp<'a> {
             ExprKind::MutBorrow(i) => i,
             _ => a,
         };
+        // `mut v[2..]` is a mutable view of part of `v`, not a place
+        let is_slicing = matches!(&inner.kind, ExprKind::Index { indices, .. } if indices.len() == 1 && matches!(indices[0].kind, ExprKind::Range { .. }));
         match mode {
+            ParamMode::Mut if is_slicing => self.eval(inner, f),
             ParamMode::Mut => Ok(Value::Ref(self.place(inner, f)?)),
             ParamMode::Borrow => self.eval(inner, f),
             ParamMode::Own => self.eval_val(inner, f),
