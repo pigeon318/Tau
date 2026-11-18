@@ -65,6 +65,10 @@ pub struct Binding {
 pub struct Results {
     pub expr_ty: HashMap<NodeKey, Ty>,
     pub expr_res: HashMap<NodeKey, Res>,
+    /// The type of every pattern (and so of every binding it introduces).
+    pub pat_ty: HashMap<NodeKey, Ty>,
+    /// Which function each `fn` declaration became.
+    pub fn_decl: HashMap<NodeKey, FnId>,
     /// Every binding (parameters, `let`s, pattern variables) in the user's module.
     pub bindings: Vec<Binding>,
 }
@@ -194,6 +198,7 @@ pub(crate) struct Body {
     pub unsafe_depth: u32,
     pub obligations: Vec<Obligation>,
     pub touched: Vec<NodeKey>,
+    pub touched_pats: Vec<NodeKey>,
     pub local_fns: Vec<HashMap<String, ValueItem>>,
     /// Index into `results.bindings` where this body's bindings start.
     pub bind_start: usize,
@@ -484,6 +489,13 @@ impl<'a> Checker<'a> {
             if let Some(Res::Variant(a, i, args)) = self.results.expr_res.get(&k).cloned() {
                 let args = args.iter().map(|x| self.infer.zonk(x)).collect();
                 self.results.expr_res.insert(k, Res::Variant(a, i, args));
+            }
+        }
+        let pats = std::mem::take(&mut self.body.touched_pats);
+        for k in pats {
+            if let Some(t) = self.results.pat_ty.get(&k).cloned() {
+                let r = self.infer.zonk(&t);
+                self.results.pat_ty.insert(k, r);
             }
         }
         for i in self.body.bind_start..self.results.bindings.len() {

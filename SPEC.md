@@ -558,6 +558,78 @@ dimensions; ownership and borrowing (stage 3).
 
 ---
 
+## 14c. Ownership and borrowing (settled while writing the stage-3 checker)
+
+Tau has no reference *types*; borrows are parameter modes. So a borrow only exists (a) for the
+length of a call, (b) inside a **view** value, and (c) for the length of a loop or a task.
+
+**Moves.** A value of a type that is not `Copy` is *moved* when it is assigned (`let b = a`), returned,
+stored in a struct/array/vector literal, passed to an `own` parameter, or moved into a task or
+closure. Using it afterwards is an error ("use of moved value"), reported once per move with a note
+at the move. This is tracked per path: after `let n = p.name`, `p.age` is still usable but `p` and
+`p.name` are not. Moving on one branch of an `if`/`match`, or inside a loop, counts as moved
+afterwards. Assigning to a variable gives it a value again.
+
+**What is `Copy`.** Numbers, `bool`, `char`, `str`, slices, tuples and arrays of `Copy`, `Option`,
+`Result` and `Range` of `Copy`, and any type with an explicit `impl Copy for T {}`. Everything else
+(`Vec`, `String`, tensors, closures, your structs by default) is moved.
+
+**Borrowed parameters cannot be given away.** Plain and `mut` parameters are borrowed from the
+caller, so you cannot move out of them or out of their fields: `fn f(p: Person) -> String { p.name }`
+is an error. Write `own p: Person` to take ownership. The same goes for `for`/`match` bindings over
+a place (`for s in names`, `Some(s)` on a variable): they are views of the original and cannot be
+moved out of. Moving a value out of a collection (`let s = v[0]`) is an error unless the element is
+`Copy`.
+
+**Loans.** Calls borrow their arguments: a plain parameter takes a shared loan, `mut` a mutable one.
+Loans for one call are created just before the call, after the other arguments are evaluated, so
+`v.push(v[0])` is fine but `f(mut v, v)` is an error. Two loans conflict if their places overlap
+(`p` and `p.x` overlap; `p.x` and `p.y` do not) and one is mutable. Array indices all count as one
+place.
+
+**Views.** A value that can refer to other data (a slice, `str`, a closure, a task, or anything that
+contains one) *holds the loans* it was made from. `let s = v[0..2]` makes `s` hold a loan on `v`,
+and `s` keeps it for as long as `s` is used later (borrows end at their last use, not at the end of the
+block). While the loan is alive you cannot modify, move or mutably borrow `v`. A function that
+returns a view is assumed to borrow from all its arguments. A mutating call can store the views
+its other arguments carry into the thing it mutates (`views.push(v[0..2])`), but only if that thing
+can hold views (a `Vec<[T]>`, not a `[f64]`).
+
+**Loops.** `for x in v` borrows `v` for the whole loop and `for x in mut v` borrows it mutably, so the
+body cannot modify (resp. touch) `v`. `for i in 0..v.len` borrows nothing.
+
+**Closures** capture by the least they need: by move if the body moves the variable, by mutable
+borrow if it changes it, otherwise by shared borrow. The closure holds those loans while it is used.
+
+**Returning borrows.** A function may only return a view of its own borrowed parameters, never of a
+local variable or an `own` parameter.
+
+**Tasks.**
+- `spawn` captures like a closure, but may not modify anything it captures (it should return a
+  result), and a captured value it consumes is moved in. The task handle holds its captures' loans
+  until it is joined, or until it goes out of scope (an unjoined handle is joined there).
+  `join` takes the handle by value, so joining twice is a use of a moved value.
+- `par for` iterations may write the outer collection only as `out[i]` with the loop's own index.
+  Any other write to something declared outside the loop (including `total += ..` and
+  `out.push(..)`) is an error, and so is *reading* `out[j]` for any other index when the loop also
+  writes `out`. Variables declared inside the body are private to the iteration. Use
+  `par for c in par_chunks(mut out, n)` to give each iteration its own mutable slice, and
+  `par sum(..)` to accumulate. A parallel reduction body, and an `on` block, may only read.
+
+**Known limits of the v1 checker** (so you know what it does *not* promise):
+- A function returning a view is treated as borrowing from *all* its arguments, which can reject a
+  function that returns a view of only one of them.
+- Slices are copyable views, so a `mut [T]` can be copied; aliasing of mutable views through such
+  copies is not tracked.
+- All array indices are one place, so `f(mut v[0], mut v[1])` is rejected even though it is safe.
+- Closures called through a function value take their arguments by borrow only.
+- A returned view derived from a `for`/`match` binding is assumed to come from the caller.
+- `par for` cannot see races through function calls (`helper(mut out)` is rejected as a mutable
+  borrow, but a helper that reads `out` while another iteration writes it is not detected).
+- `Shared<T>`, `on` serialisation rules and cluster semantics are not part of v1 and are not checked.
+
+---
+
 ## 15. v1 scope and build plan
 
 ### In v1

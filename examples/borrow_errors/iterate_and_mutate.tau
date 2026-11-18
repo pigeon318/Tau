@@ -1,0 +1,9 @@
+// error: cannot borrow `v` as mutable
+// `for x in v` borrows `v` for the whole loop.
+
+fn main() {
+    let mut v = vec[1, 2, 3]
+    for x in v {
+        v.push(x)
+    }
+}

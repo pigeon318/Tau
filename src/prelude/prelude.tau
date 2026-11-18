@@ -105,8 +105,12 @@ impl<T: Num> [T] {
 }
 
 impl<T> Task<T> {
-    pub fn join(self) -> Result<T, TaskPanicked>
+    pub fn join(own self) -> Result<T, TaskPanicked>
 }
+
+impl<T: Copy> Copy for Option<T> {}
+impl<T: Copy, E: Copy> Copy for Result<T, E> {}
+impl<T: Copy> Copy for Range<T> {}
 
 impl<T> Index for Ptr<T> {
     pub fn index(self, i: usize) -> T
