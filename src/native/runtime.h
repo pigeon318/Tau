@@ -346,6 +346,405 @@ __attribute__((noinline)) static void tau_fmt_float(tau_buf *b, double x, int si
 static void tau_fmt_f64(tau_buf *b, double x) { tau_fmt_float(b, x, 0); }
 static void tau_fmt_f32(tau_buf *b, float x) { tau_fmt_float(b, (double)x, 1); }
 
+/* ---------------------------------------------------------------- complex numbers */
+
+/* c64 and c128 are both pairs of doubles (the interpreter computes c64 in double too); they
+ * differ only in how they print. */
+typedef struct { double re, im; } tau_c128;
+typedef struct { double re, im; } tau_c64;
+
+#define TAU_CPLX(T)                                                                                         \
+    static T T##_add(T a, T b) { return (T){ a.re + b.re, a.im + b.im }; }                                  \
+    static T T##_sub(T a, T b) { return (T){ a.re - b.re, a.im - b.im }; }                                  \
+    static T T##_mul(T a, T b) { return (T){ a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re }; }      \
+    static T T##_div(T a, T b) {                                                                            \
+        double den = b.re * b.re + b.im * b.im;                                                             \
+        return (T){ (a.re * b.re + a.im * b.im) / den, (a.im * b.re - a.re * b.im) / den };                 \
+    }                                                                                                       \
+    static T T##_neg(T a) { return (T){ -a.re, -a.im }; }                                                   \
+    static T T##_abs(T a) { return (T){ hypot(a.re, a.im), 0.0 }; }                                         \
+    static bool T##_eq(T a, T b) { return a.re == b.re && a.im == b.im; }
+TAU_CPLX(tau_c128)
+TAU_CPLX(tau_c64)
+
+static void tau_fmt_c128(tau_buf *b, tau_c128 z) {
+    if (z.im < 0 || (z.im == 0 && signbit(z.im))) { tau_fmt_f64(b, z.re); tau_buf_char(b, '-'); tau_fmt_f64(b, -z.im); }
+    else { tau_fmt_f64(b, z.re); tau_buf_char(b, '+'); tau_fmt_f64(b, z.im); }
+    tau_buf_char(b, 'i');
+}
+static void tau_fmt_c64(tau_buf *b, tau_c64 z) {
+    if (z.im < 0) { tau_fmt_f32(b, (float)z.re); tau_buf_char(b, '-'); tau_fmt_f32(b, (float)fabs(z.im)); }
+    else { tau_fmt_f32(b, (float)z.re); tau_buf_char(b, '+'); tau_fmt_f32(b, (float)z.im); }
+    tau_buf_char(b, 'i');
+}
+
+/* ---------------------------------------------------------------- tensors */
+
+/* Dense, column-major (the first index varies fastest). Elements are stored as doubles (pairs
+ * for complex); `single` tensors round every result to float, as the interpreter does. */
+typedef struct { uint8_t rank, single, cplx; size_t dims[8]; double *data; } tau_tensor;
+
+static uint64_t tau_rng = 0x9E3779B97F4A7C15ULL;
+static double tau_next_random(void) {
+    uint64_t x = tau_rng;
+    x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+    tau_rng = x;
+    uint64_t r = x * 0x2545F4914F6CDD1DULL;
+    return (double)(r >> 11) / 9007199254740992.0;
+}
+
+static size_t tau_t_len(const tau_tensor *t) {
+    size_t n = 1;
+    for (int i = 0; i < t->rank; i++) n *= t->dims[i];
+    return n;
+}
+static tau_tensor tau_t_new(int rank, const size_t *dims, int cplx, int single) {
+    tau_tensor t;
+    memset(&t, 0, sizeof t);
+    if (rank > 8) tau_panic_cstr("tensors have at most 8 dimensions");
+    t.rank = (uint8_t)rank; t.cplx = (uint8_t)cplx; t.single = (uint8_t)single;
+    for (int i = 0; i < rank; i++) t.dims[i] = dims[i];
+    size_t n = tau_t_len(&t) * (cplx ? 2 : 1);
+    t.data = (double *)calloc(n ? n : 1, sizeof(double));
+    if (!t.data) tau_panic_cstr("out of memory");
+    return t;
+}
+static void tau_t_free(tau_tensor *t) { free(t->data); memset(t, 0, sizeof *t); }
+static tau_tensor tau_t_clone(const tau_tensor *t) {
+    tau_tensor r = tau_t_new(t->rank, t->dims, t->cplx, t->single);
+    memcpy(r.data, t->data, tau_t_len(t) * (t->cplx ? 2 : 1) * sizeof(double));
+    return r;
+}
+/* kind: 0 zeros, 1 ones, 2 random */
+static tau_tensor tau_t_fill(int kind, int rank, const size_t *dims, int cplx, int single) {
+    tau_tensor t = tau_t_new(rank, dims, cplx, single);
+    size_t n = tau_t_len(&t);
+    for (size_t i = 0; i < n; i++) {
+        double v = kind == 0 ? 0.0 : kind == 1 ? 1.0 : tau_next_random();
+        if (kind == 2 && single) v = (double)(float)v;
+        if (cplx) { t.data[2 * i] = v; t.data[2 * i + 1] = 0.0; } else t.data[i] = v;
+    }
+    return t;
+}
+
+static void tau_t_dims_str(tau_buf *b, const tau_tensor *t) {
+    tau_buf_char(b, '[');
+    for (int i = 0; i < t->rank; i++) { if (i) tau_buf_cstr(b, ", "); tau_fmt_u64(b, (uint64_t)t->dims[i]); }
+    tau_buf_char(b, ']');
+}
+TAU_NORETURN TAU_COLD static void tau_t_shape_panic(const char *what, const tau_tensor *a, const tau_tensor *b) {
+    tau_buf m = {0};
+    tau_buf_cstr(&m, what);
+    tau_t_dims_str(&m, a);
+    tau_buf_cstr(&m, " and ");
+    tau_t_dims_str(&m, b);
+    tau_panic((const char *)m.ptr, m.len);
+}
+
+/* flat index of a multi-index; `read` picks the message the interpreter gives for a read */
+static size_t tau_t_flat(const tau_tensor *t, const size_t *idx, int n, int read) {
+    size_t stride = 1, flat = 0;
+    for (int i = 0; i < n; i++) {
+        if (idx[i] >= t->dims[i]) {
+            if (!read) tau_panic_cstr("tensor index out of bounds");
+            tau_buf m = {0};
+            tau_buf_cstr(&m, "tensor index [");
+            for (int j = 0; j < n; j++) { if (j) tau_buf_cstr(&m, ", "); tau_fmt_u64(&m, (uint64_t)idx[j]); }
+            tau_buf_cstr(&m, "] is out of bounds");
+            tau_panic((const char *)m.ptr, m.len);
+        }
+        flat += idx[i] * stride;
+        stride *= t->dims[i];
+    }
+    return flat;
+}
+
+static double tau_t_round(int single, double x) { return single ? (double)(float)x : x; }
+
+static tau_tensor tau_t_binop(char op, tau_tensor a, tau_tensor b) {
+    if (a.rank != b.rank || memcmp(a.dims, b.dims, sizeof(size_t) * a.rank) != 0) tau_t_shape_panic("shape mismatch: ", &a, &b);
+    tau_tensor r = tau_t_new(a.rank, a.dims, a.cplx, a.single);
+    size_t n = tau_t_len(&a);
+    if (!a.cplx) {
+        for (size_t i = 0; i < n; i++) {
+            double x = a.data[i], y = b.data[i], v;
+            switch (op) { case '+': v = x + y; break; case '-': v = x - y; break; case '*': v = x * y; break; default: v = x / y; }
+            r.data[i] = tau_t_round(a.single, v);
+        }
+    } else {
+        if (op == '/') tau_panic_cstr("complex tensor division is not supported");
+        for (size_t i = 0; i < n; i++) {
+            double p = a.data[2 * i], q = a.data[2 * i + 1], r2 = b.data[2 * i], s = b.data[2 * i + 1];
+            switch (op) {
+                case '+': r.data[2 * i] = p + r2; r.data[2 * i + 1] = q + s; break;
+                case '-': r.data[2 * i] = p - r2; r.data[2 * i + 1] = q - s; break;
+                default: r.data[2 * i] = p * r2 - q * s; r.data[2 * i + 1] = p * s + q * r2;
+            }
+        }
+    }
+    return r;
+}
+
+static tau_tensor tau_t_scalar(char op, tau_tensor a, double k, int scalar_on_left) {
+    if (a.cplx) tau_panic_cstr("scalar arithmetic on a complex tensor is not supported");
+    tau_tensor r = tau_t_new(a.rank, a.dims, 0, a.single);
+    size_t n = tau_t_len(&a);
+    for (size_t i = 0; i < n; i++) {
+        double x = scalar_on_left ? k : a.data[i], y = scalar_on_left ? a.data[i] : k, v;
+        switch (op) { case '+': v = x + y; break; case '-': v = x - y; break; case '*': v = x * y; break; default: v = x / y; }
+        r.data[i] = tau_t_round(a.single, v);
+    }
+    return r;
+}
+
+static tau_tensor tau_t_matmul(tau_tensor a, tau_tensor b) {
+    if (a.cplx || b.cplx) tau_panic_cstr("`@` on complex tensors is not supported");
+    size_t m = a.dims[0], k = a.dims[1];
+    size_t k2 = b.dims[0], n = b.rank == 2 ? b.dims[1] : 1;
+    if (k != k2) tau_t_shape_panic("shape mismatch for `@`: ", &a, &b);
+    size_t odims[2] = { m, n };
+    tau_tensor c = tau_t_new(b.rank == 2 ? 2 : 1, odims, 0, a.single);
+    for (size_t j = 0; j < n; j++)
+        for (size_t p = 0; p < k; p++) {
+            double bkj = b.data[p + j * k];
+            const double *col = &a.data[p * m];
+            double *out = &c.data[j * m];
+            for (size_t i = 0; i < m; i++) out[i] += col[i] * bkj;
+        }
+    if (a.single) { size_t tot = m * n; for (size_t i = 0; i < tot; i++) c.data[i] = (double)(float)c.data[i]; }
+    return c;
+}
+
+/* Rust's f64 sum starts from -0.0 */
+static double tau_t_dot(tau_tensor a, tau_tensor b) {
+    if (a.dims[0] != b.dims[0]) tau_t_shape_panic("shape mismatch for `@`: ", &a, &b);
+    double s = -0.0;
+    for (size_t i = 0; i < a.dims[0]; i++) s += a.data[i] * b.data[i];
+    return tau_t_round(a.single, s);
+}
+static double tau_t_trace(tau_tensor a) {
+    size_t m = a.dims[0], k = m < a.dims[1] ? m : a.dims[1];
+    double s = -0.0;
+    for (size_t i = 0; i < k; i++) s += a.data[i + i * m];
+    return s;
+}
+static tau_c128 tau_t_trace_c(tau_tensor a) {
+    size_t m = a.dims[0], k = m < a.dims[1] ? m : a.dims[1];
+    double re = -0.0, im = -0.0;
+    for (size_t i = 0; i < k; i++) re += a.data[2 * (i + i * m)];
+    for (size_t i = 0; i < k; i++) im += a.data[2 * (i + i * m) + 1];
+    return (tau_c128){ re, im };
+}
+
+static void tau_t_fmt(tau_buf *b, tau_tensor t) {
+#define TAU_CELL(i) do { \
+        if (t.cplx) { double re = t.data[2 * (i)], im = t.data[2 * (i) + 1]; \
+            tau_fmt_f64(b, re); if (im < 0) { tau_buf_char(b, '-'); tau_fmt_f64(b, -im); } else { tau_buf_char(b, '+'); tau_fmt_f64(b, im); } \
+            tau_buf_char(b, 'i'); } \
+        else if (t.single) tau_fmt_f32(b, (float)t.data[i]); else tau_fmt_f64(b, t.data[i]); } while (0)
+    if (t.rank == 1) {
+        tau_buf_char(b, '[');
+        for (size_t i = 0; i < t.dims[0]; i++) { if (i) tau_buf_cstr(b, ", "); TAU_CELL(i); }
+        tau_buf_char(b, ']');
+    } else if (t.rank == 2) {
+        size_t m = t.dims[0], n = t.dims[1];
+        tau_buf_char(b, '[');
+        for (size_t i = 0; i < m; i++) {
+            if (i) tau_buf_cstr(b, ", ");
+            tau_buf_char(b, '[');
+            for (size_t j = 0; j < n; j++) { if (j) tau_buf_cstr(b, ", "); TAU_CELL(i + j * m); }
+            tau_buf_char(b, ']');
+        }
+        tau_buf_char(b, ']');
+    } else {
+        tau_buf_cstr(b, "Tensor(shape=");
+        tau_t_dims_str(b, &t);
+        tau_buf_cstr(b, ", [");
+        size_t n = tau_t_len(&t);
+        for (size_t i = 0; i < n; i++) { if (i) tau_buf_cstr(b, ", "); TAU_CELL(i); }
+        tau_buf_cstr(b, "])");
+    }
+#undef TAU_CELL
+}
+
+/* ---------------------------------------------------------------- linear algebra and FFT */
+
+static tau_tensor tau_la_transpose(tau_tensor a) {
+    size_t m = a.dims[0], n = a.dims[1];
+    size_t od[2] = { n, m };
+    tau_tensor r = tau_t_new(2, od, 0, a.single);
+    for (size_t i = 0; i < m; i++) for (size_t j = 0; j < n; j++) r.data[j + i * n] = a.data[i + j * m];
+    return r;
+}
+
+static double tau_la_det(tau_tensor a) {
+    size_t n = a.dims[0];
+    if (a.dims[0] != a.dims[1]) tau_panic_cstr("det needs a square matrix");
+    double *d = (double *)malloc((n * n + 1) * sizeof(double));
+    memcpy(d, a.data, n * n * sizeof(double));
+    double det = 1.0;
+    for (size_t c = 0; c < n; c++) {
+        size_t piv = c;
+        for (size_t r = c + 1; r < n; r++) if (fabs(d[r + c * n]) > fabs(d[piv + c * n])) piv = r;
+        if (d[piv + c * n] == 0.0) { free(d); return 0.0; }
+        if (piv != c) {
+            for (size_t k = 0; k < n; k++) { double t = d[piv + k * n]; d[piv + k * n] = d[c + k * n]; d[c + k * n] = t; }
+            det = -det;
+        }
+        det *= d[c + c * n];
+        for (size_t r = c + 1; r < n; r++) {
+            double factor = d[r + c * n] / d[c + c * n];
+            for (size_t k = c; k < n; k++) d[r + k * n] -= factor * d[c + k * n];
+        }
+    }
+    free(d);
+    return det;
+}
+
+static tau_tensor tau_la_inv(tau_tensor a) {
+    size_t n = a.dims[0];
+    if (a.dims[0] != a.dims[1]) tau_panic_cstr("inv needs a square matrix");
+    double *aug = (double *)calloc(n * 2 * n + 1, sizeof(double));
+    for (size_t i = 0; i < n; i++) {
+        for (size_t j = 0; j < n; j++) aug[i + j * n] = a.data[i + j * n];
+        aug[i + (n + i) * n] = 1.0;
+    }
+    for (size_t c = 0; c < n; c++) {
+        size_t piv = c;
+        for (size_t r = c + 1; r < n; r++) if (fabs(aug[r + c * n]) > fabs(aug[piv + c * n])) piv = r;
+        if (fabs(aug[piv + c * n]) < 1e-300) tau_panic_cstr("the matrix is singular and cannot be inverted");
+        if (piv != c)
+            for (size_t k = 0; k < 2 * n; k++) { double t = aug[piv + k * n]; aug[piv + k * n] = aug[c + k * n]; aug[c + k * n] = t; }
+        double p = aug[c + c * n];
+        for (size_t k = 0; k < 2 * n; k++) aug[c + k * n] /= p;
+        for (size_t r = 0; r < n; r++)
+            if (r != c) {
+                double factor = aug[r + c * n];
+                if (factor != 0.0) for (size_t k = 0; k < 2 * n; k++) aug[r + k * n] -= factor * aug[c + k * n];
+            }
+    }
+    size_t od[2] = { n, n };
+    tau_tensor out = tau_t_new(2, od, 0, a.single);
+    for (size_t i = 0; i < n; i++) for (size_t j = 0; j < n; j++) out.data[i + j * n] = aug[i + (n + j) * n];
+    free(aug);
+    return out;
+}
+
+static void tau_la_eig(tau_tensor a, tau_tensor *vals, tau_tensor *vecs) {
+    size_t n = a.dims[0];
+    if (a.dims[0] != a.dims[1]) tau_panic_cstr("eig needs a square matrix");
+    double *d = (double *)malloc((n * n + 1) * sizeof(double));
+    memcpy(d, a.data, n * n * sizeof(double));
+    for (size_t i = 0; i < n; i++)
+        for (size_t j = 0; j < i; j++)
+            if (fabs(d[i + j * n] - d[j + i * n]) > 1e-9 * (1.0 + fabs(d[i + j * n]))) tau_panic_cstr("eig supports symmetric matrices only");
+    double *v = (double *)calloc(n * n + 1, sizeof(double));
+    for (size_t i = 0; i < n; i++) v[i + i * n] = 1.0;
+    for (int sweep = 0; sweep < 100; sweep++) {
+        double off = 0.0;
+        for (size_t i = 0; i < n; i++) for (size_t j = 0; j < n; j++) if (i != j) off += d[i + j * n] * d[i + j * n];
+        if (off < 1e-22) break;
+        for (size_t p = 0; p < n; p++)
+            for (size_t q = p + 1; q < n; q++) {
+                double apq = d[p + q * n];
+                if (fabs(apq) < 1e-300) continue;
+                double theta = (d[q + q * n] - d[p + p * n]) / (2.0 * apq);
+                double sg = theta != theta ? theta : copysign(1.0, theta);
+                double t = sg / (fabs(theta) + sqrt(theta * theta + 1.0));
+                if (theta == 0.0) t = 1.0;
+                double c = 1.0 / sqrt(t * t + 1.0);
+                double s = t * c;
+                for (size_t k = 0; k < n; k++) { double akp = d[k + p * n], akq = d[k + q * n]; d[k + p * n] = c * akp - s * akq; d[k + q * n] = s * akp + c * akq; }
+                for (size_t k = 0; k < n; k++) { double apk = d[p + k * n], aqk = d[q + k * n]; d[p + k * n] = c * apk - s * aqk; d[q + k * n] = s * apk + c * aqk; }
+                for (size_t k = 0; k < n; k++) { double vkp = v[k + p * n], vkq = v[k + q * n]; v[k + p * n] = c * vkp - s * vkq; v[k + q * n] = s * vkp + c * vkq; }
+            }
+    }
+    /* ascending eigenvalues (a stable sort; unordered values count as equal) with their vectors */
+    size_t *order = (size_t *)malloc((n + 1) * sizeof(size_t));
+    for (size_t i = 0; i < n; i++) order[i] = i;
+    for (size_t i = 1; i < n; i++) {
+        size_t cur = order[i], j = i;
+        while (j > 0 && d[cur + cur * n] < d[order[j - 1] + order[j - 1] * n]) { order[j] = order[j - 1]; j--; }
+        order[j] = cur;
+    }
+    size_t vd[1] = { n }, md[2] = { n, n };
+    *vals = tau_t_new(1, vd, 0, a.single);
+    *vecs = tau_t_new(2, md, 0, a.single);
+    for (size_t i = 0; i < n; i++) vals->data[i] = d[order[i] + order[i] * n];
+    for (size_t nw = 0; nw < n; nw++) for (size_t k = 0; k < n; k++) vecs->data[k + nw * n] = v[k + order[nw] * n];
+    free(d); free(v); free(order);
+}
+
+typedef struct { double re, im; } tau_cpx;
+
+static tau_cpx *tau_fft_pow2(const tau_cpx *x, size_t n, double sign) {
+    tau_cpx *out = (tau_cpx *)malloc((n ? n : 1) * sizeof(tau_cpx));
+    if (n == 1) { out[0] = x[0]; return out; }
+    size_t h = n / 2;
+    tau_cpx *even = (tau_cpx *)malloc(h * sizeof(tau_cpx)), *odd = (tau_cpx *)malloc(h * sizeof(tau_cpx));
+    for (size_t i = 0; i < h; i++) { even[i] = x[2 * i]; odd[i] = x[2 * i + 1]; }
+    tau_cpx *e = tau_fft_pow2(even, h, sign), *o = tau_fft_pow2(odd, h, sign);
+    for (size_t k = 0; k < h; k++) {
+        double ang = sign * 2.0 * M_PI * (double)k / (double)n;
+        double sn = sin(ang), cs = cos(ang);
+        tau_cpx t = { o[k].re * cs - o[k].im * sn, o[k].re * sn + o[k].im * cs };
+        out[k] = (tau_cpx){ e[k].re + t.re, e[k].im + t.im };
+        out[k + h] = (tau_cpx){ e[k].re - t.re, e[k].im - t.im };
+    }
+    free(even); free(odd); free(e); free(o);
+    return out;
+}
+
+static tau_cpx *tau_dft(const tau_cpx *x, size_t n, int inverse) {
+    tau_cpx *out;
+    double sign = inverse ? 1.0 : -1.0;
+    if (n <= 1) {
+        out = (tau_cpx *)malloc((n ? n : 1) * sizeof(tau_cpx));
+        if (n) out[0] = x[0];
+        return out;
+    }
+    if ((n & (n - 1)) == 0) out = tau_fft_pow2(x, n, sign);
+    else {
+        out = (tau_cpx *)malloc(n * sizeof(tau_cpx));
+        for (size_t k = 0; k < n; k++) {
+            double re = 0.0, im = 0.0;
+            for (size_t j = 0; j < n; j++) {
+                double ang = sign * 2.0 * M_PI * (double)((k * j) % n) / (double)n;
+                double sn = sin(ang), cs = cos(ang);
+                re += x[j].re * cs - x[j].im * sn;
+                im += x[j].re * sn + x[j].im * cs;
+            }
+            out[k] = (tau_cpx){ re, im };
+        }
+    }
+    if (inverse) for (size_t i = 0; i < n; i++) { out[i].re /= (double)n; out[i].im /= (double)n; }
+    return out;
+}
+
+static tau_tensor tau_fft(tau_tensor a) {
+    size_t n = a.dims[0];
+    tau_cpx *in = (tau_cpx *)malloc((n ? n : 1) * sizeof(tau_cpx));
+    for (size_t i = 0; i < n; i++) in[i] = (tau_cpx){ a.data[i], 0.0 };
+    tau_cpx *out = tau_dft(in, n, 0);
+    size_t od[1] = { n };
+    tau_tensor r = tau_t_new(1, od, 1, 0);
+    for (size_t i = 0; i < n; i++) { r.data[2 * i] = out[i].re; r.data[2 * i + 1] = out[i].im; }
+    free(in); free(out);
+    return r;
+}
+
+static tau_tensor tau_ifft(tau_tensor a) {
+    size_t n = a.dims[0];
+    tau_cpx *in = (tau_cpx *)malloc((n ? n : 1) * sizeof(tau_cpx));
+    for (size_t i = 0; i < n; i++) in[i] = (tau_cpx){ a.data[2 * i], a.data[2 * i + 1] };
+    tau_cpx *out = tau_dft(in, n, 1);
+    size_t od[1] = { n };
+    tau_tensor r = tau_t_new(1, od, 0, 0);
+    for (size_t i = 0; i < n; i++) r.data[i] = out[i].re;
+    free(in); free(out);
+    return r;
+}
+
 /* ---------------------------------------------------------------- files and standard input */
 
 #include <errno.h>
