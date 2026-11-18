@@ -480,9 +480,9 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
 - **Differential mutation fuzzing** (`tests/native_fuzz.rs`, corpus in `tests/fuzz_corpus/`): numbers and
   operators in the corpus programs are mutated, and every mutant that still passes the checkers runs on both
   backends, which must agree on output, panic and message. `TAU_FUZZ_N` and `TAU_FUZZ_SEED` scale it.
-- **Benchmarks** (`examples/bench/`, `tests/native_bench.rs`, ignored by default): native is 30 to 190 times
-  faster on scalar, struct, array, string and parallel code; tensor kernels are at parity (both are compiled
-  code).
+- **Benchmarks** (`examples/bench/`, `tests/native_bench.rs`, ignored by default): native is 170 to 200 times
+  faster on scalar, struct, array and parallel code, 7 times on a string- and map-heavy program, and level on
+  tensor kernels (compiled code in both).
 - **Not done**: `tau test` on the native backend (tests are small; the interpreter is fine), `on` blocks and
   clusters, platforms other than Linux (the runtime uses POSIX threads and signals).
 
