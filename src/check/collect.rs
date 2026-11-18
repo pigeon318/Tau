@@ -282,6 +282,59 @@ impl<'a> Checker<'a> {
         for i in 0..self.impl_srcs.len() {
             self.check_conformance(i);
         }
+        self.check_recursive_types();
+    }
+
+    /// Does a value of `ty` contain a value of the type `target` *inside itself* (not behind
+    /// a vector, string, map, slice, pointer, tensor or function, which store their contents
+    /// elsewhere)? If a type contains itself it would have to be infinitely large.
+    fn contains_by_value(&self, ty: &Ty, target: AdtId, seen: &mut Vec<AdtId>) -> bool {
+        match ty {
+            Ty::Adt(id, args) => {
+                if *id == target {
+                    return true;
+                }
+                if seen.contains(id) {
+                    return false;
+                }
+                seen.push(*id);
+                let def = self.prog.adt(*id);
+                let subst: Vec<(GenericId, Ty)> = def.generics.iter().copied().zip(args.iter().cloned()).collect();
+                match &def.kind {
+                    AdtKind::Struct(fs) => fs.iter().any(|f| self.contains_by_value(&f.ty.subst(&subst), target, seen)),
+                    AdtKind::Enum(vs) => vs
+                        .iter()
+                        .any(|v| v.fields.iter().any(|t| self.contains_by_value(&t.subst(&subst), target, seen))),
+                }
+            }
+            Ty::Tuple(ts) => ts.iter().any(|t| self.contains_by_value(t, target, seen)),
+            Ty::Array(t, _) => self.contains_by_value(t, target, seen),
+            _ => false,
+        }
+    }
+
+    fn check_recursive_types(&mut self) {
+        for i in 0..self.adt_srcs.len() {
+            let id = AdtId(i as u32);
+            if !self.is_user(self.prog.adt(id).module) {
+                continue;
+            }
+            let field_tys: Vec<Ty> = match &self.prog.adt(id).kind {
+                AdtKind::Struct(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+                AdtKind::Enum(vs) => vs.iter().flat_map(|v| v.fields.iter().cloned()).collect(),
+            };
+            if field_tys.iter().any(|t| self.contains_by_value(t, id, &mut Vec::new())) {
+                let (name, span) = match self.adt_srcs[i] {
+                    AdtSrc::Struct(s) => (s.name.name.clone(), s.name.span),
+                    AdtSrc::Enum(e) => (e.name.name.clone(), e.name.span),
+                };
+                self.err_hint(
+                    span,
+                    format!("the type `{name}` contains itself, so it would have infinite size"),
+                    "put the repeated part behind a `Vec` (for example a vector of children, or indices into a vector); a `Box` type is not available yet",
+                );
+            }
+        }
     }
 
     fn adt_cx(&self, id: AdtId, params: &[GenericParam]) -> LowerCx {
