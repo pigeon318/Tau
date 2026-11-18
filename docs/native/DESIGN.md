@@ -353,7 +353,7 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
 | **M1** | Scalars, tuples, functions, control flow, checked arithmetic, panics, `print` of scalars/strings/tuples | **done**: `hello`, `fizzbuzz`, `collatz`, 36 differential tests (`tests/native.rs`) including a 10,000-value float-printing fuzz |
 | **M2** | Structs, enums, `Option`/`Result`/`?`, `match` on them, arrays, `Vec`, slices, `String`, `str`, `Map`, `std.fs`/`std.io`, `main` returning `Result`, ownership and drops; generics and trait dispatch came along (see below) | **done**: every program in `examples/run/` except `integrate` (closures) runs natively and matches its Python reference; 55 differential tests, valgrind- and UBSan-clean |
 | **M3** | Closures and `fn` values (generics, traits and operators already came with M2) | **done**: closure tests, `map`/`filter`; `integrate` still waits for `par sum` (M5) |
-| **M4** | Tensors, maths library, `linalg`, FFT | `tensors`, matrix and FFT tests |
+| **M4** | Tensors, complex numbers, `linalg`, FFT | **done** (f64/c128 throughout, f32 tensors for the basic operations): 7 differential tests that match the interpreter bit for bit, valgrind- and UBSan-clean |
 | **M5** | Thread pool, `par for`/`par sum`/`par_chunks`, `spawn`/`join`, task panics | `parallel`, `integrate`; ≥3.5× on 4 cores |
 | **M6** | `tau build`/`run`/`test` integration, caching, error messages, docs, benchmark suite | all of the above, native by default |
 
@@ -430,6 +430,23 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
   still used later (`does not live long enough`). No existing program was affected. A consequence worth
   knowing: a closure that captures a loop variable cannot be stored beyond the iteration (Tau has no `move`
   closures yet).
+
+### What M4 changed in the plan
+
+- **Tensors are runtime values**: one C struct (`rank`, up to 8 `dims`, a `double *` of elements, flags for
+  single precision and complex), because the interpreter's shapes can be known only at run time (`.zeros(3, 4)`).
+  Everything else is a function in the runtime that is a line-by-line port of the interpreter's Rust
+  (`matmul`'s loop order, Gauss-Jordan `inv`, Jacobi `eig`, radix-2 and direct `fft`, the xorshift RNG with the
+  same seed), so results match bit for bit, including `-0.0`: Rust's float `sum()` starts from `-0.0`, which
+  shows in `trace` and dot products, and the port does the same.
+- **Complex numbers**: `c64` and `c128` are both pairs of `double` (the interpreter computes `c64` in double
+  too); they differ only in how they print.
+- **Not supported natively (falls back to the interpreter)**: `linalg.det/inv/eig` on `f32`, `trace` of `f32`
+  tensors (the interpreter keeps those in double and rounds later, which cannot be matched exactly without
+  copying the quirk), tensor times a *complex* scalar, `@` on complex tensors, tensors of integers.
+- **Speed**: tensor kernels are already compiled Rust in the interpreter, so a 300x300 `@`, `eig` and `det`
+  take 0.30 s natively against 0.47 s interpreted. The gain is in the code around them, and later in
+  threading (M5).
 
 M1 to M3 are the bulk of the work; M4 and M5 are mostly runtime code; M6 is polish.
 

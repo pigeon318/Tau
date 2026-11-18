@@ -12,8 +12,9 @@ The design lives in [`SPEC.md`](SPEC.md).
 generics, operators and mutability, then checks ownership (use after move, conflicting borrows,
 views that outlive their data, race-free `spawn` and `par for`), and an interpreter runs what is
 accepted. A **native backend** (Tau to C, compiled by the system `clang`/`gcc`) is under way: it
-currently handles everything except tensors, complex numbers and parallelism (so: scalars, structs,
-enums, generics, traits, closures, `Vec`/`String`/arrays/slices/`Map`, files, ownership and checked arithmetic),
+currently handles everything except parallelism (so: scalars, structs, enums, generics, traits, closures,
+`Vec`/`String`/arrays/slices/`Map`, tensors, complex numbers, linear algebra, FFT, files, ownership and
+checked arithmetic),
 about 100× faster than the interpreter; the rest still runs on the interpreter, and `par`/`spawn`
 run on a single thread. See [`docs/native/DESIGN.md`](docs/native/DESIGN.md).
 
@@ -23,7 +24,7 @@ run on a single thread. See [`docs/native/DESIGN.md`](docs/native/DESIGN.md).
 | 2 | Name resolution, type checker | done |
 | 3 | Borrow checker | done |
 | 3.5 | Interpreter (`tau run`) | done |
-| 4 | Native code generation via C (see `docs/native/DESIGN.md`) | milestones 1 to 3 of 6 done |
+| 4 | Native code generation via C (see `docs/native/DESIGN.md`) | milestones 1 to 4 of 6 done |
 | 5 | Std library, tensors | |
 | 6 | Thread pool, `par` | |
 | 7 | Package manager, `tau test`, `tau fmt` | |
