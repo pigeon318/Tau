@@ -50,6 +50,9 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn pattern(&mut self, p: &'a Pattern, ty: &Ty, force_mut: bool) {
+        let key = NodeKey::of(p);
+        self.results.pat_ty.insert(key, ty.clone());
+        self.body.touched_pats.push(key);
         match &p.kind {
             PatKind::Wild => {}
             PatKind::Ident { name, mutable } => {

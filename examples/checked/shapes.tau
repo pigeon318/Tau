@@ -34,7 +34,7 @@ fn first_big(xs: [f64], limit: f64) -> Option<f64> {
 
 struct Pair<A, B> { first: A, second: B }
 
-fn swap<A, B>(p: Pair<A, B>) -> Pair<B, A> {
+fn swap<A, B>(own p: Pair<A, B>) -> Pair<B, A> {
     Pair(p.second, p.first)
 }
 

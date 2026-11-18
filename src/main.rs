@@ -1,14 +1,14 @@
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-tau (stage 2: parser and type checker)
+tau (stage 3: parser, type checker and borrow checker)
 
 USAGE:
     tau tokens <file>          print the token stream
     tau parse <file>           check that a file parses
     tau parse <file> --ast     ... and print the full AST
     tau parse <file> --sexp    ... and print each top-level function body as an S-expression
-    tau check <file>           type-check a file
+    tau check <file>           type-check and borrow-check a file
     tau check <file> --types   ... and list the inferred type of every binding
 ";
 
@@ -66,7 +66,7 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        "check" => match tau::check_source(&src) {
+        "check" => match tau::analyze_source(&src) {
             Err(d) => {
                 eprint!("{}", d.render(&src, file));
                 ExitCode::from(1)

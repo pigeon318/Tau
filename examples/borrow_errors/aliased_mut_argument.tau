@@ -1,0 +1,9 @@
+// error: also used by another argument of this call
+// A `mut` borrow must be the only way to reach the value during the call.
+
+fn append(dst: mut Vec<i64>, src: [i64]) {}
+
+fn main() {
+    let mut v = vec[1, 2, 3]
+    append(mut v, v)
+}

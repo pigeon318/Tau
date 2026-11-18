@@ -1,0 +1,11 @@
+// error: cannot borrow `v` as mutable
+// The task reads `v` while it runs, so `v` cannot change until the task is joined.
+
+fn work(v: [i64]) -> i64 { v.len as i64 }
+
+fn main() {
+    let mut v = vec[1, 2, 3]
+    let task = spawn { work(v) }
+    v.push(4)
+    task.join()
+}

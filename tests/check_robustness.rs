@@ -161,3 +161,60 @@ fn adversarial_snippets_never_panic() {
         assert!(r.is_ok(), "panic checking {src:?}");
     }
 }
+
+// ---- borrow checker: mutate whole lines so programs still type-check
+
+fn analyze_src(src: &str) -> Option<usize> {
+    thread_local! {
+        static LIB: Vec<tau::prelude::ModuleSrc> = tau::prelude::load();
+    }
+    let user = tau::parse_module(src).ok()?;
+    LIB.with(|lib| Some(tau::analyze(lib, &user).diagnostics.len()))
+}
+
+fn checked_sources() -> Vec<(String, String)> {
+    sources().into_iter().filter(|(n, _)| !n.starts_with("features") && !n.starts_with("cluster")).collect()
+}
+
+#[test]
+fn borrow_checker_survives_line_deletion_duplication_and_swaps() {
+    let mut analysed = 0;
+    for (name, src) in checked_sources() {
+        let lines: Vec<&str> = src.lines().collect();
+        let mut variants: Vec<String> = Vec::new();
+        for i in 0..lines.len() {
+            // delete line i
+            let mut v = lines.clone();
+            v.remove(i);
+            variants.push(v.join("\n"));
+            // duplicate line i
+            let mut v = lines.clone();
+            v.insert(i, lines[i]);
+            variants.push(v.join("\n"));
+            // swap lines i and i+1
+            if i + 1 < lines.len() {
+                let mut v = lines.clone();
+                v.swap(i, i + 1);
+                variants.push(v.join("\n"));
+            }
+        }
+        for v in variants {
+            let r = std::panic::catch_unwind(|| analyze_src(&v));
+            match r {
+                Ok(Some(_)) => analysed += 1,
+                Ok(None) => {}
+                Err(_) => panic!("borrow checker panicked on a mutation of {name}:\n{v}"),
+            }
+        }
+    }
+    assert!(analysed > 200, "only {analysed} mutations parsed; the test is not exercising anything");
+}
+
+#[test]
+fn analysis_is_deterministic() {
+    for (name, src) in checked_sources() {
+        let a = analyze_src(&src);
+        let b = analyze_src(&src);
+        assert_eq!(a, b, "{name}");
+    }
+}

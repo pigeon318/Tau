@@ -1,0 +1,10 @@
+// error: cannot borrow `v` as mutable
+// A slice is a view of `v`. Growing `v` could move its storage, so `v` cannot
+// be modified while the view is still in use.
+
+fn main() {
+    let mut v = vec[1, 2, 3]
+    let first_two = v[0..2]
+    v.push(4)
+    print(first_two.len)
+}

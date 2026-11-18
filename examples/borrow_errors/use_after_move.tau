@@ -1,0 +1,10 @@
+// error: use of moved value `data`
+// A value passed to an `own` parameter is moved: the caller can no longer use it.
+
+fn consume(own v: Vec<f64>) -> usize { v.len }
+
+fn main() {
+    let data = vec[1.0, 2.0, 3.0]
+    let n = consume(data)
+    print(data.len)
+}
