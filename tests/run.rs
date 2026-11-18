@@ -126,6 +126,15 @@ fn abs_of_the_most_negative_integer_overflows() {
 }
 
 #[test]
+fn map_assignment_inserts_and_compound_assignment_starts_at_zero() {
+    let src = "use std.map.Map\nfn main() {\n let mut m = Map<str, i64>.new()\n m[\"a\"] = 1\n m[\"b\"] = 2\n m[\"a\"] = 10\n m[\"c\"] += 5\n m[\"b\"] -= 7\n print(m[\"a\"])\n print(m[\"b\"])\n print(m[\"c\"])\n let mut t = Map<(i64, i64), i64>.new()\n t[(1, 2)] = 3\n print(t[(1, 2)])\n}";
+    assert_eq!(out_prog(src), "10\n-5\n5\n3\n");
+    let src = "use std.map.Map\nfn main() {\n let m = Map<str, i64>.new()\n print(m[\"x\"])\n}";
+    let (_, outcome) = run(src);
+    assert!(matches!(outcome, Outcome::Panic(m) if m.contains("key not found")));
+}
+
+#[test]
 fn division_by_zero_panics() {
     panics("let z = 0\nprint(1 / z)", "division by zero");
     assert_eq!(out("print(1.0 / 0.0)"), "inf\n");

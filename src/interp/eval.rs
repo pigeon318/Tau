@@ -403,9 +403,9 @@ impl<'a> Interp<'a> {
                         Ok(RefTarget::Slot(slot, i))
                     }
                     Value::Map(m) => {
-                        let k = self.eval(&indices[0], f)?;
+                        let k = self.eval_val(&indices[0], f)?;
                         let key = self.map_key(&k)?;
-                        Ok(RefTarget::MapEntry(m, key))
+                        Ok(RefTarget::MapEntry(m, key, Box::new(k)))
                     }
                     Value::Tensor(t) => {
                         let mut idx = Vec::new();
@@ -483,7 +483,10 @@ impl<'a> Interp<'a> {
             ExprKind::MutBorrow(i) => i,
             _ => a,
         };
+        // `mut v[2..]` is a mutable view of part of `v`, not a place
+        let is_slicing = matches!(&inner.kind, ExprKind::Index { indices, .. } if indices.len() == 1 && matches!(indices[0].kind, ExprKind::Range { .. }));
         match mode {
+            ParamMode::Mut if is_slicing => self.eval(inner, f),
             ParamMode::Mut => Ok(Value::Ref(self.place(inner, f)?)),
             ParamMode::Borrow => self.eval(inner, f),
             ParamMode::Own => self.eval_val(inner, f),
@@ -848,21 +851,14 @@ impl<'a> Interp<'a> {
             return self.store(&target, rv);
         };
         // `counts[k] += 1` starts a missing map entry at zero
-        if let RefTarget::MapEntry(m, k) = &target {
+        if let RefTarget::MapEntry(m, k, key_value) = &target {
             let missing = !m.borrow().index.contains_key(k);
             if missing {
                 let ty = self.ty_of(lhs, f);
                 let zero = self.default_value(&ty)?;
                 let mut mm = m.borrow_mut();
-                let key_value = match k {
-                    MapKey::Int(i) => Value::Int(*i),
-                    MapKey::Str(s) => Value::string(s),
-                    MapKey::Char(c) => Value::Char(*c),
-                    MapKey::Bool(b) => Value::Bool(*b),
-                    MapKey::Tuple(_) => return panic("a tuple map key cannot be created implicitly"),
-                };
                 let at = mm.entries.len();
-                mm.entries.push((key_value, zero));
+                mm.entries.push(((**key_value).clone(), zero));
                 mm.index.insert(k.clone(), at);
             }
         }

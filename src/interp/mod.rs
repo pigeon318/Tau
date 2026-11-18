@@ -303,7 +303,7 @@ impl<'a> Interp<'a> {
         Ok(match t {
             RefTarget::Var(env, i) => env.vars.borrow()[*i].1.clone(),
             RefTarget::Slot(s, i) => s.borrow()[*i].clone(),
-            RefTarget::MapEntry(m, k) => {
+            RefTarget::MapEntry(m, k, _) => {
                 let m = m.borrow();
                 match m.index.get(k) {
                     Some(i) => m.entries[*i].1.clone(),
@@ -324,11 +324,16 @@ impl<'a> Interp<'a> {
         match t {
             RefTarget::Var(env, i) => env.vars.borrow_mut()[*i].1 = v,
             RefTarget::Slot(s, i) => s.borrow_mut()[*i] = v,
-            RefTarget::MapEntry(m, k) => {
+            RefTarget::MapEntry(m, k, key_value) => {
+                // `m[k] = v` overwrites an entry, or adds one at the end
                 let mut m = m.borrow_mut();
                 match m.index.get(k).copied() {
                     Some(i) => m.entries[i].1 = v,
-                    None => return panic("key not found in map"),
+                    None => {
+                        let at = m.entries.len();
+                        m.entries.push(((**key_value).clone(), v));
+                        m.index.insert(k.clone(), at);
+                    }
                 }
             }
             RefTarget::TensorElem(t, i) => {
