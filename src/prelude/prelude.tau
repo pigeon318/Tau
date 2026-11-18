@@ -9,7 +9,7 @@ pub struct Range<T> { pub start: T, pub end: T }
 pub struct Ptr<T> {}
 pub struct Task<T> {}
 pub struct Cluster {}
-pub struct IoError {}
+pub struct IoError { pub message: String }
 pub struct TaskPanicked {}
 
 pub enum Option<T> {

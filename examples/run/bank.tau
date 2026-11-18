@@ -1,0 +1,40 @@
+// Structs, enums, Result and `mut` parameters.
+
+enum TxError {
+    Insufficient(i64)
+    Frozen
+}
+
+struct Account {
+    balance: i64
+    frozen: bool
+}
+
+fn withdraw(acct: mut Account, amount: i64) -> Result<i64, TxError> {
+    if acct.frozen {
+        return Err(Frozen)
+    }
+    if acct.balance < amount {
+        return Err(Insufficient(amount - acct.balance))
+    }
+    acct.balance -= amount
+    Ok(acct.balance)
+}
+
+fn report(r: Result<i64, TxError>) {
+    match r {
+        Ok(left) => print("ok, {left} left")
+        Err(Insufficient(short)) => print("short by {short}")
+        Err(Frozen) => print("account frozen")
+    }
+}
+
+fn main() {
+    let mut a = Account(100, false)
+    report(withdraw(mut a, 30))
+    report(withdraw(mut a, 50))
+    report(withdraw(mut a, 40))
+    a.frozen = true
+    report(withdraw(mut a, 1))
+    print("final balance: {a.balance}")
+}

@@ -11,3 +11,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "tau"
 path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1

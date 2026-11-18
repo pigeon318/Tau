@@ -127,6 +127,7 @@ impl<'a> Checker<'a> {
                 });
                 self.const_srcs.push(Some(c));
                 let id = ConstId(self.prog.consts.len() as u32 - 1);
+                self.results.const_decl.insert(NodeKey::of(c), id);
                 self.define_value(m, &c.name, ValueItem::Const(id));
             }
             ItemKind::TypeAlias(a) => {

@@ -1,0 +1,28 @@
+// The starting number below 1000 with the longest Collatz chain.
+
+fn steps(start: i64) -> i64 {
+    let mut n = start
+    let mut count = 0
+    while n != 1 {
+        if n % 2 == 0 {
+            n = n / 2
+        } else {
+            n = 3 * n + 1
+        }
+        count += 1
+    }
+    count
+}
+
+fn main() {
+    let mut best = 1
+    let mut best_steps = 0
+    for n in 1..1000 {
+        let s = steps(n)
+        if s > best_steps {
+            best = n
+            best_steps = s
+        }
+    }
+    print("longest chain under 1000: {best} with {best_steps} steps")
+}

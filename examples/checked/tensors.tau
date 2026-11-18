@@ -13,5 +13,8 @@ fn main() {
     let x = e[0, 1]
     print(trace(d))
     print(x)
-    let (vals, vecs) = linalg.eig(d)
+    // eigenvalues need a symmetric matrix
+    let sym = d + linalg.transpose(d)
+    let (vals, vecs) = linalg.eig(sym)
+    print(vals)
 }
