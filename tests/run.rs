@@ -135,6 +135,15 @@ fn map_assignment_inserts_and_compound_assignment_starts_at_zero() {
 }
 
 #[test]
+fn a_tasks_output_appears_when_it_is_joined() {
+    let src = "fn main() {\n let h = spawn {\n print(\"in task\")\n 5\n }\n print(\"main\")\n let g = spawn {\n print(\"second\")\n 6\n }\n match h.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n match g.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n}";
+    assert_eq!(out_prog(src), "main\nin task\n5\nsecond\n6\n");
+    // a task that panics still shows what it printed before, and joining reports the failure
+    let src = "fn main() {\n let h = spawn {\n print(\"before\")\n panic(\"boom\")\n 1\n }\n match h.join() {\n Ok(_) => print(\"ok\")\n Err(_) => print(\"task failed\")\n }\n}";
+    assert_eq!(out_prog(src), "before\ntask failed\n");
+}
+
+#[test]
 fn division_by_zero_panics() {
     panics("let z = 0\nprint(1 / z)", "division by zero");
     assert_eq!(out("print(1.0 / 0.0)"), "inf\n");

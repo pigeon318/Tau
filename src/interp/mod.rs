@@ -77,6 +77,8 @@ pub struct Interp<'a> {
     pub option: AdtId,
     pub result: AdtId,
     pub range_adt: Option<AdtId>,
+    /// Every task spawned so far: output of tasks never joined is printed when the program ends.
+    pub tasks: Vec<TaskCell<'a>>,
 }
 
 
@@ -110,6 +112,7 @@ fn make_interp<'a>(
         option: prog.find_adt("Option").expect("prelude defines Option"),
         result: prog.find_adt("Result").expect("prelude defines Result"),
         range_adt: prog.find_adt("Range"),
+        tasks: Vec::new(),
     };
     it.collect(&user.items);
     it
@@ -138,6 +141,7 @@ pub fn run_main(user: &Module, check: &CheckResult, lib_paths: Vec<String>, out:
                     return Outcome::Error(text);
                 }
             }
+            it.flush_unjoined_tasks();
             let _ = it.out.flush();
             Outcome::Ok
         }
@@ -146,6 +150,7 @@ pub fn run_main(user: &Module, check: &CheckResult, lib_paths: Vec<String>, out:
             Outcome::Panic(m)
         }
         Err(_) => {
+            it.flush_unjoined_tasks();
             let _ = it.out.flush();
             Outcome::Ok
         }
@@ -298,6 +303,16 @@ impl<'a> Interp<'a> {
     }
 
     // ------------------------------------------------------------ references
+
+    /// Print what tasks that were never joined printed.
+    pub fn flush_unjoined_tasks(&mut self) {
+        let tasks = std::mem::take(&mut self.tasks);
+        for t in tasks {
+            if let Some((_, sink)) = t.borrow_mut().take() {
+                let _ = self.out.write_all(&sink.borrow());
+            }
+        }
+    }
 
     pub fn load(&self, t: &RefTarget<'a>) -> R<'a, Value<'a>> {
         Ok(match t {
