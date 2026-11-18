@@ -91,8 +91,13 @@ pub fn compile_c(c_src: &str) -> Result<PathBuf, NativeError> {
     std::fs::create_dir_all(&dir).map_err(|e| NativeError::plain(format!("cannot create {}: {e}", dir.display())))?;
     // TAU_SANITIZE=1 builds with UBSan and aborts on the first report (used by the test suite's
     // sanitizer run; AddressSanitizer does not work with the runtime's own stack yet)
-    let sanitize = std::env::var("TAU_SANITIZE").map(|v| !v.is_empty() && v != "0").unwrap_or(false);
-    let extra: &[&str] = if sanitize { &["-g", "-fsanitize=undefined", "-fno-sanitize-recover=all"] } else { &[] };
+    let mode = std::env::var("TAU_SANITIZE").unwrap_or_default();
+    let extra: &[&str] = match mode.as_str() {
+        "" | "0" => &[],
+        // data races between the pool's threads
+        "thread" => &["-g", "-fsanitize=thread"],
+        _ => &["-g", "-fsanitize=undefined", "-fno-sanitize-recover=all"],
+    };
     let mut h = DefaultHasher::new();
     (&cc, CFLAGS, extra, c_src).hash(&mut h);
     let key = format!("{:016x}", h.finish());
@@ -140,6 +145,11 @@ pub struct NativeOutput {
 
 /// Build `src` and run it, capturing its output (used by tests).
 pub fn run_captured(src: &str) -> Result<NativeOutput, NativeError> {
+    run_captured_env(src, &[])
+}
+
+/// Like `run_captured`, with extra environment variables (e.g. `TAU_THREADS`).
+pub fn run_captured_env(src: &str, env: &[(&str, &str)]) -> Result<NativeOutput, NativeError> {
     let exe = build_source(src)?;
     // TAU_VALGRIND=1 runs the program under valgrind: an invalid access or double free gives exit
     // status 99, and a leak on a normal exit gives 98 (used by the test suite's memory run)
@@ -157,6 +167,9 @@ pub fn run_captured(src: &str) -> Result<NativeOutput, NativeError> {
     } else {
         Command::new(&exe)
     };
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     let out = cmd.stdin(Stdio::null()).output().map_err(|e| NativeError::plain(format!("cannot run {}: {e}", exe.display())))?;
     let mut stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let mut code = out.status.code().unwrap_or(-1);

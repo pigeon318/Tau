@@ -52,13 +52,31 @@ static void tau_flush_stdout(void) {
     tau_stdout.len = 0;
 }
 
+/* Inside a parallel block or a task, output goes to that block's own buffer, which is added to
+ * the real output in order afterwards, so a parallel program prints what the sequential one does. */
+#include <setjmp.h>
+#include <stdatomic.h>
+static __thread tau_buf *tau_cur_out;
+
 /* `print` writes through this buffer, which is flushed when it grows and at exit/panic. */
-static tau_buf *tau_out_begin(void) { return &tau_stdout; }
-static void tau_out_end(void) { if (tau_stdout.len >= (1u << 16)) tau_flush_stdout(); }
+static tau_buf *tau_out_begin(void) { return tau_cur_out ? tau_cur_out : &tau_stdout; }
+static void tau_out_end(void) { if (!tau_cur_out && tau_stdout.len >= (1u << 16)) tau_flush_stdout(); }
 
 /* ---------------------------------------------------------------- panics */
 
+/* A panic inside a parallel block or a task does not end the program at once: it jumps back to
+ * the code running the block, which records it so the earliest one can be reported. */
+typedef struct { sigjmp_buf jb; char *msg; size_t len; } tau_task_ctx;
+static __thread tau_task_ctx *tau_cur_task;
+static __thread uintptr_t tau_stack_lo;
+
 TAU_NORETURN static void tau_panic(const char *msg, size_t len) {
+    if (tau_cur_task) {
+        tau_cur_task->msg = (char *)malloc(len + 1);
+        if (tau_cur_task->msg) { memcpy(tau_cur_task->msg, msg, len); tau_cur_task->msg[len] = 0; }
+        tau_cur_task->len = len;
+        siglongjmp(tau_cur_task->jb, 1);
+    }
     tau_flush_stdout();
     static const char pre[] = "panic: ";
     (void)!write(2, pre, sizeof pre - 1);
@@ -218,12 +236,12 @@ TAU_NORETURN TAU_COLD static void tau_slice_oob(__int128 a, __int128 b, size_t l
 /* A string built by interpolation (`let s = "n = {n}"`) has type `str`, a view that cannot own
  * memory, so its bytes live until the program ends. They are kept on a list so that they stay
  * reachable (and a leak checker sees them as such). */
-static void *tau_pool_head;
+static _Atomic(void *) tau_pool_head;
 static tau_str tau_intern(const uint8_t *p, size_t n) {
     void **blk = (void **)malloc(n + sizeof(void *));
     if (!blk) tau_panic_cstr("out of memory");
-    *blk = tau_pool_head;
-    tau_pool_head = blk;
+    void *old = atomic_load(&tau_pool_head);
+    do { *blk = old; } while (!atomic_compare_exchange_weak(&tau_pool_head, &old, (void *)blk));
     if (n) memcpy(blk + 1, p, n);
     return (tau_str){ (const uint8_t *)(blk + 1), n };
 }
@@ -839,9 +857,247 @@ static int tau_read_line(tau_buf *out) {
     return 0;
 }
 
+/* ---------------------------------------------------------------- threads: blocks and tasks */
+
+/* Worker threads take jobs from one queue. A parallel region or a task is posted as jobs, and the
+ * thread that posted it also helps (or runs the task itself when it is joined), so waiting never
+ * depends on a free worker and nothing can deadlock. Results never depend on the thread count. */
+typedef struct tau_job { void (*fn)(void *); void *arg; struct tau_job *next; } tau_job;
+static pthread_mutex_t tau_pool_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t tau_pool_cv = PTHREAD_COND_INITIALIZER;
+static tau_job *tau_pool_first, *tau_pool_last;
+static int tau_pool_workers = -1;
+static pthread_once_t tau_pool_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t tau_const_mu = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+
+static void tau_thread_setup(void) {
+    pthread_attr_t at;
+    void *lo = 0;
+    size_t sz = 0;
+    if (pthread_getattr_np(pthread_self(), &at) == 0) {
+        pthread_attr_getstack(&at, &lo, &sz);
+        pthread_attr_destroy(&at);
+        tau_stack_lo = (uintptr_t)lo;
+    }
+    static __thread char altstack[1 << 16];
+    stack_t ss;
+    ss.ss_sp = altstack;
+    ss.ss_size = sizeof altstack;
+    ss.ss_flags = 0;
+    sigaltstack(&ss, 0);
+}
+
+static void *tau_worker(void *arg) {
+    (void)arg;
+    tau_thread_setup();
+    for (;;) {
+        pthread_mutex_lock(&tau_pool_mu);
+        while (!tau_pool_first) pthread_cond_wait(&tau_pool_cv, &tau_pool_mu);
+        tau_job *j = tau_pool_first;
+        tau_pool_first = j->next;
+        if (!tau_pool_first) tau_pool_last = 0;
+        pthread_mutex_unlock(&tau_pool_mu);
+        j->fn(j->arg);
+        free(j);
+    }
+    return 0;
+}
+
+static void tau_pool_init(void) {
+    int total = 0;
+    const char *e = getenv("TAU_THREADS");
+    if (e && *e) total = atoi(e);
+    if (total <= 0) { long n = sysconf(_SC_NPROCESSORS_ONLN); total = n > 0 ? (int)n : 1; }
+    if (total > 256) total = 256;
+    tau_pool_workers = total - 1;
+    for (int i = 0; i < tau_pool_workers; i++) {
+        pthread_attr_t at;
+        pthread_t th;
+        pthread_attr_init(&at);
+        size_t sizes[] = {(size_t)1 << 28, (size_t)1 << 26, (size_t)1 << 24};
+        int ok = 0;
+        for (int k = 0; k < 3 && !ok; k++) {
+            pthread_attr_setstacksize(&at, sizes[k]);
+            if (pthread_create(&th, &at, tau_worker, 0) == 0) ok = 1;
+        }
+        if (ok) pthread_detach(th);
+        else { tau_pool_workers = i; break; }
+    }
+}
+static int tau_threads(void) { pthread_once(&tau_pool_once, tau_pool_init); return tau_pool_workers + 1; }
+
+static void tau_post(void (*fn)(void *), void *arg) {
+    tau_job *j = (tau_job *)malloc(sizeof *j);
+    j->fn = fn; j->arg = arg; j->next = 0;
+    pthread_mutex_lock(&tau_pool_mu);
+    if (tau_pool_last) tau_pool_last->next = j; else tau_pool_first = j;
+    tau_pool_last = j;
+    pthread_mutex_unlock(&tau_pool_mu);
+    pthread_cond_signal(&tau_pool_cv);
+}
+
+/* ---- parallel regions: a range of items cut into blocks, run in any order, combined in order */
+
+typedef void (*tau_block_fn)(void *env, size_t blk, size_t lo, size_t hi, void *out);
+typedef struct {
+    tau_block_fn fn; void *env; size_t n, block, nblocks; char *outs; size_t tsize;
+    atomic_size_t next, done, minpanic;
+    tau_buf *bufs; char **msgs;
+    atomic_int refs;
+    pthread_mutex_t mu; pthread_cond_t cv;
+} tau_region;
+
+static void tau_region_release(tau_region *r) {
+    if (atomic_fetch_sub(&r->refs, 1) == 1) {
+        free(r->bufs); free(r->msgs); free(r);
+    }
+}
+
+static void tau_region_help(tau_region *r) {
+    for (;;) {
+        size_t b = atomic_fetch_add(&r->next, 1);
+        if (b >= r->nblocks) break;
+        if (b <= atomic_load(&r->minpanic)) {
+            size_t lo = b * r->block, hi = lo + r->block < r->n ? lo + r->block : r->n;
+            tau_task_ctx ctx;
+            ctx.msg = 0; ctx.len = 0;
+            tau_task_ctx *saved_ctx = tau_cur_task;
+            tau_buf *saved_out = tau_cur_out;
+            tau_cur_task = &ctx;
+            tau_cur_out = &r->bufs[b];
+            if (sigsetjmp(ctx.jb, 1) == 0) {
+                r->fn(r->env, b, lo, hi, r->outs ? r->outs + b * r->tsize : 0);
+            } else {
+                r->msgs[b] = ctx.msg ? ctx.msg : strdup("panic");
+                size_t cur = atomic_load(&r->minpanic);
+                while (b < cur && !atomic_compare_exchange_weak(&r->minpanic, &cur, b)) {}
+            }
+            tau_cur_task = saved_ctx;
+            tau_cur_out = saved_out;
+        }
+        if (atomic_fetch_add(&r->done, 1) + 1 == r->nblocks) {
+            pthread_mutex_lock(&r->mu);
+            pthread_cond_broadcast(&r->cv);
+            pthread_mutex_unlock(&r->mu);
+        }
+    }
+}
+static void tau_region_job(void *arg) { tau_region *r = (tau_region *)arg; tau_region_help(r); tau_region_release(r); }
+
+/* Run `fn` over `n` items in blocks of `block` (0: choose one). Each block may write its result
+ * to `outs[blk * tsize]`. A panic in a block is reported after all earlier blocks have printed
+ * what they print, so the program shows what a sequential run would. */
+static void tau_par_blocks(size_t n, size_t block, tau_block_fn fn, void *env, void *outs, size_t tsize) {
+    if (n == 0) return;
+    int threads = tau_threads();
+    if (block == 0) { block = n / ((size_t)threads * 4); if (block == 0) block = 1; }
+    size_t nb = (n + block - 1) / block;
+    tau_region *r = (tau_region *)calloc(1, sizeof *r);
+    r->fn = fn; r->env = env; r->n = n; r->block = block; r->nblocks = nb; r->outs = (char *)outs; r->tsize = tsize;
+    atomic_init(&r->next, 0); atomic_init(&r->done, 0); atomic_init(&r->minpanic, (size_t)-1);
+    r->bufs = (tau_buf *)calloc(nb, sizeof(tau_buf));
+    r->msgs = (char **)calloc(nb, sizeof(char *));
+    atomic_init(&r->refs, 1);
+    pthread_mutex_init(&r->mu, 0); pthread_cond_init(&r->cv, 0);
+    size_t helpers = (size_t)(threads - 1) < nb - 1 ? (size_t)(threads - 1) : nb - 1;
+    for (size_t i = 0; i < helpers; i++) { atomic_fetch_add(&r->refs, 1); tau_post(tau_region_job, r); }
+    tau_region_help(r);
+    pthread_mutex_lock(&r->mu);
+    while (atomic_load(&r->done) < nb) pthread_cond_wait(&r->cv, &r->mu);
+    pthread_mutex_unlock(&r->mu);
+    size_t minp = atomic_load(&r->minpanic);
+    size_t upto = minp == (size_t)-1 ? nb : minp + 1;
+    tau_buf *dst = tau_out_begin();
+    for (size_t b = 0; b < upto; b++) {
+        if (r->bufs[b].len) tau_buf_push(dst, r->bufs[b].ptr, r->bufs[b].len);
+    }
+    for (size_t b = 0; b < nb; b++) free(r->bufs[b].ptr);
+    if (minp != (size_t)-1) {
+        char *m = r->msgs[minp];
+        size_t len = strlen(m);
+        char *copy = (char *)malloc(len + 1);
+        memcpy(copy, m, len + 1);
+        for (size_t b = 0; b < nb; b++) free(r->msgs[b]);
+        tau_region_release(r);
+        tau_panic(copy, len);
+    }
+    tau_region_release(r);
+}
+
+/* ---- tasks (`spawn`) */
+
+typedef struct tau_task {
+    void (*run)(struct tau_task *);
+    void (*cleanup)(void *);
+    void *closure;
+    void *result;
+    void (*drop_result)(void *);
+    atomic_int state; /* 0 waiting, 1 running, 2 finished */
+    atomic_int refs;
+    int panicked;
+    tau_buf out;
+    pthread_mutex_t mu; pthread_cond_t cv;
+} tau_task;
+
+static void tau_task_release(tau_task *t) {
+    if (atomic_fetch_sub(&t->refs, 1) == 1) { free(t->out.ptr); free(t->result); free(t); }
+}
+
+static void tau_task_exec(tau_task *t) {
+    int expect = 0;
+    if (!atomic_compare_exchange_strong(&t->state, &expect, 1)) return;
+    tau_task_ctx ctx;
+    ctx.msg = 0; ctx.len = 0;
+    tau_task_ctx *saved_ctx = tau_cur_task;
+    tau_buf *saved_out = tau_cur_out;
+    tau_cur_task = &ctx;
+    tau_cur_out = &t->out;
+    if (sigsetjmp(ctx.jb, 1) == 0) t->run(t);
+    else { t->panicked = 1; free(ctx.msg); }
+    tau_cur_task = saved_ctx;
+    tau_cur_out = saved_out;
+    if (t->cleanup) t->cleanup(t->closure);
+    pthread_mutex_lock(&t->mu);
+    atomic_store(&t->state, 2);
+    pthread_cond_broadcast(&t->cv);
+    pthread_mutex_unlock(&t->mu);
+}
+static void tau_task_job(void *arg) { tau_task *t = (tau_task *)arg; tau_task_exec(t); tau_task_release(t); }
+
+static tau_task *tau_spawn(void (*run)(tau_task *), void (*cleanup)(void *), void *closure, size_t tsize, void (*drop_result)(void *)) {
+    tau_task *t = (tau_task *)calloc(1, sizeof *t);
+    t->run = run; t->cleanup = cleanup; t->closure = closure; t->drop_result = drop_result;
+    t->result = calloc(1, tsize ? tsize : 1);
+    pthread_mutex_init(&t->mu, 0); pthread_cond_init(&t->cv, 0);
+    atomic_init(&t->state, 0);
+    if (tau_threads() > 1) { atomic_init(&t->refs, 2); tau_post(tau_task_job, t); }
+    else atomic_init(&t->refs, 1);
+    return t;
+}
+
+/* wait for the task (running it here if no worker has started it), then print what it printed;
+ * returns whether it panicked */
+static int tau_task_join(tau_task *t) {
+    tau_task_exec(t);
+    pthread_mutex_lock(&t->mu);
+    while (atomic_load(&t->state) != 2) pthread_cond_wait(&t->cv, &t->mu);
+    pthread_mutex_unlock(&t->mu);
+    if (t->out.len) { tau_buf *dst = tau_out_begin(); tau_buf_push(dst, t->out.ptr, t->out.len); t->out.len = 0; }
+    return t->panicked;
+}
+
+/* a handle that is dropped without being joined joins here */
+static void tau_task_drop(tau_task **p) {
+    tau_task *t = *p;
+    if (!t) return;
+    int bad = tau_task_join(t);
+    if (!bad && t->drop_result) t->drop_result(t->result);
+    tau_task_release(t);
+    *p = 0;
+}
+
 /* ---------------------------------------------------------------- program entry, stack overflow */
 
-static uintptr_t tau_stack_lo;
 static int tau_run_main(void);
 static int tau_exit_status;
 
@@ -849,6 +1105,12 @@ static void tau_segv(int sig, siginfo_t *si, void *ctx) {
     (void)ctx;
     uintptr_t a = (uintptr_t)si->si_addr;
     if (a + 65536 >= tau_stack_lo && a < tau_stack_lo + 65536) {
+        if (tau_cur_task) {
+            static const char sm[] = "stack overflow: the program recursed too deeply";
+            tau_cur_task->msg = strdup(sm);
+            tau_cur_task->len = sizeof sm - 1;
+            siglongjmp(tau_cur_task->jb, 1);
+        }
         static const char m[] = "panic: stack overflow: the program recursed too deeply\n";
         tau_flush_stdout();
         (void)!write(2, m, sizeof m - 1);
@@ -859,20 +1121,7 @@ static void tau_segv(int sig, siginfo_t *si, void *ctx) {
 
 static void *tau_thread_main(void *arg) {
     (void)arg;
-    pthread_attr_t at;
-    void *lo = 0;
-    size_t sz = 0;
-    if (pthread_getattr_np(pthread_self(), &at) == 0) {
-        pthread_attr_getstack(&at, &lo, &sz);
-        pthread_attr_destroy(&at);
-        tau_stack_lo = (uintptr_t)lo;
-    }
-    stack_t ss;
-    static char tau_altstack[1 << 16];
-    ss.ss_sp = tau_altstack;
-    ss.ss_size = 1 << 16;
-    ss.ss_flags = 0;
-    sigaltstack(&ss, 0);
+    tau_thread_setup();
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = tau_segv;

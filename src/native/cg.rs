@@ -51,6 +51,136 @@ struct LoopCtx {
     result: Option<String>,
 }
 
+/// The body of a closure or task.
+#[derive(Clone, Copy)]
+enum Body<'a> {
+    Expr(&'a Expr),
+    Block(&'a Block),
+}
+
+/// The direct sub-expressions of `e` (the statements of a block count as expressions).
+fn sub_exprs<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    fn block<'e>(b: &'e Block, out: &mut Vec<&'e Expr>) {
+        for s in &b.stmts {
+            match s {
+                Stmt::Let { init: Some(x), .. } => out.push(x),
+                Stmt::Expr(x) => out.push(x),
+                _ => {}
+            }
+        }
+    }
+    match &e.kind {
+        ExprKind::Str(ps) => {
+            for p in ps {
+                if let StrPiece::Interp(x) = p {
+                    out.push(x);
+                }
+            }
+        }
+        ExprKind::Tuple(es) | ExprKind::Array(es) => out.extend(es.iter()),
+        ExprKind::ArrayRepeat { value, len } => {
+            out.push(value);
+            out.push(len);
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::Cast { expr, .. } | ExprKind::Try(expr) | ExprKind::MutBorrow(expr) => out.push(expr),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Assign { lhs, rhs, .. } => {
+            out.push(lhs);
+            out.push(rhs);
+        }
+        ExprKind::Call { callee, args } => {
+            out.push(callee);
+            out.extend(args.iter());
+        }
+        ExprKind::MethodCall { recv, args, .. } => {
+            out.push(recv);
+            out.extend(args.iter());
+        }
+        ExprKind::Field { base, .. } => out.push(base),
+        ExprKind::Index { base, indices } => {
+            out.push(base);
+            out.extend(indices.iter());
+        }
+        ExprKind::Range { start, end, .. } => {
+            if let Some(x) = start {
+                out.push(x);
+            }
+            if let Some(x) = end {
+                out.push(x);
+            }
+        }
+        ExprKind::Closure { body, .. } => out.push(body),
+        ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::Loop(b) | ExprKind::Spawn(b) => block(b, out),
+        ExprKind::If { cond, then, else_ } => {
+            out.push(cond);
+            block(then, out);
+            if let Some(x) = else_ {
+                out.push(x);
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            out.push(scrutinee);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    out.push(g);
+                }
+                out.push(&a.body);
+            }
+        }
+        ExprKind::While { cond, body } => {
+            out.push(cond);
+            block(body, out);
+        }
+        ExprKind::For { iter, guard, body, .. } => {
+            out.push(iter);
+            if let Some(g) = guard {
+                out.push(g);
+            }
+            block(body, out);
+        }
+        ExprKind::Return(v) | ExprKind::Break(v) => {
+            if let Some(x) = v {
+                out.push(x);
+            }
+        }
+        ExprKind::ParReduce { iter, body, .. } => {
+            out.push(iter);
+            out.push(body);
+        }
+        ExprKind::On { target, body } => {
+            out.push(target);
+            block(body, out);
+        }
+        _ => {}
+    }
+}
+
+/// Every identifier mentioned anywhere inside `e`.
+fn idents_in(e: &Expr, out: &mut std::collections::BTreeSet<String>) {
+    if let ExprKind::Ident(n) = &e.kind {
+        out.insert(n.clone());
+    }
+    let mut subs = Vec::new();
+    sub_exprs(e, &mut subs);
+    for x in subs {
+        idents_in(x, out);
+    }
+}
+
+/// Does `e` leave the enclosing function or loop (`return`, `?`, or a `break` that is not
+/// inside a loop of its own)? A parallel body cannot do that.
+fn escapes(e: &Expr, in_loop: bool) -> bool {
+    match &e.kind {
+        ExprKind::Return(_) | ExprKind::Try(_) => return true,
+        ExprKind::Break(_) if !in_loop => return true,
+        ExprKind::Closure { .. } => return false,
+        _ => {}
+    }
+    let inner = in_loop || matches!(e.kind, ExprKind::Loop(_) | ExprKind::While { .. } | ExprKind::For { .. });
+    let mut subs = Vec::new();
+    sub_exprs(e, &mut subs);
+    subs.into_iter().any(|x| escapes(x, inner))
+}
+
 /// One monomorphic instance of a function waiting to be generated.
 struct Inst {
     name: String,
@@ -95,6 +225,9 @@ pub struct Cg<'a> {
     insert_ctx: bool,
     /// How each closure captures the variables it uses (from the borrow checker).
     captures: HashMap<NodeKey, Vec<(String, CaptureKind)>>,
+    /// Non-zero while compiling the body of a parallel region: things whose order matters
+    /// (the random number generator, files) are not allowed there.
+    in_par: usize,
 }
 
 /// Translate a checked program to a complete C source file (runtime included).
@@ -122,6 +255,7 @@ pub fn translate(user: &Module, check: &CheckResult, mod_paths: Vec<String>, cap
         mod_paths,
         insert_ctx: false,
         captures,
+        in_par: 0,
     };
     for item in &user.items {
         cg.register_item(item);
@@ -244,7 +378,8 @@ impl<'a> Cg<'a> {
                     match def.name.as_str() {
                         "String" => return Ok("String".to_string()),
                         "Vec" => return Ok(format!("Vec_{}", self.mangle(&args[0])?)),
-                        "Range" | "Ptr" | "Task" | "Cluster" | "TaskPanicked" => {
+                        "Task" => return Ok(format!("Task_{}", self.mangle(&args[0])?)),
+                        "Range" | "Ptr" | "Cluster" => {
                             return unsupported(self.describe(ty));
                         }
                         _ => {}
@@ -362,6 +497,10 @@ impl<'a> Cg<'a> {
             Ty::Adt(id, args) if self.is_builtin_adt(*id, "String") => {
                 let _ = args;
                 "tau_buf".to_string()
+            }
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Task") => {
+                self.cty(&args[0])?;
+                "tau_task *".to_string()
             }
             t if self.map_kv(t).is_some() => {
                 let (k, v) = self.map_kv(t).unwrap();
@@ -496,7 +635,7 @@ impl<'a> Cg<'a> {
             Ty::Array(t, _) => self.needs_drop(t),
             Ty::Adt(id, args) => {
                 let d = self.prog.adt(*id);
-                if d.module == 0 && matches!(d.name.as_str(), "String" | "Vec") {
+                if d.module == 0 && matches!(d.name.as_str(), "String" | "Vec" | "Task") {
                     return true;
                 }
                 if self.map_kv(ty).is_some() {
@@ -541,6 +680,7 @@ impl<'a> Cg<'a> {
                 let _ = args;
                 body.push_str("free(p->ptr);\n");
             }
+            Ty::Adt(id, _) if self.is_builtin_adt(*id, "Task") => body.push_str("tau_task_drop(p);\n"),
             Ty::Adt(id, args) if self.is_builtin_adt(*id, "Vec") => {
                 if let Some(f) = self.drop_fn(&args[0])? {
                     body.push_str(&format!("for (size_t i = 0; i < p->len; i++) {f}(&p->ptr[i]);\n"));
@@ -1266,6 +1406,9 @@ impl<'a> Cg<'a> {
                     "tau_buf_char(b, '[');\nfor (size_t i = 0; i < {len}; i++) {{ if (i > 0) tau_buf_cstr(b, \", \"); {ect} x_ = {ptr}[i]; {f} }}\ntau_buf_char(b, ']');\n"
                 ));
             }
+            Ty::Adt(id, _) if self.is_builtin_adt(*id, "TaskPanicked") => {
+                body.push_str("tau_buf_cstr(b, \"task panicked\");\n");
+            }
             t if self.is_io_error(t) => {
                 body.push_str("tau_buf_cstr(b, \"io error: \"); tau_buf_push(b, v.f0.ptr, v.f0.len);\n");
             }
@@ -1482,7 +1625,7 @@ impl<'a> Cg<'a> {
             ExprKind::While { cond, body } => self.while_expr(cond, body),
             ExprKind::For { par, pat, iter, guard, body } => {
                 if *par {
-                    return unsupported("`par for` (milestone 5)");
+                    return self.par_for(pat, iter, guard.as_deref(), body);
                 }
                 self.for_expr(pat, iter, guard.as_deref(), body)
             }
@@ -1534,7 +1677,9 @@ impl<'a> Cg<'a> {
             ExprKind::Index { base, indices } => self.index_expr(e, &ty, base, indices),
             ExprKind::Closure { params, body, .. } => self.closure_expr(e, params, body, &ty),
             ExprKind::Range { .. } => unsupported("ranges outside a `for` loop or an index"),
-            ExprKind::ParReduce { .. } | ExprKind::Spawn(_) | ExprKind::On { .. } => unsupported("parallel constructs (milestone 5)"),
+            ExprKind::ParReduce { op, pat, iter, body } => self.par_reduce(&ty, &op.name, pat, iter, body),
+            ExprKind::Spawn(b) => self.spawn_expr(e, b, &ty),
+            ExprKind::On { .. } => unsupported("`on` blocks (clusters are post-v1)"),
             ExprKind::TypeApp { .. } => unsupported("this expression"),
         }
     }
@@ -1591,7 +1736,7 @@ impl<'a> Cg<'a> {
             let v = v?;
             self.protos.push_str(&format!("static {ct} {name}(void);\n"));
             self.bodies.push_str(&format!(
-                "static {ct} {name}(void) {{\n{hoisted}  static bool done; static {ct} v; if (!done) {{ v = {v}; done = true; }} return v;\n}}\n"
+                "static {ct} {name}(void) {{\n{hoisted}  static int done; static {ct} v;\n  if (__atomic_load_n(&done, __ATOMIC_ACQUIRE)) return v;\n  pthread_mutex_lock(&tau_const_mu);\n  if (!done) {{ v = {v}; __atomic_store_n(&done, 1, __ATOMIC_RELEASE); }}\n  pthread_mutex_unlock(&tau_const_mu);\n  return v;\n}}\n"
             ));
         }
         Ok(format!("{name}()"))
@@ -2167,6 +2312,14 @@ impl<'a> Cg<'a> {
         }
         if let Target::Builtin { key, .. } = &target {
             let ret = sig.ret.subst(&tsub);
+            // `mut x` at the call site only marks the borrow
+            let ops: Vec<(&'a Expr, ParamMode, Ty)> = ops
+                .into_iter()
+                .map(|(a, m, t)| match &a.kind {
+                    ExprKind::MutBorrow(x) => (&**x, m, t),
+                    _ => (a, m, t),
+                })
+                .collect();
             return self.builtin(key, &tsub, &ret, &ops);
         }
         let Target::User { name, .. } = target else { unreachable!() };
@@ -2360,6 +2513,28 @@ impl<'a> Cg<'a> {
                     None => unsupported("this library function"),
                 }
             }
+            "Task::join" => {
+                let Ty::Adt(_, rargs) = ret else { return unsupported("this `join`") };
+                let rct = self.cty(ret)?;
+                let tct = self.cty(&rargs[0])?;
+                let pct = self.cty(&rargs[1])?;
+                let t = self.convert(ops[0].0, &ops[0].2)?;
+                Ok(format!(
+                    "({{ tau_task *t_ = {t}; int bad_ = tau_task_join(t_); {rct} r_; if (bad_) r_ = ({rct}){{ .tag = 1, .u.v1 = {{ ({pct}){{0}} }} }}; else r_ = ({rct}){{ .tag = 0, .u.v0 = {{ *({tct} *)t_->result }} }}; tau_task_release(t_); r_; }})"
+                ))
+            }
+            "par_chunks" => {
+                let Ty::Slice(_) = &ops[0].2 else { return unsupported("`par_chunks` of this type") };
+                let st = self.cty(&ops[0].2)?;
+                let vt = self.cty(ret)?;
+                let Ty::Adt(_, rargs) = ret else { return unsupported("`par_chunks` here") };
+                let push = self.vec_helper(&rargs[0], "push")?;
+                let v = self.borrowed_as(ops[0].0, &ops[0].2)?;
+                let n = self.expr(ops[1].0)?;
+                Ok(format!(
+                    "({{ {st} s_ = {v}; size_t sz_ = (size_t)({n}); if (sz_ == 0) tau_panic_cstr(\"par_chunks needs a positive chunk size\"); {vt} r_ = {{0}}; for (size_t i_ = 0; i_ < s_.len; i_ += sz_) {{ size_t m_ = s_.len - i_ < sz_ ? s_.len - i_ : sz_; {push}(&r_, ({st}){{ s_.ptr + i_, m_ }}); }} r_; }})"
+                ))
+            }
             "slice::is_empty" => {
                 let v = self.borrowed_as(ops[0].0, &ops[0].2)?;
                 Ok(format!("(({v}).len == 0)"))
@@ -2396,6 +2571,9 @@ impl<'a> Cg<'a> {
                 let f = self.vec_helper(&el, "pop")?;
                 let p = self.mut_ptr(ops[0].0)?;
                 Ok(format!("{f}({p})"))
+            }
+            "std.fs::read" | "std.io::read_line" | "std.fs::write" | "std.fs::exists" if self.in_par > 0 => {
+                unsupported("file or terminal input/output inside a parallel region")
             }
             "std.fs::read" | "std.io::read_line" => {
                 let rct = self.cty(ret)?;
@@ -2689,6 +2867,10 @@ static {vect} {top}({mt} *m, uint64_t n) {{
     /// copied (nothing can change them while the closure is alive), mutable captures are
     /// pointers to the variable, and moved captures are owned by the environment.
     fn closure_expr(&mut self, e: &'a Expr, params: &'a [ClosureParam], body: &'a Expr, ty: &Ty) -> CgResult<String> {
+        self.closure_with(e, params, Body::Expr(body), ty)
+    }
+
+    fn closure_with(&mut self, e: &'a Expr, params: &'a [ClosureParam], body: Body<'a>, ty: &Ty) -> CgResult<String> {
         let Ty::Fn(ptys, ret) = ty else { return unsupported("this closure") };
         let ret = (**ret).clone();
         let fct = self.cty(ty)?;
@@ -2753,7 +2935,10 @@ static {vect} {top}({mt} *m, uint64_t n) {{
                     _ => self.pat_bind(&p.pat, &format!("a{i}"), pt, &mut binds, false)?,
                 }
             }
-            let v = self.convert(body, &ret)?;
+            let v = match body {
+                Body::Expr(x) => self.convert(x, &ret)?,
+                Body::Block(b) => self.block_value(b)?,
+            };
             let rct = self.cty(&ret)?;
             let tail = if Self::is_unit(&ret) || Self::is_never(&ret) { format!("(void)({v}); return 0;") } else { format!("return {v};") };
             let hoisted = std::mem::take(&mut self.hoisted);
@@ -2890,6 +3075,9 @@ static {vect} {top}({mt} *m, uint64_t n) {{
 
     /// `Tensor<T, [..]>.zeros(..)`, `.ones(..)` and `.random(..)`
     fn tensor_ctor(&mut self, e: &'a Expr, kind: &str, args: &'a [Expr]) -> CgResult<String> {
+        if self.in_par > 0 && kind == "tensor.random" {
+            return unsupported("`random` inside a parallel region (its order would depend on the threads)");
+        }
         let Ty::Tensor(el, dims) = self.ty_of(e) else { return unsupported("this tensor constructor") };
         let (cplx, single) = self.tensor_elem(&el)?;
         let k = match kind {
@@ -3003,6 +3191,259 @@ static {vect} {top}({mt} *m, uint64_t n) {{
             other => return unsupported(format!("`{other}` on single-precision values")),
         };
         Ok(Some(v))
+    }
+
+
+    // ------------------------------------------------------------ parallel regions and tasks
+
+    /// How a parallel region walks its items: C declarations that evaluate the iterable, the
+    /// item count, an environment field holding what the blocks need, and the item `k_`.
+    fn region_items(&mut self, iter: &'a Expr) -> CgResult<(String, String, String, String, String, Ty, bool)> {
+        let (inner, mut_iter): (&'a Expr, bool) = match &iter.kind {
+            ExprKind::MutBorrow(i) => (i, true),
+            _ => (iter, false),
+        };
+        if let ExprKind::Range { start: Some(start), end: Some(end), inclusive } = &inner.kind {
+            let ty = self.ty_of(start);
+            let Ty::Int(_) = ty else { return unsupported("a parallel range over non-integers") };
+            let ct = self.cty(&ty)?;
+            let (decls, n) = self.ordered(&[start, end])?;
+            let count = if *inclusive {
+                "(hi_ >= lo_ ? (size_t)((__int128)hi_ - (__int128)lo_) + 1 : 0)"
+            } else {
+                "(hi_ > lo_ ? (size_t)((__int128)hi_ - (__int128)lo_) : 0)"
+            };
+            return Ok((
+                format!("{decls}{ct} lo_ = {}; {ct} hi_ = {}; size_t n_ = {count}; ", n[0], n[1]),
+                "n_".to_string(),
+                format!("{ct} lo;"),
+                "lo_".to_string(),
+                format!("(({ct})((__int128)((@ENV@ *)env_)->lo + (__int128)k_))"),
+                ty,
+                false,
+            ));
+        }
+        let it_ty = self.ty_of(inner);
+        let Some(elem) = self.seq_elem(&it_ty) else {
+            return unsupported(format!("a parallel loop over {}", self.describe(&it_ty)));
+        };
+        let place = if self.is_place(inner) { self.place(inner)?.0 } else { self.borrow(inner)? };
+        let view = self.view(&place, &it_ty)?;
+        let st = self.cty(&Ty::Slice(Box::new(elem.clone())))?;
+        Ok((
+            format!("{st} s_ = {view}; "),
+            "s_.len".to_string(),
+            format!("{st} s;"),
+            "s_".to_string(),
+            "((@ENV@ *)env_)->s.ptr[k_]".to_string(),
+            elem,
+            mut_iter,
+        ))
+    }
+
+    /// Compile a parallel body as its own C function: `build` runs with fresh scopes holding the
+    /// captured variables (as pointers into the creator's frame, which outlives the region).
+    fn outline<R>(&mut self, env: &str, caps: &[(String, Local)], build: impl FnOnce(&mut Self) -> CgResult<R>) -> CgResult<(R, String)> {
+        let saved_scopes = std::mem::replace(&mut self.scopes, vec![Vec::new()]);
+        let saved_loops = std::mem::take(&mut self.loops);
+        let saved_hoisted = std::mem::take(&mut self.hoisted);
+        let saved_temps = std::mem::take(&mut self.temps);
+        let saved_ret = std::mem::replace(&mut self.cur_ret, Ty::unit());
+        self.in_par += 1;
+        for (j, (name, l)) in caps.iter().enumerate() {
+            self.scopes[0].push(Local { name: name.clone(), cname: format!("(({env} *)env_)->c{j}"), ty: l.ty.clone(), by_ptr: true, owns: false });
+        }
+        let r = build(self);
+        self.in_par -= 1;
+        let hoisted = std::mem::replace(&mut self.hoisted, saved_hoisted);
+        self.scopes = saved_scopes;
+        self.loops = saved_loops;
+        self.temps = saved_temps;
+        self.cur_ret = saved_ret;
+        Ok((r?, hoisted))
+    }
+
+    /// The variables of the enclosing function mentioned in `names`, and the environment struct
+    /// (pointers to them) a region's blocks receive.
+    fn region_env(&mut self, id: &str, names: &std::collections::BTreeSet<String>, extra_field: &str) -> CgResult<(String, Vec<(String, Local)>, Vec<String>)> {
+        let mut caps = Vec::new();
+        let mut inits = Vec::new();
+        let mut fields = String::new();
+        for name in names {
+            if let Some(l) = self.lookup(name) {
+                let ct = self.cty(&l.ty)?;
+                fields.push_str(&format!(" {ct} *c{};", caps.len()));
+                inits.push(if l.by_ptr { l.cname.clone() } else { format!("&{}", l.cname) });
+                caps.push((name.clone(), l));
+            }
+        }
+        let env = format!("{id}_env");
+        self.types.push_str(&format!("typedef struct {{{fields} {extra_field} uint8_t pad_; }} {env};\n"));
+        Ok((env, caps, inits))
+    }
+
+    /// Bind the loop pattern to item `elem` inside an outlined function.
+    fn region_bind(&mut self, pat: &'a Pattern, elem_ty: &Ty, elem: &str, mut_iter: bool) -> CgResult<String> {
+        let ect = self.cty(elem_ty)?;
+        let mut bind = String::new();
+        match &pat.kind {
+            PatKind::Ident { name, .. } if mut_iter => {
+                let cname = self.fresh(name);
+                bind.push_str(&format!("{ect} *{cname} = &{elem}; "));
+                self.scopes.last_mut().unwrap().push(Local { name: name.clone(), cname, ty: elem_ty.clone(), by_ptr: true, owns: false });
+            }
+            PatKind::Wild => {}
+            _ if mut_iter => return unsupported("a pattern in a parallel `for ... in mut` loop"),
+            PatKind::Ident { name, .. } => {
+                let l = self.declare(name, elem_ty.clone());
+                bind.push_str(&format!("{ect} {} = {elem}; ", l.cname));
+            }
+            _ => {
+                bind.push_str(&format!("{ect} it_ = {elem}; "));
+                self.pat_bind(pat, "it_", elem_ty, &mut bind, false)?;
+            }
+        }
+        Ok(bind)
+    }
+
+    /// `par for pat in iter { body }`: the iterations run in blocks on the thread pool.
+    fn par_for(&mut self, pat: &'a Pattern, iter: &'a Expr, guard: Option<&'a Expr>, body: &'a Block) -> CgResult<String> {
+        let mut stmts: Vec<&'a Expr> = Vec::new();
+        for st in &body.stmts {
+            match st {
+                Stmt::Let { init: Some(x), .. } => stmts.push(x),
+                Stmt::Expr(x) => stmts.push(x),
+                _ => {}
+            }
+        }
+        if let Some(g) = guard {
+            stmts.push(g);
+        }
+        if stmts.iter().any(|x| escapes(x, false)) {
+            return unsupported("`return`, `?` or `break` inside a parallel loop");
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for x in &stmts {
+            idents_in(x, &mut names);
+        }
+        let (decls, n, field, init, elem, elem_ty, mut_iter) = self.region_items(iter)?;
+        let id = self.fresh("pf");
+        let (env, caps, mut inits) = self.region_env(&id, &names, &field)?;
+        inits.push(init);
+        let elem = elem.replace("@ENV@", &env);
+        let (cont, brk) = (format!("{id}_cont"), format!("{id}_brk"));
+        let (code, hoisted) = self.outline(&env, &caps, |c| {
+            let bind = c.region_bind(pat, &elem_ty, &elem, mut_iter)?;
+            c.loops.push(LoopCtx { brk: brk.clone(), cont: cont.clone(), depth: 1, result: None });
+            let g = match guard {
+                Some(g) => c.cond_expr(g).map(|x| format!("if (!({x})) goto {cont}; ")),
+                None => Ok(String::new()),
+            };
+            let b = c.block_value(body);
+            c.loops.pop();
+            Ok(format!("{bind}{}(void)({}); {cont}: ;", g?, b?))
+        })?;
+        let fname = format!("{id}_fn");
+        let def = format!("static void {fname}(void *env_, size_t blk_, size_t lo_, size_t hi_, void *out_) {{\n{hoisted}  for (size_t k_ = lo_; k_ < hi_; k_++) {{ {code} }}\n  {brk}: ;\n}}\n");
+        self.protos.push_str(&format!("static void {fname}(void *env_, size_t blk_, size_t lo_, size_t hi_, void *out_);\n"));
+        self.bodies.push_str(&def);
+        let init_list = inits.join(", ");
+        Ok(format!("({{ {decls}{env} e_ = {{ {init_list} }}; tau_par_blocks({n}, 0, {fname}, &e_, 0, 0); ((tau_unit)0); }})"))
+    }
+
+    /// `par sum(i in range) body` and the other reductions: items are cut into blocks of 4096,
+    /// each block is reduced in order, and the block results are combined in block order, so
+    /// the answer never depends on the number of threads.
+    fn par_reduce(&mut self, ty: &Ty, op: &str, pat: &'a Pattern, iter: &'a Expr, body: &'a Expr) -> CgResult<String> {
+        if !matches!(op, "sum" | "prod" | "min" | "max" | "any" | "all") {
+            return unsupported(format!("the reduction `{op}`"));
+        }
+        let ok_ty = matches!(ty, Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char) || (matches!(ty, Ty::Complex(_)) && op == "sum");
+        if !ok_ty {
+            return unsupported(format!("a parallel `{op}` of {}", self.describe(ty)));
+        }
+        if escapes(body, false) {
+            return unsupported("`return` or `?` inside a parallel reduction");
+        }
+        let mut names = std::collections::BTreeSet::new();
+        idents_in(body, &mut names);
+        let (decls, n, field, init, elem, elem_ty, mut_iter) = self.region_items(iter)?;
+        let id = self.fresh("pr");
+        let (env, caps, mut inits) = self.region_env(&id, &names, &field)?;
+        inits.push(init);
+        let elem = elem.replace("@ENV@", &env);
+        let ct = self.cty(ty)?;
+        let reduce = |this: &mut Self, a: &str, x: &str| -> CgResult<String> {
+            Ok(match op {
+                "sum" => this.arith(BinOp::Add, a, x, ty)?,
+                "prod" => this.arith(BinOp::Mul, a, x, ty)?,
+                "min" => format!("(({x}) < ({a}) ? ({x}) : ({a}))"),
+                "max" => format!("(({x}) > ({a}) ? ({x}) : ({a}))"),
+                "any" => format!("(({a}) || ({x}))"),
+                _ => format!("(({a}) && ({x}))"),
+            })
+        };
+        let (code, hoisted) = self.outline(&env, &caps, |c| {
+            let bind = c.region_bind(pat, &elem_ty, &elem, mut_iter)?;
+            let v = c.convert(body, &ty.clone())?;
+            let step = reduce(c, "acc_", "x_")?;
+            Ok(format!("{bind}{ct} x_ = {v}; if (!have_) {{ acc_ = x_; have_ = 1; }} else acc_ = {step};"))
+        })?;
+        let fname = format!("{id}_fn");
+        let def = format!(
+            "static void {fname}(void *env_, size_t blk_, size_t lo_, size_t hi_, void *out_) {{\n{hoisted}  {ct} acc_ = ({ct}){{0}}; int have_ = 0;\n  for (size_t k_ = lo_; k_ < hi_; k_++) {{ {code} }}\n  *({ct} *)out_ = acc_;\n}}\n"
+        );
+        self.protos.push_str(&format!("static void {fname}(void *env_, size_t blk_, size_t lo_, size_t hi_, void *out_);\n"));
+        self.bodies.push_str(&def);
+        let empty = match op {
+            "sum" => match ty {
+                Ty::Float(_) => format!("({ct})0.0"),
+                Ty::Complex(_) => format!("({ct}){{ 0.0, 0.0 }}"),
+                _ => format!("({ct})0"),
+            },
+            "prod" => match ty {
+                Ty::Float(_) => format!("({ct})1.0"),
+                _ => format!("({ct})1"),
+            },
+            "any" => "false".to_string(),
+            "all" => "true".to_string(),
+            _ => format!("({{ tau_panic_cstr(\"`{op}` of an empty range\"); ({ct}){{0}}; }})"),
+        };
+        let combine = reduce(self, "r_", "outs_[b_]")?;
+        let init_list = inits.join(", ");
+        Ok(format!(
+            "({{ {decls}{env} e_ = {{ {init_list} }}; size_t nb_ = ({n} + 4095) / 4096; {ct} *outs_ = ({ct} *)malloc((nb_ ? nb_ : 1) * sizeof({ct})); tau_par_blocks({n}, 4096, {fname}, &e_, outs_, sizeof({ct})); {ct} r_; if (nb_ == 0) r_ = {empty}; else {{ r_ = outs_[0]; for (size_t b_ = 1; b_ < nb_; b_++) r_ = {combine}; }} free(outs_); r_; }})"
+        ))
+    }
+
+    /// `spawn { ... }`: the block becomes a closure that a worker (or whoever joins) runs.
+    fn spawn_expr(&mut self, e: &'a Expr, b: &'a Block, ty: &Ty) -> CgResult<String> {
+        let Ty::Adt(_, targs) = ty else { return unsupported("this `spawn`") };
+        let t = targs[0].clone();
+        let fty = Ty::Fn(Vec::new(), Box::new(t.clone()));
+        let fct = self.cty(&fty)?;
+        let tct = self.cty(&t)?;
+        let clo = self.closure_with(e, &[], Body::Block(b), &fty)?;
+        let m = self.mangle(&t)?;
+        let (run, clean) = (format!("tau_spawn_run_{m}"), format!("tau_spawn_clean_{m}"));
+        let dropres = match self.drop_fn(&t)? {
+            Some(d) => {
+                let w = format!("tau_spawn_drop_{m}");
+                if self.helpers.insert(w.clone()) {
+                    self.protos.push_str(&format!("static void {w}(void *p);\n"));
+                    self.bodies.push_str(&format!("static void {w}(void *p) {{ {d}(({tct} *)p); }}\n"));
+                }
+                w
+            }
+            None => "0".to_string(),
+        };
+        if self.helpers.insert(run.clone()) {
+            self.protos.push_str(&format!("static void {run}(tau_task *t);\nstatic void {clean}(void *p);\n"));
+            self.bodies.push_str(&format!(
+                "static void {run}(tau_task *t) {{ {fct} *c = ({fct} *)t->closure; *({tct} *)t->result = c->call(c->env); }}\nstatic void {clean}(void *p) {{ {fct} *c = ({fct} *)p; if (c->drop) c->drop(c->env); free(c); }}\n"
+            ));
+        }
+        Ok(format!("({{ {fct} *c_ = ({fct} *)malloc(sizeof({fct})); *c_ = {clo}; tau_spawn({run}, {clean}, c_, sizeof({tct}), {dropres}); }})"))
     }
 
     fn vec_adt(&self) -> CgResult<AdtId> {
