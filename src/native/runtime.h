@@ -335,6 +335,61 @@ static void tau_fmt_str(tau_buf *b, tau_str s) { tau_buf_push(b, s.ptr, s.len); 
 
 /* ---------------------------------------------------------------- floats */
 
+/* Does the decimal m * 10^q read back as exactly `x` (as a float when `single`)? Decided with exact
+ * integer arithmetic against the interval of reals that round to `x`, not with strtod, whose
+ * rounding is not always correct on every platform. */
+typedef struct { uint32_t d[100]; int n; } tau_big;
+static void tau_big_set(tau_big *b, uint64_t v) { b->n = 0; while (v) { b->d[b->n++] = (uint32_t)v; v >>= 32; } }
+static void tau_big_mul(tau_big *b, uint32_t m) {
+    uint64_t c = 0;
+    for (int i = 0; i < b->n; i++) { uint64_t t = (uint64_t)b->d[i] * m + c; b->d[i] = (uint32_t)t; c = t >> 32; }
+    if (c) b->d[b->n++] = (uint32_t)c;
+}
+static void tau_big_shl(tau_big *b, int s) {
+    if (!b->n || s <= 0) return;
+    int w = s / 32, r = s % 32;
+    if (r) {
+        uint32_t c = 0;
+        for (int i = 0; i < b->n; i++) { uint32_t v = b->d[i]; b->d[i] = (v << r) | c; c = v >> (32 - r); }
+        if (c) b->d[b->n++] = c;
+    }
+    if (w) { memmove(b->d + w, b->d, (size_t)b->n * 4); memset(b->d, 0, (size_t)w * 4); b->n += w; }
+}
+static void tau_big_pow10(tau_big *b, int q) {
+    static const uint32_t p10[10] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000};
+    while (q >= 9) { tau_big_mul(b, 1000000000u); q -= 9; }
+    if (q > 0) tau_big_mul(b, p10[q]);
+}
+static int tau_big_cmp(const tau_big *a, const tau_big *b) {
+    if (a->n != b->n) return a->n > b->n ? 1 : -1;
+    for (int i = a->n - 1; i >= 0; i--) if (a->d[i] != b->d[i]) return a->d[i] > b->d[i] ? 1 : -1;
+    return 0;
+}
+/* sign of m * 10^q - bm * 2^k */
+static int tau_dec_cmp(uint64_t m, int q, uint64_t bm, int k) {
+    tau_big l, r;
+    tau_big_set(&l, m); tau_big_set(&r, bm);
+    if (q >= 0) tau_big_pow10(&l, q); else tau_big_pow10(&r, -q);
+    if (k >= 0) tau_big_shl(&r, k); else tau_big_shl(&l, -k);
+    return tau_big_cmp(&l, &r);
+}
+static int tau_roundtrips(uint64_t m, int q, double x, int single) {
+    uint64_t f; int e, lower_closer;
+    if (single) {
+        float fl = (float)x; uint32_t bits; memcpy(&bits, &fl, 4);
+        uint32_t ex = (bits >> 23) & 0xff, fr = bits & 0x7fffff;
+        if (ex == 0) { f = fr; e = -149; lower_closer = 0; } else { f = fr | 0x800000u; e = (int)ex - 150; lower_closer = fr == 0 && ex > 1; }
+    } else {
+        uint64_t bits; memcpy(&bits, &x, 8);
+        uint64_t ex = (bits >> 52) & 0x7ff, fr = bits & 0xfffffffffffffULL;
+        if (ex == 0) { f = fr; e = -1074; lower_closer = 0; } else { f = fr | (1ULL << 52); e = (int)ex - 1075; lower_closer = fr == 0 && ex > 1; }
+    }
+    uint64_t low = 4 * f - (lower_closer ? 1 : 2), up = 4 * f + 2;
+    int even = (f & 1) == 0;
+    int cl = tau_dec_cmp(m, q, low, e - 2), cu = tau_dec_cmp(m, q, up, e - 2);
+    return (cl > 0 || (cl == 0 && even)) && (cu < 0 || (cu == 0 && even));
+}
+
 /* The shortest digits that read back exactly (as a float when `single`), never in
  * scientific notation, with ".0" added to a whole number. Same rule as the interpreter. */
 __attribute__((noinline)) static void tau_fmt_float(tau_buf *b, double x, int single) {
@@ -358,7 +413,7 @@ __attribute__((noinline)) static void tau_fmt_float(tau_buf *b, double x, int si
         ds[k] = 0;
         m = strtoull(ds, 0, 10);
         q = de - (p - 1);
-        if (single ? (strtof(buf, 0) == (float)x) : (strtod(buf, 0) == x)) {
+        if (tau_roundtrips(m, q, x, single)) {
             /* printf breaks an exact tie to even; the interpreter (Rust) rounds it up when both read back */
             char ex[96], t[64];
             snprintf(ex, sizeof ex, "%.50e", x);
@@ -371,16 +426,14 @@ __attribute__((noinline)) static void tau_fmt_float(tau_buf *b, double x, int si
             if (tie) {
                 t[p] = 0;
                 unsigned long long up = strtoull(t, 0, 10) + 1;
-                snprintf(buf, sizeof buf, "%llue%d", up, q);
-                if (single ? (strtof(buf, 0) == (float)x) : (strtod(buf, 0) == x)) m = up;
+                if (tau_roundtrips(up, q, x, single)) m = up;
             }
             break;
         }
         int found = 0;
         for (int d = 1; d >= -1 && !found; d -= 2) {
             if (d < 0 && m <= 1) break;
-            snprintf(buf, sizeof buf, "%llue%d", m + (unsigned long long)(long long)d, q);
-            if (single ? (strtof(buf, 0) == (float)x) : (strtod(buf, 0) == x)) { m += (unsigned long long)(long long)d; found = 1; }
+            if (tau_roundtrips(m + (unsigned long long)(long long)d, q, x, single)) { m += (unsigned long long)(long long)d; found = 1; }
         }
         if (found) break;
     }
