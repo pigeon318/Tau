@@ -1,0 +1,45 @@
+fn classify(n: i64) -> str {
+    match n {
+        0 => "zero"
+        1 | 2 | 3 => "small"
+        4..=9 => "medium"
+        x if x < 0 => "negative"
+        _ => "large"
+    }
+}
+
+fn find(v: [i64], k: i64) -> Option<i64> {
+    for i in 0..v.len {
+        if v[i] == k { return Some(i as i64) }
+    }
+    None
+}
+
+fn main() {
+    for n in -2..12 { print("{n}: {classify(n)}") }
+    let v = vec[5, 3, 8, 1]
+    match find(v, 8) {
+        Some(i) => print("found at {i}")
+        None => print("missing")
+    }
+    match find(v, 99) {
+        Some(i) => print("found at {i}")
+        None => print("missing")
+    }
+    let mut total = 0
+    let mut i = 0
+    while i < 20 {
+        i += 1
+        if i % 3 == 0 { continue }
+        if i > 15 { break }
+        total += i
+    }
+    print(total)
+    let r = loop {
+        total += 7
+        if total > 200 { break total * 2 }
+    }
+    print(r)
+    let t = if r > 100 { r - 100 } else { r }
+    print(t)
+}

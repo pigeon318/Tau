@@ -43,14 +43,31 @@ pub enum Value<'a> {
     Func(FnId, Subst),
     /// A struct or variant constructor used as a function value.
     Ctor(AdtId, Option<usize>),
-    /// A spawned task's outcome (tasks run to completion when spawned).
-    Task(Rc<RefCell<Option<Result<Value<'a>, String>>>>),
+    /// A spawned task: its outcome and what it printed (tasks run to completion when
+    /// spawned; their output appears when they are joined).
+    Task(TaskCell<'a>),
     /// `a..b` (half open; `a..=b` is stored as `a..b+1`).
     Range(i128, i128),
     /// A raw pointer (an allocation).
     Ptr(Slot<'a>),
     /// A reference to a place (arguments for `mut` parameters, `mut` loop elements).
     Ref(RefTarget<'a>),
+}
+
+/// What a finished task left behind until it is joined.
+pub type TaskCell<'a> = Rc<RefCell<Option<(Result<Value<'a>, String>, Rc<RefCell<Vec<u8>>>)>>>;
+
+/// A writer that collects a task's output.
+pub struct TaskSink(pub Rc<RefCell<Vec<u8>>>);
+
+impl std::io::Write for TaskSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]

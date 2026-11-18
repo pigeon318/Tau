@@ -1,0 +1,41 @@
+trait Shape {
+    fn area(self) -> f64
+    fn name(self) -> str { "shape" }
+}
+struct Sq { s: f64 }
+struct Ci { r: f64 }
+impl Shape for Sq {
+    fn area(self) -> f64 { self.s * self.s }
+    fn name(self) -> str { "square" }
+}
+impl Shape for Ci {
+    fn area(self) -> f64 { 3.0 * self.r * self.r }
+}
+
+struct V { x: f64, y: f64 }
+impl Copy for V {}
+impl Add for V { fn add(self, o: V) -> V { V(self.x + o.x, self.y + o.y) } }
+impl Mul for V { fn mul(self, k: f64) -> V { V(self.x * k, self.y * k) } }
+
+fn describe<T: Shape>(x: T) {
+    print(x.name())
+    print(x.area())
+}
+fn pick<T: Ord + Copy>(a: T, b: T) -> T { if a < b { b } else { a } }
+fn first<T: Copy>(v: [T]) -> T { v[0] }
+
+fn main() {
+    describe(Sq(2.0))
+    describe(Ci(1.5))
+    let a = V(1.0, 2.0)
+    let b = (a + a) * 2.5
+    print(b.x + b.y)
+    print(pick(3, 9))
+    print(pick(2.5, 1.5))
+    print(first(vec[7, 8, 9]))
+    let e: Option<i64> = None
+    match e {
+        Some(v) => print(v)
+        None => print("none")
+    }
+}

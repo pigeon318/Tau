@@ -300,6 +300,11 @@ impl<'a> Checker<'a> {
                     ExprKind::Int { value, .. } => Some(*value),
                     _ => None,
                 };
+                if let Some(n) = n {
+                    if n > MAX_ARRAY_LEN {
+                        self.err_hint(len.span, format!("an array can have at most {MAX_ARRAY_LEN} elements, not {n}"), "use a `Vec` for more");
+                    }
+                }
                 Ty::Array(Box::new(vt), n)
             }
             ExprKind::Unary { op, expr: inner } => self.unary(e, *op, inner, exp),

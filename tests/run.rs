@@ -135,6 +135,23 @@ fn map_assignment_inserts_and_compound_assignment_starts_at_zero() {
 }
 
 #[test]
+fn a_tasks_output_appears_when_it_is_joined() {
+    let src = "fn main() {\n let h = spawn {\n print(\"in task\")\n 5\n }\n print(\"main\")\n let g = spawn {\n print(\"second\")\n 6\n }\n match h.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n match g.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n}";
+    assert_eq!(out_prog(src), "main\nin task\n5\nsecond\n6\n");
+    // a task that panics still shows what it printed before, and joining reports the failure
+    let src = "fn main() {\n let h = spawn {\n print(\"before\")\n panic(\"boom\")\n 1\n }\n match h.join() {\n Ok(_) => print(\"ok\")\n Err(_) => print(\"task failed\")\n }\n}";
+    assert_eq!(out_prog(src), "before\ntask failed\n");
+}
+
+#[test]
+fn huge_tensors_and_arrays_panic_instead_of_exhausting_memory() {
+    panics_prog("fn main() {\n let a = Tensor<f64, [2147483647]>.ones()\n print(a.len)\n}", "a tensor can have at most 268435456 elements");
+    panics_prog("fn main() {\n let n = 100000\n let a = Tensor<f64, [_, _]>.zeros(n, n)\n print(a.len)\n}", "a tensor can have at most");
+    panics_prog("fn main() {\n let n = 100000\n let a = Tensor<f64, [_, _]>.ones(n, 1)\n let b = Tensor<f64, [_, _]>.ones(1, n)\n print((a @ b).len)\n}", "a tensor can have at most");
+    panics_prog("fn main() {\n let n = 2147483647\n let a = [0; n]\n print(a.len)\n}", "an array can have at most");
+}
+
+#[test]
 fn division_by_zero_panics() {
     panics("let z = 0\nprint(1 / z)", "division by zero");
     assert_eq!(out("print(1.0 / 0.0)"), "inf\n");

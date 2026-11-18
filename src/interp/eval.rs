@@ -176,6 +176,9 @@ impl<'a> Interp<'a> {
                     Value::Int(n) if n >= 0 => n as usize,
                     _ => return panic("an array length must be a non-negative integer"),
                 };
+                if n as u128 > crate::types::MAX_ARRAY_LEN {
+                    return panic(format!("an array can have at most {} elements, not {n}", crate::types::MAX_ARRAY_LEN));
+                }
                 Ok(Value::Array(Value::slot((0..n).map(|_| v.copy_shell()).collect())))
             }
             ExprKind::Unary { op, expr } => self.unary(e, *op, expr, f),
@@ -294,14 +297,20 @@ impl<'a> Interp<'a> {
             ExprKind::MutBorrow(inner) => self.eval(inner, f),
             ExprKind::ParReduce { op, pat, iter, body } => self.par_reduce(e, &op.name, pat, iter, body, f),
             ExprKind::Spawn(b) => {
-                // tasks run to completion when spawned
+                // tasks run to completion when spawned; what they print is kept until they are joined
                 let fr = f.child();
-                let outcome = match self.eval_block(b, &fr) {
+                let sink = Rc::new(RefCell::new(Vec::new()));
+                let real = std::mem::replace(&mut self.out, Box::new(TaskSink(sink.clone())));
+                let result = self.eval_block(b, &fr);
+                self.out = real;
+                let outcome = match result {
                     Ok(v) | Err(Ctl::Return(v)) => Ok(v),
                     Err(Ctl::Panic(m)) => Err(m),
                     Err(_) => Ok(Value::Unit),
                 };
-                Ok(Value::Task(Rc::new(RefCell::new(Some(outcome)))))
+                let cell: TaskCell<'a> = Rc::new(RefCell::new(Some((outcome, sink))));
+                self.tasks.push(cell.clone());
+                Ok(Value::Task(cell))
             }
             ExprKind::On { target, body } => {
                 // there is no cluster yet: run here
