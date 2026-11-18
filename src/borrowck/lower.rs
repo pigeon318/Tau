@@ -11,7 +11,7 @@
 //!    contains one) carries the loans it was derived from; a local that holds it keeps
 //!    those loans alive for as long as the local is used.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::mir::*;
 use crate::ast::*;
@@ -64,6 +64,9 @@ struct FnCtx {
     barriers: Vec<Barrier>,
     /// Name resolution stops at an isolated context (a nested `fn` cannot see its parent).
     isolated: bool,
+    /// Temporaries that own memory and were borrowed by a call; each dies at the end of its
+    /// statement.
+    temps: Vec<LocalId>,
 }
 
 pub(super) struct Lowerer<'r> {
@@ -73,12 +76,20 @@ pub(super) struct Lowerer<'r> {
     ctxs: Vec<FnCtx>,
     pub done: Vec<Mir>,
     reported: HashSet<(usize, usize)>,
+    /// For every closure expression: the variables it captures and how.
+    pub captures: HashMap<NodeKey, Vec<(String, CaptureKind)>>,
+    /// The next block lowered is a function body (a value leaving it is checked by `Escape`).
+    body_block: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum CaptureKind {
+/// How a closure uses a variable it captures from the enclosing function.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum CaptureKind {
+    /// Only read: a shared borrow.
     Ref,
+    /// Changed (or borrowed `mut`): a mutable borrow.
     MutRef,
+    /// Moved out of: the closure takes the value.
     Move,
 }
 
@@ -91,6 +102,8 @@ impl<'r> Lowerer<'r> {
             ctxs: Vec::new(),
             done: Vec::new(),
             reported: HashSet::new(),
+            captures: HashMap::new(),
+            body_block: false,
         }
     }
 
@@ -247,11 +260,51 @@ impl<'r> Lowerer<'r> {
 
     /// Leave a scope: task handles declared in it are joined here.
     fn pop_scope(&mut self) {
+        self.pop_scope_ex(true);
+    }
+
+    /// `dead`: also report borrows still in use as the scope's variables are dropped. The scope
+    /// of a function body skips it: a value leaving the function is checked by `Escape`.
+    fn pop_scope_ex(&mut self, dead: bool) {
         let scope = self.ctx().scopes.pop().unwrap_or_default();
         for (_, id) in scope.iter().rev() {
             if self.ctx().mir.locals[*id].is_task {
                 self.emit(Ev::DropUse { local: *id });
             }
+        }
+        for (_, id) in scope.iter().rev() {
+            let info = &self.ctx().mir.locals[*id];
+            if dead && info.kind == LocalKind::Owned {
+                let span = info.span;
+                self.emit(Ev::Dead { local: *id, span });
+            }
+        }
+    }
+
+    /// If `op` is a computed value that owns memory, give it a hidden local so that a call
+    /// can borrow it; the local dies at the end of the statement.
+    fn materialize(&mut self, op: Operand, e: &Expr) -> Operand {
+        let Operand::Value(srcs) = op else { return op };
+        let ty = self.ty_of(e);
+        // (a closure's own storage cannot be viewed; what it captures is already in `srcs`)
+        if self.is_copy(&ty) || matches!(ty, Ty::Error | Ty::Never | Ty::Param(_) | Ty::Fn(..)) {
+            return Operand::Value(srcs);
+        }
+        let id = self.declare("", ty.clone(), LocalKind::Owned, e.span);
+        self.emit(Ev::Decl { local: id, init: true });
+        if !srcs.is_empty() {
+            self.emit(Ev::Hold { holder: id, srcs });
+        }
+        self.ctx().temps.push(id);
+        Operand::Place(Place::local(id), ty)
+    }
+
+    /// The statement is over: its temporaries are dropped.
+    fn end_statement(&mut self, mark: usize) {
+        while self.ctx().temps.len() > mark {
+            let id = self.ctx().temps.pop().unwrap();
+            let span = self.ctx().mir.locals[id].span;
+            self.emit(Ev::Dead { local: id, span });
         }
     }
 
@@ -452,18 +505,28 @@ impl<'r> Lowerer<'r> {
     // ------------------------------------------------------------ statements and blocks
 
     fn lower_block(&mut self, b: &Block) -> Operand {
+        let is_body = std::mem::take(&mut self.body_block);
         self.push_scope();
         let mut result = Operand::Value(vec![]);
         let n = b.stmts.len();
         for (i, s) in b.stmts.iter().enumerate() {
+            let mark = self.ctx().temps.len();
             match s {
-                Stmt::Let { pat, init, span, .. } => self.lower_let(pat, init.as_ref(), *span),
+                Stmt::Let { pat, init, span, .. } => {
+                    self.lower_let(pat, init.as_ref(), *span);
+                    self.end_statement(mark);
+                }
                 Stmt::Expr(e) => {
                     let op = self.lower(e);
                     if i + 1 == n {
+                        // the value of the block: its temporaries live until the enclosing
+                        // statement ends
                         result = op;
-                    } else if let Operand::Place(p, _) = op {
-                        self.emit(Ev::Read { place: p, span: e.span });
+                    } else {
+                        if let Operand::Place(p, _) = op {
+                            self.emit(Ev::Read { place: p, span: e.span });
+                        }
+                        self.end_statement(mark);
                     }
                 }
                 Stmt::Item(item) => {
@@ -473,7 +536,20 @@ impl<'r> Lowerer<'r> {
                 }
             }
         }
-        self.pop_scope();
+        // a value leaving the block must not borrow from the block's own variables: park it in
+        // a holder that lives in the enclosing scope, so the check at their end sees it
+        if let Operand::Value(srcs) = &result {
+            if !is_body && !srcs.is_empty() && self.ctx().scopes.len() >= 2 {
+                let srcs = srcs.clone();
+                let scope = self.ctx().scopes.pop().unwrap_or_default();
+                let holder = self.declare("", Ty::Error, LocalKind::Owned, b.span);
+                self.emit(Ev::Decl { local: holder, init: true });
+                self.emit(Ev::Hold { holder, srcs });
+                self.ctx().scopes.push(scope);
+                result = Operand::Value(vec![Src::HeldBy(holder)]);
+            }
+        }
+        self.pop_scope_ex(!is_body);
         result
     }
 
@@ -752,10 +828,12 @@ impl<'r> Lowerer<'r> {
 
     /// An argument expression: `mut x` is a mutable borrow marker.
     fn lower_arg(&mut self, a: &Expr) -> Operand {
-        match &a.kind {
-            ExprKind::MutBorrow(inner) => self.lower(inner),
-            _ => self.lower(a),
-        }
+        let inner = match &a.kind {
+            ExprKind::MutBorrow(inner) => inner,
+            _ => a,
+        };
+        let op = self.lower(inner);
+        self.materialize(op, inner)
     }
 
     fn lower_call(&mut self, e: &Expr, callee: &Expr, args: &[Expr]) -> Operand {
@@ -799,7 +877,8 @@ impl<'r> Lowerer<'r> {
         let mut spans = Vec::new();
         if let Some(m) = self_mode {
             // `Type.f(x)` has no receiver value; `v.f(x)` does
-            ops.push((self.lower(recv), m));
+            let r = self.lower(recv);
+            ops.push((self.materialize(r, recv), m));
             spans.push(recv.span);
         }
         for (i, a) in args.iter().enumerate() {
@@ -1147,6 +1226,7 @@ impl<'r> Lowerer<'r> {
             loops: Vec::new(),
             barriers: Vec::new(),
             isolated: false,
+            temps: Vec::new(),
         });
         for p in params {
             let mut bs = Vec::new();
@@ -1161,7 +1241,10 @@ impl<'r> Lowerer<'r> {
         }
         let op = match body {
             ClosureBody::Expr(x) => self.lower(x),
-            ClosureBody::Block(b) => self.lower_block(b),
+            ClosureBody::Block(b) => {
+                self.body_block = true;
+                self.lower_block(b)
+            }
         };
         let span = e.span;
         let ret_ty = match body {
@@ -1179,10 +1262,12 @@ impl<'r> Lowerer<'r> {
         // how does the body use each captured variable?
         let mut srcs = Vec::new();
         let captures = mir.captures.clone();
+        let mut table = Vec::new();
         for (outer, inner) in &captures {
             let kind = classify_capture(&mir, *inner);
             let ty = self.local_info(*outer).ty.clone();
             let name = self.local_info(*outer).name.clone();
+            table.push((name.clone(), kind));
             if is_spawn && kind == CaptureKind::MutRef {
                 let at = first_mutation(&mir, *inner).unwrap_or(span);
                 self.error(
@@ -1199,6 +1284,7 @@ impl<'r> Lowerer<'r> {
                 _ => srcs.push(self.make_loan(place, false, span)),
             }
         }
+        self.captures.insert(NodeKey::of(e), table);
         self.done.push(mir);
         Operand::Value(if self.carries(&self.ty_of(e)) { srcs } else { vec![] })
     }
@@ -1220,6 +1306,7 @@ impl<'r> Lowerer<'r> {
             loops: Vec::new(),
             barriers: Vec::new(),
             isolated: true,
+            temps: Vec::new(),
         });
         if let Some(mode) = def.sig.self_mode {
             let self_ty = match def.parent {
@@ -1235,6 +1322,7 @@ impl<'r> Lowerer<'r> {
             let id = self.declare(&pd.name, pd.ty.clone(), LocalKind::Param(pd.mode), p.span);
             self.emit(Ev::Decl { local: id, init: true });
         }
+        self.body_block = true;
         let op = self.lower_block(body);
         if !def.sig.ret.is_unit() {
             let span = match body.stmts.last() {

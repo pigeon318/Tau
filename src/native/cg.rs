@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::NativeError;
 use crate::ast::*;
+use crate::borrowck::CaptureKind;
 use crate::check::{CheckResult, NodeKey, Res, Results};
 use crate::interp::match_ty;
 use crate::program::*;
@@ -92,10 +93,12 @@ pub struct Cg<'a> {
     /// Set while compiling the target of an assignment: `m[k] = v` and `m[k] += v` create a
     /// missing map entry, any other use of `m[k]` panics if it is missing.
     insert_ctx: bool,
+    /// How each closure captures the variables it uses (from the borrow checker).
+    captures: HashMap<NodeKey, Vec<(String, CaptureKind)>>,
 }
 
 /// Translate a checked program to a complete C source file (runtime included).
-pub fn translate(user: &Module, check: &CheckResult, mod_paths: Vec<String>) -> Result<String, NativeError> {
+pub fn translate(user: &Module, check: &CheckResult, mod_paths: Vec<String>, captures: HashMap<NodeKey, Vec<(String, CaptureKind)>>) -> Result<String, NativeError> {
     let mut cg = Cg {
         prog: &check.program,
         res: &check.results,
@@ -118,6 +121,7 @@ pub fn translate(user: &Module, check: &CheckResult, mod_paths: Vec<String>) -> 
         temps: Vec::new(),
         mod_paths,
         insert_ctx: false,
+        captures,
     };
     for item in &user.items {
         cg.register_item(item);
@@ -222,6 +226,10 @@ impl<'a> Cg<'a> {
                 let parts: CgResult<Vec<String>> = ts.iter().map(|t| self.mangle(t)).collect();
                 format!("T{}_{}", ts.len(), parts?.join("_"))
             }
+            Ty::Fn(ps, r) => {
+                let parts: CgResult<Vec<String>> = ps.iter().map(|t| self.mangle(t)).collect();
+                format!("F{}_{}_{}", ps.len(), parts?.join("_"), self.mangle(r)?)
+            }
             Ty::Array(t, Some(n)) => format!("A{n}_{}", self.mangle(t)?),
             Ty::Slice(t) => format!("S_{}", self.mangle(t)?),
             Ty::Adt(id, args) => {
@@ -298,6 +306,22 @@ impl<'a> Cg<'a> {
                     fields.push_str(&format!(" {ct} f{i};"));
                 }
                 self.types.push_str(&format!("typedef struct {{{fields} }} {name};\n"));
+                self.type_names.insert(key, name.clone());
+                name
+            }
+            Ty::Fn(ps, r) => {
+                let key = self.mangle(ty)?;
+                if let Some(nm) = self.type_names.get(&key) {
+                    return Ok(nm.clone());
+                }
+                let rt = self.cty(r)?;
+                let mut plist = String::from("void *");
+                for p in ps {
+                    plist.push_str(", ");
+                    plist.push_str(&self.cty(p)?);
+                }
+                let name = format!("fnv_{key}");
+                self.types.push_str(&format!("typedef struct {{ void *env; {rt} (*call)({plist}); void (*drop)(void *); }} {name};\n"));
                 self.type_names.insert(key, name.clone());
                 name
             }
@@ -454,6 +478,8 @@ impl<'a> Cg<'a> {
     fn needs_drop(&self, ty: &Ty) -> bool {
         match ty {
             Ty::Tuple(ts) => ts.iter().any(|t| self.needs_drop(t)),
+            // a closure owns its environment
+            Ty::Fn(..) => true,
             Ty::Array(t, _) => self.needs_drop(t),
             Ty::Adt(id, args) => {
                 let d = self.prog.adt(*id);
@@ -484,6 +510,7 @@ impl<'a> Cg<'a> {
         self.protos.push_str(&format!("static void {name}({ct} *p);\n"));
         let mut body = String::new();
         match ty {
+            Ty::Fn(..) => body.push_str("if (p->drop) p->drop(p->env);\n"),
             Ty::Tuple(ts) => {
                 for (i, t) in ts.iter().enumerate() {
                     if let Some(f) = self.drop_fn(t)? {
@@ -1473,7 +1500,7 @@ impl<'a> Cg<'a> {
             ExprKind::Array(es) => self.array_literal(&ty, es),
             ExprKind::ArrayRepeat { value, .. } => self.array_repeat(&ty, value),
             ExprKind::Index { base, indices } => self.index_expr(e, &ty, base, indices),
-            ExprKind::Closure { .. } => unsupported("closures (milestone 3)"),
+            ExprKind::Closure { params, body, .. } => self.closure_expr(e, params, body, &ty),
             ExprKind::Range { .. } => unsupported("ranges outside a `for` loop or an index"),
             ExprKind::ParReduce { .. } | ExprKind::Spawn(_) | ExprKind::On { .. } => unsupported("parallel constructs (milestone 5)"),
             ExprKind::TypeApp { .. } => unsupported("this expression"),
@@ -1489,11 +1516,15 @@ impl<'a> Cg<'a> {
             Some(Res::Variant(adt, i, _)) => {
                 let ty = self.ty_of(e);
                 if matches!(ty, Ty::Fn(..)) {
-                    return unsupported("a variant constructor used as a function value (milestone 3)");
+                    return self.ctor_value(*adt, Some(*i), &ty);
                 }
                 self.construct(*adt, Some(*i), &ty, Vec::new())
             }
-            Some(Res::Fn(..)) => unsupported("a function used as a value (milestone 3)"),
+            Some(Res::Fn(fid, subst)) => {
+                let subst = self.apply_sub(subst);
+                let ty = self.ty_of(e);
+                self.fn_value(*fid, &subst, &ty)
+            }
             _ => unsupported(format!("`{name}` used as a value")),
         }
     }
@@ -1694,11 +1725,15 @@ impl<'a> Cg<'a> {
             Some(Res::Variant(adt, i, _)) => {
                 let ty = self.ty_of(e);
                 if matches!(ty, Ty::Fn(..)) {
-                    return unsupported("a variant constructor used as a function value (milestone 3)");
+                    return self.ctor_value(*adt, Some(*i), &ty);
                 }
                 return self.construct(*adt, Some(*i), &ty, Vec::new());
             }
-            Some(Res::Fn(..)) => return unsupported("a function used as a value (milestone 3)"),
+            Some(Res::Fn(fid, subst)) => {
+                let subst = self.apply_sub(subst);
+                let ty = self.ty_of(e);
+                return self.fn_value(*fid, &subst, &ty);
+            }
             _ => {}
         }
         let bt = self.ty_of(base);
@@ -1971,8 +2006,26 @@ impl<'a> Cg<'a> {
             }
             Some(Res::StructCtor(adt, _)) => self.construct_call(e, *adt, None, args),
             Some(Res::Variant(adt, i, _)) => self.construct_call(e, *adt, Some(*i), args),
-            _ => unsupported("this kind of call"),
+            _ => self.call_value(callee, args),
         }
+    }
+
+    /// `f(x)` where `f` is a function value (a closure or a function used as a value).
+    fn call_value(&mut self, callee: &'a Expr, args: &'a [Expr]) -> CgResult<String> {
+        let fty = self.ty_of(callee);
+        let Ty::Fn(ptys, ret) = &fty else { return unsupported("this kind of call") };
+        let fct = self.cty(&fty)?;
+        let f = self.borrow(callee)?;
+        let _ = ret;
+        let mut decls = format!("{fct} f_ = {f}; ");
+        let mut names = vec!["f_.env".to_string()];
+        for (i, (a, pt)) in args.iter().zip(ptys).enumerate() {
+            let v = self.borrowed_as(a, pt)?;
+            let ct = self.cty(pt)?;
+            decls.push_str(&format!("{ct} x{i}_ = {v}; "));
+            names.push(format!("x{i}_"));
+        }
+        Ok(format!("({{ {decls}f_.call({}); }})", names.join(", ")))
     }
 
     fn method_call(&mut self, e: &'a Expr, recv: &'a Expr, args: &'a [Expr]) -> CgResult<String> {
@@ -2208,6 +2261,25 @@ impl<'a> Cg<'a> {
                 };
                 let add = self.arith(BinOp::Add, "acc_", "s_.ptr[i_]", &t)?;
                 Ok(format!("({{ {st} s_ = {v}; {ct} acc_ = ({ct}){zero}; for (size_t i_ = 0; i_ < s_.len; i_++) acc_ = {add}; acc_; }})"))
+            }
+            "slice::map" | "slice::filter" => {
+                let Ty::Slice(el) = &ops[0].2 else { return unsupported("this `map`/`filter`") };
+                let Ty::Adt(_, rargs) = ret else { return unsupported("this `map`/`filter`") };
+                let (st, vt) = (self.cty(&ops[0].2)?, self.cty(ret)?);
+                let out_t = self.cty(&rargs[0])?;
+                let fct = self.cty(&ops[1].2)?;
+                let v = self.borrowed_as(ops[0].0, &ops[0].2)?;
+                let f = self.borrowed_as(ops[1].0, &ops[1].2)?;
+                let alloc = format!("if (s_.len) {{ r_.ptr = ({out_t} *)malloc(s_.len * sizeof({out_t})); r_.cap = s_.len; }}");
+                if name == "slice::map" {
+                    Ok(format!("({{ {st} s_ = {v}; {fct} f_ = {f}; {vt} r_ = {{0}}; {alloc} for (size_t i_ = 0; i_ < s_.len; i_++) r_.ptr[r_.len++] = f_.call(f_.env, s_.ptr[i_]); r_; }})"))
+                } else {
+                    let keep = match self.clone_fn(el)? {
+                        Some(c) => format!("{c}(&s_.ptr[i_])"),
+                        None => "s_.ptr[i_]".to_string(),
+                    };
+                    Ok(format!("({{ {st} s_ = {v}; {fct} f_ = {f}; {vt} r_ = {{0}}; {alloc} for (size_t i_ = 0; i_ < s_.len; i_++) if (f_.call(f_.env, s_.ptr[i_])) r_.ptr[r_.len++] = {keep}; r_; }})"))
+                }
             }
             "slice::is_empty" => {
                 let v = self.borrowed_as(ops[0].0, &ops[0].2)?;
@@ -2527,6 +2599,164 @@ static {vect} {top}({mt} *m, uint64_t n) {{
             ));
         }
         Ok(name(kind))
+    }
+
+
+    // ------------------------------------------------------------ closures and function values
+
+    /// A closure: an environment holding what it captures (heap allocated, so the closure can
+    /// be returned or stored) and a C function taking that environment. Shared captures are
+    /// copied (nothing can change them while the closure is alive), mutable captures are
+    /// pointers to the variable, and moved captures are owned by the environment.
+    fn closure_expr(&mut self, e: &'a Expr, params: &'a [ClosureParam], body: &'a Expr, ty: &Ty) -> CgResult<String> {
+        let Ty::Fn(ptys, ret) = ty else { return unsupported("this closure") };
+        let ret = (**ret).clone();
+        let fct = self.cty(ty)?;
+        let caps = self.captures.get(&NodeKey::of(e)).cloned().unwrap_or_default();
+        let id = self.fresh("clo");
+        // the captured variables, as seen at the point where the closure is made
+        struct Cap {
+            name: String,
+            ty: Ty,
+            kind: CaptureKind,
+            init: String,
+        }
+        let mut capv: Vec<Cap> = Vec::new();
+        for (name, kind) in &caps {
+            let Some(l) = self.lookup(name) else { return unsupported(format!("capturing `{name}`")) };
+            let read = if l.by_ptr { format!("(*{})", l.cname) } else { l.cname.clone() };
+            let init = match kind {
+                CaptureKind::MutRef => if l.by_ptr { l.cname.clone() } else { format!("&{}", l.cname) },
+                CaptureKind::Move if self.needs_drop(&l.ty) => {
+                    let ct = self.cty(&l.ty)?;
+                    format!("({{ {ct} mv_ = {read}; memset(&{read}, 0, sizeof({ct})); mv_; }})")
+                }
+                _ => read,
+            };
+            capv.push(Cap { name: name.clone(), ty: l.ty.clone(), kind: *kind, init });
+        }
+        // the environment type
+        let env = format!("{id}_env");
+        if !capv.is_empty() {
+            let mut fields = String::new();
+            for (j, c) in capv.iter().enumerate() {
+                let ct = self.cty(&c.ty)?;
+                if c.kind == CaptureKind::MutRef {
+                    fields.push_str(&format!(" {ct} *c{j};"));
+                } else {
+                    fields.push_str(&format!(" {ct} c{j};"));
+                }
+            }
+            self.types.push_str(&format!("typedef struct {{{fields} }} {env};\n"));
+        }
+        // the body, compiled as its own C function
+        let saved_scopes = std::mem::replace(&mut self.scopes, vec![Vec::new()]);
+        let saved_loops = std::mem::take(&mut self.loops);
+        let saved_hoisted = std::mem::take(&mut self.hoisted);
+        let saved_temps = std::mem::take(&mut self.temps);
+        let saved_ret = std::mem::replace(&mut self.cur_ret, ret.clone());
+        let result = (|| -> CgResult<(String, String)> {
+            for (j, c) in capv.iter().enumerate() {
+                let cname = format!("(({env} *)env_)->c{j}");
+                self.scopes[0].push(Local { name: c.name.clone(), cname, ty: c.ty.clone(), by_ptr: c.kind == CaptureKind::MutRef, owns: false });
+            }
+            let mut plist = String::from("void *env_");
+            let mut binds = String::new();
+            for (i, (p, pt)) in params.iter().zip(ptys).enumerate() {
+                let ct = self.cty(pt)?;
+                plist.push_str(&format!(", {ct} a{i}"));
+                match &p.pat.kind {
+                    PatKind::Ident { name, .. } => {
+                        self.scopes[0].push(Local { name: name.clone(), cname: format!("a{i}"), ty: pt.clone(), by_ptr: false, owns: false });
+                    }
+                    PatKind::Wild => {}
+                    _ => self.pat_bind(&p.pat, &format!("a{i}"), pt, &mut binds, false)?,
+                }
+            }
+            let v = self.convert(body, &ret)?;
+            let rct = self.cty(&ret)?;
+            let tail = if Self::is_unit(&ret) || Self::is_never(&ret) { format!("(void)({v}); return 0;") } else { format!("return {v};") };
+            let hoisted = std::mem::take(&mut self.hoisted);
+            let fname = format!("{id}_fn");
+            let proto = format!("static {rct} {fname}({plist});\n");
+            let def = format!("static {rct} {fname}({plist}) {{\n{hoisted}  {binds}{tail}\n}}\n");
+            self.protos.push_str(&proto);
+            Ok((fname, def))
+        })();
+        self.scopes = saved_scopes;
+        self.loops = saved_loops;
+        self.hoisted = saved_hoisted;
+        self.temps = saved_temps;
+        self.cur_ret = saved_ret;
+        let (fname, def) = result?;
+        self.bodies.push_str(&def);
+        if capv.is_empty() {
+            return Ok(format!("(({fct}){{ 0, {fname}, 0 }})"));
+        }
+        // dropping the environment drops what it owns
+        let dname = format!("{id}_drop");
+        let mut ddrops = String::new();
+        for (j, c) in capv.iter().enumerate() {
+            if c.kind == CaptureKind::Move {
+                ddrops.push_str(&self.drop_stmt(&format!("p->c{j}"), &c.ty)?);
+            }
+        }
+        self.protos.push_str(&format!("static void {dname}(void *e_);\n"));
+        self.bodies.push_str(&format!("static void {dname}(void *e_) {{ {env} *p = ({env} *)e_; {ddrops}free(p); }}\n"));
+        let mut s = format!("({{ {env} *e_ = ({env} *)malloc(sizeof({env})); ");
+        for (j, c) in capv.iter().enumerate() {
+            s.push_str(&format!("e_->c{j} = {}; ", c.init));
+        }
+        s.push_str(&format!("({fct}){{ e_, {fname}, {dname} }}; }})"));
+        Ok(s)
+    }
+
+    /// A function item used as a value: wrapped so that it has the same shape as a closure.
+    fn fn_value(&mut self, fid: FnId, subst: &[(GenericId, Ty)], ty: &Ty) -> CgResult<String> {
+        let Ty::Fn(ptys, ret) = ty else { return unsupported("this function value") };
+        let target = self.resolve(fid, subst)?;
+        let Target::User { name, fid: tfid, .. } = target else {
+            return unsupported("a library function used as a value");
+        };
+        let sig = self.prog.fn_(tfid).sig.clone();
+        if sig.self_mode.is_some() || sig.params.iter().any(|p| p.mode == ParamMode::Mut) {
+            return unsupported("a function with `mut` parameters used as a value");
+        }
+        let fct = self.cty(ty)?;
+        let tname = format!("tau_tramp_{name}");
+        if self.helpers.insert(tname.clone()) {
+            let rct = self.cty(ret)?;
+            let mut plist = String::from("void *env_");
+            let mut args = Vec::new();
+            for (i, pt) in ptys.iter().enumerate() {
+                plist.push_str(&format!(", {} a{i}", self.cty(pt)?));
+                args.push(format!("a{i}"));
+            }
+            self.protos.push_str(&format!("static {rct} {tname}({plist});\n"));
+            self.bodies.push_str(&format!("static {rct} {tname}({plist}) {{ (void)env_; return {name}({}); }}\n", args.join(", ")));
+        }
+        Ok(format!("(({fct}){{ 0, {tname}, 0 }})"))
+    }
+
+    /// A struct or variant constructor used as a function value.
+    fn ctor_value(&mut self, adt: AdtId, variant: Option<usize>, ty: &Ty) -> CgResult<String> {
+        let Ty::Fn(ptys, ret) = ty else { return unsupported("this constructor value") };
+        let fct = self.cty(ty)?;
+        let rm = self.mangle(ret)?;
+        let tname = format!("tau_ctor_{rm}_{}", variant.map(|v| v.to_string()).unwrap_or_default());
+        if self.helpers.insert(tname.clone()) {
+            let rct = self.cty(ret)?;
+            let mut plist = String::from("void *env_");
+            let mut args = Vec::new();
+            for (i, pt) in ptys.iter().enumerate() {
+                plist.push_str(&format!(", {} a{i}", self.cty(pt)?));
+                args.push(format!("a{i}"));
+            }
+            let v = self.construct(adt, variant, ret, args)?;
+            self.protos.push_str(&format!("static {rct} {tname}({plist});\n"));
+            self.bodies.push_str(&format!("static {rct} {tname}({plist}) {{ (void)env_; return {v}; }}\n"));
+        }
+        Ok(format!("(({fct}){{ 0, {tname}, 0 }})"))
     }
 
     fn vec_adt(&self) -> CgResult<AdtId> {

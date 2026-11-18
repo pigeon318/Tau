@@ -129,6 +129,9 @@ pub enum Ev {
     Touch { local: LocalId },
     /// A value leaves the function: its borrows must not point at locals.
     Escape { srcs: Vec<Src>, span: Span },
+    /// A local (a variable at the end of its scope, or a temporary at the end of its
+    /// statement) is dropped here: nothing may still be using a borrow of it.
+    Dead { local: LocalId, span: Span },
 }
 
 #[derive(Clone, Debug)]
