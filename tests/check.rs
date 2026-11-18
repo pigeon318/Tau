@@ -1,0 +1,626 @@
+//! Type-checker tests: inferred types for accepted programs, and the exact
+//! diagnostics for rejected ones.
+
+use tau::check_source;
+use tau::CheckResult;
+
+fn run(src: &str) -> CheckResult {
+    match check_source(src) {
+        Ok(r) => r,
+        Err(d) => panic!("parse error:\n{}", d.render(src, "<test>")),
+    }
+}
+
+fn render(src: &str, r: &CheckResult) -> String {
+    r.diagnostics.iter().map(|d| d.render(src, "<test>")).collect::<Vec<_>>().join("\n")
+}
+
+/// The program must check with no errors.
+fn ok(src: &str) -> CheckResult {
+    let r = run(src);
+    assert!(r.diagnostics.is_empty(), "unexpected errors:\n{}", render(src, &r));
+    r
+}
+
+/// The inferred type of the first binding called `name`.
+fn ty(src: &str, name: &str) -> String {
+    ok(src).binding_ty(name).unwrap_or_else(|| panic!("no binding `{name}`"))
+}
+
+/// Check a `main` body: `ty_in_main("let x = 1", "x")`.
+fn m(body: &str, name: &str) -> String {
+    ty(&format!("fn main() {{\n{body}\n}}"), name)
+}
+
+/// The program must produce an error whose message contains `needle`.
+fn err(src: &str, needle: &str) -> CheckResult {
+    let r = run(src);
+    let msgs: Vec<&str> = r.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains(needle)),
+        "expected an error containing {needle:?}, got {msgs:?}\n{}",
+        render(src, &r)
+    );
+    r
+}
+
+/// Like `err`, for a snippet that goes inside `fn main() { ... }`.
+fn em(body: &str, needle: &str) -> CheckResult {
+    err(&format!("fn main() {{\n{body}\n}}"), needle)
+}
+
+fn count(src: &str) -> usize {
+    run(src).diagnostics.len()
+}
+
+// ------------------------------------------------------------------ literals and defaults
+
+#[test]
+fn integer_literals_default_to_i64() {
+    assert_eq!(m("let x = 5", "x"), "i64");
+}
+
+#[test]
+fn float_literals_default_to_f64() {
+    assert_eq!(m("let x = 2.5", "x"), "f64");
+}
+
+#[test]
+fn suffixes_and_annotations_fix_the_type() {
+    assert_eq!(m("let x = 5u8", "x"), "u8");
+    assert_eq!(m("let x: u16 = 5", "x"), "u16");
+    assert_eq!(m("let x = 1.5f32", "x"), "f32");
+    assert_eq!(m("let x: f32 = 1.5", "x"), "f32");
+}
+
+#[test]
+fn integer_literal_can_be_a_float_but_not_the_reverse() {
+    assert_eq!(m("let x: f64 = 1", "x"), "f64");
+    em("let x: i64 = 1.5", "mismatched types");
+}
+
+#[test]
+fn later_use_decides_the_literal_type() {
+    assert_eq!(m("let x = 1\nlet y: usize = x", "x"), "usize");
+    assert_eq!(m("let a = [1, 2, 3]\nfor i in 0..3 { let v = a[i] }", "i"), "usize");
+}
+
+#[test]
+fn literal_with_a_float_operand_becomes_float() {
+    assert_eq!(m("let x = 2 * 1.5", "x"), "f64");
+    assert_eq!(m("let y = 3.0\nlet x = 2 * y", "x"), "f64");
+}
+
+#[test]
+fn complex_literals() {
+    assert_eq!(m("let z = 3 + 4i", "z"), "c128");
+}
+
+#[test]
+fn compound_types() {
+    assert_eq!(m("let t = (1, \"a\", 2.0)", "t"), "(i64, str, f64)");
+    assert_eq!(m("let a = [1, 2, 3]", "a"), "[i64; 3]");
+    assert_eq!(m("let a = [0.0; 4]", "a"), "[f64; 4]");
+    assert_eq!(m("let v = vec[1.0, 2.0]", "v"), "Vec<f64>");
+    assert_eq!(m("let u = ()", "u"), "()");
+    assert_eq!(m("let s = \"hi\"", "s"), "str");
+    assert_eq!(m("let c = 'x'", "c"), "char");
+    assert_eq!(m("let b = 1 < 2", "b"), "bool");
+}
+
+// ------------------------------------------------------------------ operators and casts
+
+#[test]
+fn arithmetic_requires_matching_types() {
+    em("let a: i64 = 1\nlet b: f64 = 2.0\nlet c = a + b", "mismatched types");
+    em("let a: i32 = 1\nlet b: i64 = 2\nlet c = a * b", "mismatched types");
+}
+
+#[test]
+fn casts() {
+    assert_eq!(m("let n: usize = 3\nlet x = n as f64", "x"), "f64");
+    assert_eq!(m("let x = 3.7 as i32", "x"), "i32");
+    assert_eq!(m("let c = 65u8 as char", "c"), "char");
+    assert_eq!(m("let n = 'a' as u32", "n"), "u32");
+    em("let x = \"s\" as i32", "cannot cast");
+    em("let x = 5 as bool", "cannot cast");
+}
+
+#[test]
+fn power_and_bitwise() {
+    assert_eq!(m("let x = 2.0\nlet y = x^2", "y"), "f64");
+    assert_eq!(m("let a = 5u32 ^^ 3u32", "a"), "u32");
+    assert_eq!(m("let a = 1u32 << 3u32", "a"), "u32");
+    em("let a = 1.5 ^^ 2.5", "only works on integers");
+}
+
+#[test]
+fn comparison_and_logic() {
+    assert_eq!(m("let a = 1 == 2 && 3 < 4", "a"), "bool");
+    em("let a = 1 && true", "mismatched types");
+    assert_eq!(m("let a = 1 == 2.5", "a"), "bool"); // an integer literal may be a float
+    em("let n: i64 = 1\nlet a = n == 2.5", "mismatched types");
+    em("let a = \"s\" == 1", "mismatched types");
+}
+
+#[test]
+fn unary_operators() {
+    assert_eq!(m("let x = -5", "x"), "i64");
+    assert_eq!(m("let b = !true", "b"), "bool");
+    em("let b = !1", "mismatched types");
+    em("let b = -true", "cannot negate");
+}
+
+// ------------------------------------------------------------------ functions and generics
+
+#[test]
+fn function_calls_check_arguments() {
+    let src = "fn f(x: f64) -> f64 { x }\nfn main() {\n let a = f(1.0)\n}";
+    assert_eq!(ty(src, "a"), "f64");
+    err("fn f(x: f64) -> f64 { x }\nfn main() { f(1, 2) }", "takes 1 argument, but 2 were supplied");
+    err("fn f(x: f64) -> f64 { x }\nfn main() { f() }", "takes 1 argument, but 0 were supplied");
+    err("fn f(x: f64) -> f64 { x }\nfn main() { f(\"s\") }", "mismatched types");
+}
+
+#[test]
+fn return_type_is_checked() {
+    err("fn f() -> i64 { \"s\" }", "mismatched types");
+    err("fn f() -> i64 { }", "mismatched types");
+    ok("fn f() -> i64 { return 1 }");
+    err("fn f() -> i64 { return \"s\" }", "mismatched types");
+}
+
+#[test]
+fn unit_functions_may_end_in_any_expression() {
+    ok("fn g() -> i64 { 1 }\nfn f() { g() }");
+}
+
+#[test]
+fn generic_functions_are_instantiated_per_call() {
+    let src = "fn id<T>(x: T) -> T { x }\nfn main() {\n let a = id(5)\n let b = id(\"s\")\n let c = id(2.5)\n}";
+    assert_eq!(ty(src, "a"), "i64");
+    assert_eq!(ty(src, "b"), "str");
+    assert_eq!(ty(src, "c"), "f64");
+}
+
+#[test]
+fn explicit_type_arguments() {
+    let src = "fn id<T>(x: T) -> T { x }\nfn main() {\n let a = id<u8>(5)\n}";
+    assert_eq!(ty(src, "a"), "u8");
+    err("fn id<T>(x: T) -> T { x }\nfn main() { id<u8, i32>(5) }", "type argument");
+}
+
+#[test]
+fn trait_bounds_are_enforced_at_calls() {
+    let base = "trait Number {\n fn zero() -> Self\n}\nimpl Number for f64 {\n fn zero() -> f64 { 0.0 }\n}\nfn z<T: Number>() -> T { T.zero() }\n";
+    ok(&format!("{base}fn main() {{\n let a: f64 = z()\n}}"));
+    err(&format!("{base}fn main() {{\n let a: i64 = z()\n}}"), "trait `Number` is not implemented for `i64`");
+}
+
+#[test]
+fn generic_body_can_only_use_bounded_operations() {
+    err("fn f<T>(a: T, b: T) -> T { a + b }", "cannot apply `+`");
+    ok("fn f<T: Add>(a: T, b: T) -> T { a + b }");
+    err("fn f<T>(a: T, b: T) -> bool { a < b }", "trait `Ord` is not implemented for `T`");
+    ok("fn f<T: Ord>(a: T, b: T) -> bool { a < b }");
+}
+
+#[test]
+fn num_bounded_parameters_support_arithmetic() {
+    ok("fn f<T: Num>(a: T, b: T) -> T { a * b + a - b }");
+    ok("fn f<T: Float>(a: T) -> T { -a / a }");
+    ok("fn f<T: Int>(a: T, b: T) -> T { a ^^ b }");
+    err("fn f<T: Num>(a: T, b: T) -> T { a ^^ b }", "only works on integers");
+    err("fn f<T: Num>(a: T) -> T { a * 2 }", "mismatched types"); // a literal is not a `T`
+    ok("fn main() {\n let x = (|a: f64| a)(1.0)\n}");
+}
+
+#[test]
+fn generic_structs() {
+    let src = "struct Pair<A, B> { a: A, b: B }\nfn main() {\n let p = Pair(1, \"x\")\n let q = p.b\n let r = p.a\n}";
+    assert_eq!(ty(src, "p"), "Pair<i64, str>");
+    assert_eq!(ty(src, "q"), "str");
+    assert_eq!(ty(src, "r"), "i64");
+}
+
+#[test]
+fn nested_functions() {
+    ok("fn main() {\n fn helper(x: i64) -> i64 { x + 1 }\n let a = helper(2)\n}");
+}
+
+#[test]
+fn recursion_and_mutual_recursion() {
+    ok("fn fact(n: i64) -> i64 { if n <= 1 { 1 } else { n * fact(n - 1) } }");
+    ok("fn even(n: i64) -> bool { if n == 0 { true } else { odd(n - 1) } }\nfn odd(n: i64) -> bool { if n == 0 { false } else { even(n - 1) } }");
+}
+
+// ------------------------------------------------------------------ structs, enums, methods
+
+const VEC3: &str = "struct V { x: f64, y: f64 }\nimpl V {\n fn len2(self) -> f64 { self.x * self.x + self.y * self.y }\n fn origin() -> V { V(0.0, 0.0) }\n fn nudge(mut self, d: f64) { self.x += d }\n}\n";
+
+#[test]
+fn struct_construction_and_fields() {
+    assert_eq!(ty(&format!("{VEC3}fn main() {{\n let v = V(1.0, 2.0)\n let a = v.x\n}}"), "a"), "f64");
+    err(&format!("{VEC3}fn main() {{\n let v = V(1.0)\n}}"), "takes 2 arguments, but 1 was supplied");
+    err(&format!("{VEC3}fn main() {{\n let v = V(1.0, 2.0)\n let a = v.z\n}}"), "no field `z` on type `V`");
+    err(&format!("{VEC3}fn main() {{\n let v = V(1.0, \"s\")\n}}"), "mismatched types");
+}
+
+#[test]
+fn methods_and_associated_functions() {
+    let s = format!("{VEC3}fn main() {{\n let v = V.origin()\n let n = v.len2()\n}}");
+    assert_eq!(ty(&s, "n"), "f64");
+    err(&format!("{VEC3}fn main() {{\n let v = V.origin()\n v.origin()\n}}"), "no method named `origin`");
+    err(&format!("{VEC3}fn main() {{\n V.len2()\n}}"), "no function named `len2`");
+    err(&format!("{VEC3}fn main() {{\n let v = V.origin()\n v.nope()\n}}"), "no method named `nope`");
+}
+
+#[test]
+fn mut_self_methods_need_a_mutable_receiver() {
+    ok(&format!("{VEC3}fn main() {{\n let mut v = V.origin()\n v.nudge(1.0)\n}}"));
+    err(&format!("{VEC3}fn main() {{\n let v = V.origin()\n v.nudge(1.0)\n}}"), "not declared `mut`");
+}
+
+#[test]
+fn enums_and_match() {
+    let src = "enum S {\n A(f64)\n B\n}\nfn f(s: S) -> f64 {\n match s {\n A(x) => x\n B => 0.0\n }\n}";
+    ok(src);
+    err("enum S {\n A\n B\n C\n}\nfn f(s: S) -> i64 {\n match s {\n A => 1\n B => 2\n }\n}", "missing `C`");
+    err("enum S {\n A(f64)\n B\n}\nfn f(s: S) -> f64 {\n match s {\n A(x, y) => x\n B => 0.0\n }\n}", "has 1 field(s), but the pattern has 2");
+    ok("enum S {\n A\n B\n}\nfn f(s: S) -> i64 {\n match s {\n A => 1\n _ => 2\n }\n}");
+}
+
+#[test]
+fn match_arms_must_agree() {
+    err("fn f(n: i64) -> i64 { match n {\n 0 => 1\n _ => \"s\"\n } }", "mismatched types");
+    ok("fn f(n: i64) -> i64 { match n {\n 0 => return 1\n _ => 2\n } }");
+}
+
+#[test]
+fn match_must_be_exhaustive() {
+    err("fn f(n: i64) -> i64 { match n { 1 => 1 } }", "non-exhaustive");
+    err("fn f(b: bool) -> i64 { match b { true => 1 } }", "non-exhaustive");
+    ok("fn f(b: bool) -> i64 { match b {\n true => 1\n false => 0\n } }");
+    ok("fn f(o: Option<i64>) -> i64 { match o {\n Some(x) => x\n None => 0\n } }");
+    err("fn f(o: Option<i64>) -> i64 { match o { Some(x) => x } }", "missing `None`");
+}
+
+#[test]
+fn match_patterns_bind_with_the_right_types() {
+    let src = "fn f(o: Option<(i64, str)>) {\n match o {\n Some((n, s)) => print(n)\n None => print(0)\n }\n}";
+    let r = ok(src);
+    assert_eq!(r.binding_ty("n").unwrap(), "i64");
+    assert_eq!(r.binding_ty("s").unwrap(), "str");
+}
+
+#[test]
+fn or_patterns_must_bind_the_same_names() {
+    ok("fn f(n: i64) -> i64 { match n {\n 1 | 2 => 1\n _ => 0\n } }");
+    err("enum E {\n A(i64)\n B(i64)\n}\nfn f(e: E) -> i64 { match e {\n A(x) | B(y) => 1\n } }", "same variables");
+}
+
+// ------------------------------------------------------------------ operator overloading
+
+const OPS: &str = "struct V { x: f64, y: f64 }\nimpl Add for V {\n fn add(self, o: V) -> V { V(self.x + o.x, self.y + o.y) }\n}\nimpl Mul for V {\n fn mul(self, k: f64) -> f64 { self.x * k }\n}\nimpl Mul for V {\n fn mul(self, o: V) -> V { o }\n}\n";
+
+#[test]
+fn operators_dispatch_to_impls_by_operand_type() {
+    let s = format!("{OPS}fn main() {{\n let a = V(1.0, 2.0)\n let b = a + a\n let c = a * 2.0\n let d = a * a\n}}");
+    assert_eq!(ty(&s, "b"), "V");
+    assert_eq!(ty(&s, "c"), "f64");
+    assert_eq!(ty(&s, "d"), "V");
+}
+
+#[test]
+fn missing_operator_impls_are_reported() {
+    err(&format!("{OPS}fn main() {{\n let a = V(1.0, 2.0)\n let b = a - a\n}}"), "cannot apply `-`");
+    err(&format!("{OPS}fn main() {{\n let a = V(1.0, 2.0)\n let b = a + 1.0\n}}"), "cannot apply `+` to `V` and `{float}`");
+}
+
+#[test]
+fn compound_assignment_uses_the_operator_impl() {
+    ok(&format!("{OPS}fn main() {{\n let mut a = V(1.0, 2.0)\n a += a\n}}"));
+}
+
+#[test]
+fn comparison_operators_need_eq_or_ord_impls() {
+    err("struct P { x: i64 }\nfn main() { P(1) == P(1) }", "cannot compare");
+    ok("struct P { x: i64 }\nimpl Eq for P {\n fn eq(self, o: P) -> bool { self.x == o.x }\n}\nfn main() { P(1) == P(1) }");
+}
+
+// ------------------------------------------------------------------ traits and impls
+
+#[test]
+fn impls_must_provide_all_methods() {
+    err("trait T {\n fn a(self) -> i64\n fn b(self) -> i64\n}\nstruct S {}\nimpl T for S {\n fn a(self) -> i64 { 1 }\n}", "missing method `b`");
+}
+
+#[test]
+fn trait_default_methods_need_no_impl() {
+    ok("trait T {\n fn a(self) -> i64\n fn b(self) -> i64 { self.a() + 1 }\n}\nstruct S {}\nimpl T for S {\n fn a(self) -> i64 { 1 }\n}\nfn main() { S().b() }");
+}
+
+#[test]
+fn impl_signatures_must_match_the_trait() {
+    err("trait T {\n fn a(self, x: i64) -> i64\n}\nstruct S {}\nimpl T for S {\n fn a(self, x: f64) -> i64 { 1 }\n}", "has type `f64`, but trait `T` expects `i64`");
+    err("trait T {\n fn a(self) -> i64\n}\nstruct S {}\nimpl T for S {\n fn a(self) -> f64 { 1.0 }\n}", "returns `f64`, but trait `T` expects `i64`");
+    err("trait T {\n fn a(self) -> i64\n}\nstruct S {}\nimpl T for S {\n fn a() -> i64 { 1 }\n}", "should take `self`");
+    err("trait T {\n fn a(self) -> i64\n}\nstruct S {}\nimpl T for S {\n fn a(self) -> i64 { 1 }\n fn extra(self) {}\n}", "not a member of trait `T`");
+}
+
+#[test]
+fn impls_on_builtin_types() {
+    ok("trait Double {\n fn double(self) -> Self\n}\nimpl Double for i64 {\n fn double(self) -> i64 { self * 2 }\n}\nfn main() { let x = 3.double() }");
+}
+
+#[test]
+fn display_is_required_for_printing() {
+    err("struct P {}\nfn main() { print(P()) }", "trait `Display` is not implemented for `P`");
+    ok("struct P {}\nimpl Display for P {\n fn fmt(self) -> String { String.from(\"p\") }\n}\nfn main() { print(P()) }");
+    err("struct P {}\nfn main() {\n let p = P()\n print(\"value: {p}\")\n}", "trait `Display` is not implemented");
+}
+
+// ------------------------------------------------------------------ closures, ranges, loops
+
+#[test]
+fn closures_infer_from_their_context() {
+    assert_eq!(m("let f = |x: f64| x * 2.0", "f"), "fn(f64) -> f64");
+    assert_eq!(m("let v = [1, 2, 3].map(|x| x * 2)", "v"), "Vec<i64>");
+    assert_eq!(m("let v = [1.5, 2.5].filter(|x| x > 2.0)", "v"), "Vec<f64>");
+    assert_eq!(m("let s = [1, 2, 3].sum()", "s"), "i64");
+    ok("fn apply(f: fn(f64) -> f64, x: f64) -> f64 { f(x) }\nfn main() { apply(|x| x + 1.0, 2.0) }");
+    err("fn apply(f: fn(f64) -> f64, x: f64) -> f64 { f(x) }\nfn main() { apply(|x| \"s\", 2.0) }", "mismatched types");
+}
+
+#[test]
+fn functions_are_values() {
+    ok("fn dbl(x: i64) -> i64 { x * 2 }\nfn main() { let f = dbl\n let y = f(3) }");
+    ok("fn apply(f: fn(f64) -> f64, x: f64) -> f64 { f(x) }\nfn main() { apply(sin, 1.0) }");
+}
+
+#[test]
+fn loops() {
+    assert_eq!(m("let mut n = 0\nwhile n < 10 { n += 1 }", "n"), "i64");
+    em("while 1 { }", "mismatched types");
+    assert_eq!(m("let x = loop { break 5 }", "x"), "i64");
+    em("break", "outside of a loop");
+    em("continue", "outside of a loop");
+    em("for x in 5 { }", "not iterable");
+    em("for x in 0.0..1.0 { }", "range of floats");
+}
+
+#[test]
+fn for_loops_bind_element_types() {
+    assert_eq!(m("let v = vec[1.0, 2.0]\nfor x in v { }", "x"), "f64");
+    assert_eq!(m("for (a, b) in vec[(1, \"x\")] { }", "b"), "str");
+    assert_eq!(m("for i in 0..3 { }", "i"), "i64");
+}
+
+#[test]
+fn if_expressions() {
+    assert_eq!(m("let x = if true { 1 } else { 2 }", "x"), "i64");
+    em("let x = if true { 1 } else { \"s\" }", "mismatched types");
+    em("let x = if 1 { 1 } else { 2 }", "mismatched types");
+}
+
+#[test]
+fn diverging_branches_do_not_constrain_the_type() {
+    ok("fn f(n: i64) -> i64 { if n > 0 { n } else { return 0 } }");
+    ok("fn f(n: i64) -> i64 { if n > 0 { n } else { panic(\"negative\") } }");
+}
+
+// ------------------------------------------------------------------ errors and `?`
+
+#[test]
+fn question_mark() {
+    ok("fn f(a: Result<i64, str>) -> Result<i64, str> {\n let x = a?\n Ok(x + 1)\n}");
+    err("fn f(a: Result<i64, str>) -> Result<i64, i64> {\n let x = a?\n Ok(x)\n}", "cannot convert the error `str` into `i64`");
+    err("fn f(a: Result<i64, str>) -> i64 {\n let x = a?\n x\n}", "only be used in a function that returns `Result`");
+    err("fn f(a: i64) -> Result<i64, str> {\n let x = a?\n Ok(x)\n}", "can only be applied to `Result` or `Option`");
+    ok("fn f(a: Option<i64>) -> Option<i64> {\n let x = a?\n Some(x)\n}");
+}
+
+#[test]
+fn std_modules_and_imports() {
+    ok("use std.fs\nfn main() {\n let t = fs.read(\"x\")\n}");
+    ok("use std.map.Map\nfn main() {\n let m = Map<str, i64>.new()\n}");
+    ok("use math.fft.{fft, ifft}\nfn f(x: Tensor<f64, [_]>) { let y = fft(x) }");
+    err("use nothing.here\nfn main() {}", "unresolved import `nothing.here`");
+    err("use std.nope\nfn main() {}", "unresolved import `std.nope`");
+    err("fn main() { let t = fs.read(\"x\") }", "cannot find value `fs`");
+}
+
+// ------------------------------------------------------------------ mutability and modes
+
+#[test]
+fn assignment_requires_mut() {
+    em("let x = 1\nx = 2", "not declared `mut`");
+    ok("fn main() {\n let mut x = 1\n x = 2\n}");
+    em("let x = 1\nx += 2", "not declared `mut`");
+    err("fn f(v: [f64]) { v[0] = 1.0 }", "not declared `mut`");
+    ok("fn f(v: mut [f64]) { v[0] = 1.0 }");
+    err("const K: i64 = 1\nfn main() { K = 2 }", "cannot assign to the constant");
+    err("struct P { x: i64 }\nfn main() {\n let p = P(1)\n p.x = 2\n}", "not declared `mut`");
+    err("fn f(x: i64) { x = 2 }", "not declared `mut`");
+}
+
+#[test]
+fn call_site_mut_markers() {
+    let f = "fn scale(v: mut [f64], k: f64) {\n for x in mut v { x *= k }\n}\nfn plain(v: [f64]) {}\n";
+    ok(&format!("{f}fn main() {{\n let mut d = vec[1.0]\n scale(mut d, 2.0)\n}}"));
+    err(&format!("{f}fn main() {{\n let mut d = vec[1.0]\n scale(d, 2.0)\n}}"), "must be marked `mut`");
+    err(&format!("{f}fn main() {{\n let mut d = vec[1.0]\n plain(mut d)\n}}"), "unexpected `mut`");
+    err(&format!("{f}fn main() {{\n let d = vec[1.0]\n scale(mut d, 2.0)\n}}"), "not declared `mut`");
+    em("let mut x = 1\nlet y = mut x", "`mut` is only allowed on call arguments");
+}
+
+#[test]
+fn for_over_mut_binds_mutable_elements() {
+    ok("fn f(v: mut [f64]) {\n for x in mut v { x += 1.0 }\n}");
+    err("fn f(v: mut [f64]) {\n for x in v { x += 1.0 }\n}", "not declared `mut`");
+    err("fn f(v: [f64]) {\n for x in mut v { x += 1.0 }\n}", "not declared `mut`");
+}
+
+#[test]
+fn own_parameters_are_mutable_inside() {
+    ok("fn f(own v: Vec<i64>) { v.push(1) }");
+    err("fn f(v: Vec<i64>) { v.push(1) }", "not declared `mut`");
+}
+
+// ------------------------------------------------------------------ indexing and collections
+
+#[test]
+fn indexing() {
+    assert_eq!(m("let a = [1.0, 2.0]\nlet x = a[0]", "x"), "f64");
+    assert_eq!(m("let v = vec[1, 2, 3]\nlet s = v[0..2]", "s"), "[i64]");
+    em("let a = [1, 2]\nlet x = a[\"k\"]", "mismatched types");
+    em("let a = [1, 2]\nlet x = a[0, 1]", "exactly one index");
+    em("let x = 5\nlet y = x[0]", "cannot index");
+}
+
+#[test]
+fn string_types() {
+    assert_eq!(m("let s = \"hi\"\nlet t = s.to_string()", "t"), "String");
+    assert_eq!(m("let s = String.from(\"a\")\nlet n = s.len", "n"), "usize");
+    // String coerces to str where a str is expected
+    ok("fn f(s: str) {}\nfn main() {\n let t = String.from(\"a\")\n f(t)\n}");
+    err("fn f(s: String) {}\nfn main() { f(\"a\") }", "mismatched types");
+}
+
+#[test]
+fn arrays_and_vecs_coerce_to_slices() {
+    ok("fn f(v: [f64]) {}\nfn main() {\n f([1.0, 2.0])\n f(vec[1.0])\n}");
+    // an integer literal may become a float, but a typed integer array may not
+    ok("fn f(v: [f64]) {}\nfn main() { f([1, 2]) }");
+    err("fn f(v: [f64]) {}\nfn main() { f([1u8, 2u8]) }", "mismatched types");
+}
+
+// ------------------------------------------------------------------ tensors
+
+#[test]
+fn tensor_operations() {
+    let pre = "fn main() {\n let a = Tensor<f64, [2, 3]>.zeros()\n let b = Tensor<f64, [3, 4]>.zeros()\n";
+    assert_eq!(ty(&format!("{pre} let c = a @ b\n}}"), "c"), "Tensor<f64, [2, 4]>");
+    assert_eq!(ty(&format!("{pre} let c = a * 2.0\n}}"), "c"), "Tensor<f64, [2, 3]>");
+    assert_eq!(ty(&format!("{pre} let c = 2.0 * a\n}}"), "c"), "Tensor<f64, [2, 3]>");
+    assert_eq!(ty(&format!("{pre} let v = Tensor<f64, [3]>.ones()\n let c = a @ v\n}}"), "c"), "Tensor<f64, [2]>");
+    assert_eq!(ty(&format!("{pre} let x = a[0, 1]\n}}"), "x"), "f64");
+    err(&format!("{pre} let c = a @ a\n}}"), "shapes do not line up");
+    err(&format!("{pre} let c = a + b\n}}"), "mismatched types");
+    err(&format!("{pre} let x = a[0]\n}}"), "2 dimension(s), but 1 index");
+}
+
+#[test]
+fn tensor_constructors_check_their_arguments() {
+    err("fn main() { let a = Tensor<f64, [_, _]>.zeros() }", "size argument");
+    err("fn main() { let a = Tensor<f64>.zeros() }", "takes an element type and a shape");
+    ok("fn main() { let a = Tensor<f64, [_, _]>.random(3, 4) }");
+}
+
+// ------------------------------------------------------------------ parallel constructs
+
+#[test]
+fn parallel_reductions() {
+    assert_eq!(m("let s = par sum(i in 0..10) i * i", "s"), "i64");
+    assert_eq!(m("let s = par sum(i in 0..10) 0.5 * i as f64", "s"), "f64");
+    assert_eq!(m("let b = par all(i in 0..10) i < 5", "b"), "bool");
+    em("let s = par sum(i in 0..3) \"x\"", "trait `Num` is not implemented for `str`");
+    em("let s = par frobnicate(i in 0..3) i", "unknown reduction");
+}
+
+#[test]
+fn spawn_and_join() {
+    assert_eq!(m("let h = spawn { 1 + 2 }", "h"), "Task<i64>");
+    assert_eq!(m("let h = spawn { 1 + 2 }\nlet r = h.join()", "r"), "Result<i64, TaskPanicked>");
+}
+
+#[test]
+fn par_for_loops() {
+    ok("fn f(a: [f64], out: mut [f64]) {\n par for i in 0..a.len {\n out[i] = a[i]\n }\n}");
+    err("fn f(a: [f64], out: [f64]) {\n par for i in 0..a.len {\n out[i] = a[i]\n }\n}", "not declared `mut`");
+}
+
+// ------------------------------------------------------------------ names and scoping
+
+#[test]
+fn undefined_names() {
+    em("let x = nope", "cannot find value `nope`");
+    em("nope(1)", "cannot find value `nope`");
+    err("fn f(x: Nope) {}", "cannot find type `Nope`");
+    err("struct S { a: Nope }", "cannot find type `Nope`");
+}
+
+#[test]
+fn duplicate_definitions() {
+    err("fn f() {}\nfn f() {}", "defined multiple times");
+    err("struct S {}\nstruct S {}", "defined multiple times");
+    err("struct S { a: i64, a: i64 }", "declared twice");
+    err("enum A {\n X\n}\nenum B {\n X\n}", "defined multiple times");
+}
+
+#[test]
+fn shadowing_and_scopes() {
+    assert_eq!(m("let x = 1\nlet x = \"s\"", "x"), "i64"); // the first binding
+    let r = ok("fn main() {\n let x = 1\n {\n let x = \"s\"\n }\n let y = x\n}");
+    assert_eq!(r.binding_ty("y").unwrap(), "i64");
+    em("{\n let inner = 1\n}\nlet y = inner", "cannot find value `inner`");
+}
+
+#[test]
+fn user_definitions_shadow_the_prelude() {
+    ok("fn sum(a: i64, b: i64) -> i64 { a + b }\nfn main() { let x = sum(1, 2) }");
+}
+
+#[test]
+fn type_aliases() {
+    assert_eq!(ty("type Grid = Tensor<f64, [_, _]>\nfn main() {\n let g = Grid.random(2, 2)\n}", "g"), "Tensor<f64, [_, _]>");
+    err("type A = B\ntype B = A", "refers to itself");
+}
+
+#[test]
+fn unsafe_functions_need_unsafe_blocks() {
+    err("fn main() { let p = alloc<u8>(4) }", "requires an `unsafe` block");
+    ok("fn main() { unsafe { let p = alloc<u8>(4)\n p[0] = 1u8 } }");
+    ok("unsafe fn danger() -> i64 { 1 }\nfn main() { unsafe { danger() } }");
+}
+
+#[test]
+fn self_only_in_methods() {
+    err("fn f(self) {}", "`self` is only allowed in methods");
+    err("fn f() -> Self { }", "`Self` can only be used");
+}
+
+#[test]
+fn functions_need_bodies() {
+    err("fn f() -> i64", "has no body");
+}
+
+#[test]
+fn unknown_types_and_arity() {
+    err("fn f(x: Vec) {}", "expects 1 type argument");
+    err("fn f(x: Option<i64, i64>) {}", "expects 1 type argument");
+    err("fn f(x: i64<i64>) {}", "does not take type arguments");
+    err("fn f(x: Add) {}", "is a trait, not a type");
+}
+
+// ------------------------------------------------------------------ no cascades
+
+#[test]
+fn one_mistake_gives_one_error() {
+    assert_eq!(count("fn main() { let x = nope + 1 }"), 1);
+    assert_eq!(count("fn main() { print(nope) }"), 1);
+    assert_eq!(count("fn main() { let v = vec[1, 2]\n let a = v.missing() }"), 1);
+    assert_eq!(count("struct S { x: i64 }\nfn main() { let s = S(1)\n print(s.y) }"), 1);
+}
+
+#[test]
+fn types_are_never_silently_errors_in_accepted_programs() {
+    // if a program checks cleanly, no recorded type may be the error type
+    for src in [
+        "fn main() { let v = vec[1, 2, 3]\n let s = v.sum()\n print(s) }",
+        "fn main() { let t = (1, 2.0)\n let (a, b) = t\n print(a) }",
+    ] {
+        let r = ok(src);
+        assert!(r.results.bindings.iter().all(|b| !format!("{:?}", b.ty).contains("Error")), "{src}");
+    }
+}

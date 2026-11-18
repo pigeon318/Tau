@@ -1,0 +1,126 @@
+// The prelude: names visible in every module. Functions without a body are
+// implemented by the runtime (builtins); this file only declares their types.
+
+// ---- core types -------------------------------------------------------------
+
+pub struct Vec<T> { pub len: usize }
+pub struct String { pub len: usize }
+pub struct Range<T> { pub start: T, pub end: T }
+pub struct Ptr<T> {}
+pub struct Task<T> {}
+pub struct Cluster {}
+pub struct IoError {}
+pub struct TaskPanicked {}
+
+pub enum Option<T> {
+    Some(T)
+    None
+}
+
+pub enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+// ---- traits satisfied by rules for built-in types ---------------------------
+
+#[builtin_trait] pub trait Num {}
+#[builtin_trait] pub trait Int {}
+#[builtin_trait] pub trait Float {}
+#[builtin_trait] pub trait Copy {}
+#[builtin_trait] pub trait Clone { fn clone(self) -> Self }
+#[builtin_trait] pub trait Eq { fn eq(self, o: Self) -> bool }
+#[builtin_trait] pub trait Ord { fn lt(self, o: Self) -> bool }
+#[builtin_trait] pub trait Display { fn fmt(self) -> String }
+
+// ---- operator traits (impls need matching names and arity, not signatures) --
+
+#[op] pub trait Add { fn add(self, o: Self) -> Self }
+#[op] pub trait Sub { fn sub(self, o: Self) -> Self }
+#[op] pub trait Mul { fn mul(self, o: Self) -> Self }
+#[op] pub trait Div { fn div(self, o: Self) -> Self }
+#[op] pub trait Rem { fn rem(self, o: Self) -> Self }
+#[op] pub trait Pow { fn pow(self, o: Self) -> Self }
+#[op] pub trait MatMul { fn matmul(self, o: Self) -> Self }
+#[op] pub trait BitAnd { fn bitand(self, o: Self) -> Self }
+#[op] pub trait BitOr { fn bitor(self, o: Self) -> Self }
+#[op] pub trait BitXor { fn bitxor(self, o: Self) -> Self }
+#[op] pub trait Shl { fn shl(self, o: Self) -> Self }
+#[op] pub trait Shr { fn shr(self, o: Self) -> Self }
+#[op] pub trait Neg { fn neg(self) -> Self }
+#[op] pub trait Index { fn index(self, i: Self) -> Self }
+
+// ---- constants and functions ------------------------------------------------
+
+pub const PI: f64 = 3.141592653589793
+pub const TAU: f64 = 6.283185307179586
+pub const E: f64 = 2.718281828459045
+
+pub fn sqrt<T: Float>(x: T) -> T
+pub fn sin<T: Float>(x: T) -> T
+pub fn cos<T: Float>(x: T) -> T
+pub fn tan<T: Float>(x: T) -> T
+pub fn asin<T: Float>(x: T) -> T
+pub fn acos<T: Float>(x: T) -> T
+pub fn atan<T: Float>(x: T) -> T
+pub fn atan2<T: Float>(y: T, x: T) -> T
+pub fn exp<T: Float>(x: T) -> T
+pub fn ln<T: Float>(x: T) -> T
+pub fn log10<T: Float>(x: T) -> T
+pub fn floor<T: Float>(x: T) -> T
+pub fn ceil<T: Float>(x: T) -> T
+pub fn round<T: Float>(x: T) -> T
+pub fn abs<T: Num>(x: T) -> T
+pub fn min<T: Ord>(a: T, b: T) -> T
+pub fn max<T: Ord>(a: T, b: T) -> T
+pub fn sum<T: Num>(xs: [T]) -> T
+pub fn trace<T: Num>(a: Tensor<T, [_, _]>) -> T
+
+pub fn print<T: Display>(x: T)
+pub fn assert(cond: bool)
+pub fn assert_eq<T: Eq + Display>(a: T, b: T)
+pub fn panic(msg: str) -> Never
+
+pub fn par_chunks<T>(xs: mut [T], size: usize) -> Vec<[T]>
+pub unsafe fn alloc<T>(n: usize) -> Ptr<T>
+
+// ---- methods on built-in types ----------------------------------------------
+
+impl<T> Vec<T> {
+    pub fn new() -> Vec<T>
+    pub fn push(mut self, x: T)
+    pub fn pop(mut self) -> Option<T>
+    pub unsafe fn from_raw(p: Ptr<T>, n: usize) -> Vec<T>
+}
+
+impl<T> [T] {
+    pub fn map<U>(self, f: fn(T) -> U) -> Vec<U>
+    pub fn filter(self, f: fn(T) -> bool) -> Vec<T>
+    pub fn to_vec(self) -> Vec<T>
+    pub fn is_empty(self) -> bool
+}
+
+impl<T: Num> [T] {
+    pub fn sum(self) -> T
+}
+
+impl<T> Task<T> {
+    pub fn join(self) -> Result<T, TaskPanicked>
+}
+
+impl<T> Index for Ptr<T> {
+    pub fn index(self, i: usize) -> T
+}
+
+impl String {
+    pub fn new() -> String
+    pub fn from(s: str) -> String
+    pub fn push_str(mut self, s: str)
+}
+
+impl str {
+    pub fn to_string(self) -> String
+    pub fn split_whitespace(self) -> Vec<str>
+    pub fn lowercase(self) -> String
+    pub fn uppercase(self) -> String
+}
