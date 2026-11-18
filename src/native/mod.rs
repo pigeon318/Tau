@@ -47,7 +47,8 @@ pub fn emit_c(src: &str) -> Result<String, NativeError> {
         return Err(NativeError::Rejected(result.diagnostics));
     }
     // The checker's side tables are keyed by node address, so `user` must stay put.
-    cg::translate(&user, &result)
+    let paths = lib.iter().map(|m| m.path.clone()).collect();
+    cg::translate(&user, &result, paths)
 }
 
 /// The C compiler to use: `$TAU_CC`, else the first of clang, gcc, cc that exists.
@@ -139,12 +140,38 @@ pub struct NativeOutput {
 /// Build `src` and run it, capturing its output (used by tests).
 pub fn run_captured(src: &str) -> Result<NativeOutput, NativeError> {
     let exe = build_source(src)?;
-    let out = Command::new(&exe).stdin(Stdio::null()).output().map_err(|e| NativeError::plain(format!("cannot run {}: {e}", exe.display())))?;
-    Ok(NativeOutput {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        code: out.status.code().unwrap_or(-1),
-    })
+    // TAU_VALGRIND=1 runs the program under valgrind: an invalid access or double free gives exit
+    // status 99, and a leak on a normal exit gives 98 (used by the test suite's memory run)
+    let valgrind = std::env::var("TAU_VALGRIND").map(|v| !v.is_empty() && v != "0").unwrap_or(false);
+    let log = std::env::temp_dir().join(format!("tau-valgrind-{}-{:x}.log", std::process::id(), {
+        let mut h = DefaultHasher::new();
+        exe.hash(&mut h);
+        std::thread::current().id().hash(&mut h);
+        h.finish()
+    }));
+    let mut cmd = if valgrind {
+        let mut c = Command::new("valgrind");
+        c.args(["--leak-check=full", "--show-leak-kinds=definite", "--errors-for-leak-kinds=none", "--error-exitcode=99", "-q"]).arg(format!("--log-file={}", log.display())).arg(&exe);
+        c
+    } else {
+        Command::new(&exe)
+    };
+    let out = cmd.stdin(Stdio::null()).output().map_err(|e| NativeError::plain(format!("cannot run {}: {e}", exe.display())))?;
+    let mut stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let mut code = out.status.code().unwrap_or(-1);
+    if valgrind {
+        let report = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_file(&log);
+        if code == 99 {
+            // an invalid access or double free
+            stderr.push_str(&report);
+        } else if code == 0 && !report.trim().is_empty() {
+            // a normal exit that leaked: a program that panics is not expected to free anything
+            code = 98;
+            stderr.push_str(&report);
+        }
+    }
+    Ok(NativeOutput { stdout: String::from_utf8_lossy(&out.stdout).into_owned(), stderr, code })
 }
 
 /// Run an already built program with the terminal attached; returns its exit code.

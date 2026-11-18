@@ -26,6 +26,7 @@ typedef struct { uint8_t *ptr; size_t len, cap; } tau_buf;
 /* ---------------------------------------------------------------- buffers and output */
 
 static void tau_buf_push(tau_buf *b, const void *p, size_t n) {
+    if (n == 0) return;
     if (b->len + n > b->cap) {
         size_t c = b->cap ? b->cap * 2 : 256;
         while (c < b->len + n) c *= 2;
@@ -192,6 +193,70 @@ static void tau_fmt_char(tau_buf *b, uint32_t c) {
     tau_buf_push(b, u, n);
 }
 
+/* ---------------------------------------------------------------- sequences and strings */
+
+TAU_NORETURN TAU_COLD static void tau_oob(size_t len, __int128 idx) {
+    tau_buf m = {0};
+    tau_buf_cstr(&m, "index out of bounds: the length is ");
+    tau_fmt_u64(&m, (uint64_t)len);
+    tau_buf_cstr(&m, " but the index is ");
+    tau_fmt_i128(&m, idx);
+    tau_panic((const char *)m.ptr, m.len);
+}
+
+TAU_NORETURN TAU_COLD static void tau_slice_oob(__int128 a, __int128 b, size_t len) {
+    tau_buf m = {0};
+    tau_buf_cstr(&m, "slice ");
+    tau_fmt_i128(&m, a);
+    tau_buf_cstr(&m, "..");
+    tau_fmt_i128(&m, b);
+    tau_buf_cstr(&m, " is out of range for length ");
+    tau_fmt_u64(&m, (uint64_t)len);
+    tau_panic((const char *)m.ptr, m.len);
+}
+
+/* A string built by interpolation (`let s = "n = {n}"`) has type `str`, a view that cannot own
+ * memory, so its bytes live until the program ends. They are kept on a list so that they stay
+ * reachable (and a leak checker sees them as such). */
+static void *tau_pool_head;
+static tau_str tau_intern(const uint8_t *p, size_t n) {
+    void **blk = (void **)malloc(n + sizeof(void *));
+    if (!blk) tau_panic_cstr("out of memory");
+    *blk = tau_pool_head;
+    tau_pool_head = blk;
+    if (n) memcpy(blk + 1, p, n);
+    return (tau_str){ (const uint8_t *)(blk + 1), n };
+}
+
+/* hashing for map keys */
+static uint64_t tau_hash_u64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+static uint64_t tau_hash_bytes(const uint8_t *p, size_t n) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 0x100000001b3ULL; }
+    return tau_hash_u64(h);
+}
+static uint64_t tau_hash_mix(uint64_t a, uint64_t b) { return tau_hash_u64(a * 31 + b); }
+
+static int tau_is_space(uint8_t c) { return c == ' ' || (c >= 9 && c <= 13); }
+
+/* ASCII case mapping (the interpreter maps all of Unicode; see docs/native/DESIGN.md) */
+static tau_buf tau_str_case(tau_str s, int upper) {
+    tau_buf b = {0};
+    if (s.len == 0) return b;
+    tau_buf_push(&b, s.ptr, s.len);
+    for (size_t i = 0; i < b.len; i++) {
+        uint8_t c = b.ptr[i];
+        if (upper) { if (c >= 'a' && c <= 'z') b.ptr[i] = (uint8_t)(c - 32); }
+        else { if (c >= 'A' && c <= 'Z') b.ptr[i] = (uint8_t)(c + 32); }
+    }
+    return b;
+}
+
 TAU_NORETURN TAU_COLD static void tau_bad_char(__int128 v) {
     tau_buf m = {0};
     tau_fmt_i128(&m, v);
@@ -281,10 +346,105 @@ __attribute__((noinline)) static void tau_fmt_float(tau_buf *b, double x, int si
 static void tau_fmt_f64(tau_buf *b, double x) { tau_fmt_float(b, x, 0); }
 static void tau_fmt_f32(tau_buf *b, float x) { tau_fmt_float(b, (double)x, 1); }
 
+/* ---------------------------------------------------------------- files and standard input */
+
+#include <errno.h>
+
+/* The text of an I/O error, as the interpreter prints it (Rust's io::Error): `strerror (os error N)`.
+ * Code -1 is invalid UTF-8. */
+static tau_buf tau_io_msg(int code) {
+    tau_buf b = {0};
+    if (code == -1) { tau_buf_cstr(&b, "stream did not contain valid UTF-8"); return b; }
+    tau_buf_cstr(&b, strerror(code));
+    tau_buf_cstr(&b, " (os error ");
+    tau_fmt_i32(&b, (int32_t)code);
+    tau_buf_char(&b, ')');
+    return b;
+}
+
+static int tau_utf8_valid(const uint8_t *p, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        uint8_t c = p[i];
+        size_t k;
+        uint32_t cp;
+        if (c < 0x80) { i++; continue; }
+        else if (c >= 0xC2 && c <= 0xDF) { k = 1; cp = c & 0x1F; }
+        else if (c >= 0xE0 && c <= 0xEF) { k = 2; cp = c & 0x0F; }
+        else if (c >= 0xF0 && c <= 0xF4) { k = 3; cp = c & 0x07; }
+        else return 0;
+        if (i + k >= n) return 0;
+        for (size_t j = 1; j <= k; j++) {
+            if ((p[i + j] & 0xC0) != 0x80) return 0;
+            cp = (cp << 6) | (p[i + j] & 0x3F);
+        }
+        if ((k == 2 && cp < 0x800) || (k == 3 && (cp < 0x10000 || cp > 0x10FFFF)) || (cp >= 0xD800 && cp <= 0xDFFF)) return 0;
+        i += k + 1;
+    }
+    return 1;
+}
+
+static char *tau_cpath(tau_str p) {
+    char *c = (char *)malloc(p.len + 1);
+    if (!c) tau_panic_cstr("out of memory");
+    if (p.len) memcpy(c, p.ptr, p.len);
+    c[p.len] = 0;
+    return c;
+}
+
+/* 0 on success, else an errno value (or -1 for invalid UTF-8) */
+static int tau_fs_read(tau_str path, tau_buf *out) {
+    char *c = tau_cpath(path);
+    FILE *f = fopen(c, "rb");
+    free(c);
+    if (!f) return errno ? errno : EIO;
+    uint8_t chunk[4096];
+    size_t n;
+    while ((n = fread(chunk, 1, sizeof chunk, f)) > 0) tau_buf_push(out, chunk, n);
+    int err = ferror(f) ? (errno ? errno : EIO) : 0;
+    fclose(f);
+    if (err) return err;
+    if (!tau_utf8_valid(out->ptr, out->len)) { free(out->ptr); out->ptr = 0; out->len = out->cap = 0; return -1; }
+    return 0;
+}
+
+static int tau_fs_write(tau_str path, tau_str data) {
+    char *c = tau_cpath(path);
+    FILE *f = fopen(c, "wb");
+    free(c);
+    if (!f) return errno ? errno : EIO;
+    int err = 0;
+    if (data.len && fwrite(data.ptr, 1, data.len, f) != data.len) err = errno ? errno : EIO;
+    if (fclose(f) != 0 && !err) err = errno ? errno : EIO;
+    return err;
+}
+
+static bool tau_fs_exists(tau_str path) {
+    char *c = tau_cpath(path);
+    bool ok = access(c, F_OK) == 0;
+    free(c);
+    return ok;
+}
+
+/* one line of standard input without its line ending (empty at end of input) */
+static int tau_read_line(tau_buf *out) {
+    int ch;
+    while ((ch = getchar()) != EOF) {
+        if (ch == '\n') break;
+        uint8_t b = (uint8_t)ch;
+        tau_buf_push(out, &b, 1);
+    }
+    while (out->len > 0 && out->ptr[out->len - 1] == '\r') out->len--;
+    if (ch == EOF && ferror(stdin)) return errno ? errno : EIO;
+    if (!tau_utf8_valid(out->ptr, out->len)) { free(out->ptr); out->ptr = 0; out->len = out->cap = 0; return -1; }
+    return 0;
+}
+
 /* ---------------------------------------------------------------- program entry, stack overflow */
 
 static uintptr_t tau_stack_lo;
-static void tau_run_main(void);
+static int tau_run_main(void);
+static int tau_exit_status;
 
 static void tau_segv(int sig, siginfo_t *si, void *ctx) {
     (void)ctx;
@@ -309,7 +469,8 @@ static void *tau_thread_main(void *arg) {
         tau_stack_lo = (uintptr_t)lo;
     }
     stack_t ss;
-    ss.ss_sp = malloc(1 << 16);
+    static char tau_altstack[1 << 16];
+    ss.ss_sp = tau_altstack;
     ss.ss_size = 1 << 16;
     ss.ss_flags = 0;
     sigaltstack(&ss, 0);
@@ -320,7 +481,7 @@ static void *tau_thread_main(void *arg) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, 0);
     sigaction(SIGBUS, &sa, 0);
-    tau_run_main();
+    tau_exit_status = tau_run_main();
     return 0;
 }
 
@@ -337,6 +498,6 @@ int main(void) {
     if (!started) { tau_thread_main(0); }
     else pthread_join(th, 0);
     tau_flush_stdout();
-    return 0;
+    return tau_exit_status;
 }
 /* ===== end of runtime ===== */

@@ -351,7 +351,7 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
 |---|---|---|
 | **M0** | Prerequisites (§14, items 1 to 3) | **done**: interpreter and checker changes, with tests |
 | **M1** | Scalars, tuples, functions, control flow, checked arithmetic, panics, `print` of scalars/strings/tuples | **done**: `hello`, `fizzbuzz`, `collatz`, 36 differential tests (`tests/native.rs`) including a 10,000-value float-printing fuzz |
-| **M2** | Structs, enums, `Option`/`Result`/`?`, `match` on them, arrays, `Vec`, slices, `String`, `str`, `Map`, ownership and drops (incl. §14 item 5) | `primes`, `sort`, `bank`, `wordcount`, `errors`, `shapes`, `ownership` |
+| **M2** | Structs, enums, `Option`/`Result`/`?`, `match` on them, arrays, `Vec`, slices, `String`, `str`, `Map`, `std.fs`/`std.io`, `main` returning `Result`, ownership and drops; generics and trait dispatch came along (see below) | **done**: every program in `examples/run/` except `integrate` (closures) runs natively and matches its Python reference; 55 differential tests, valgrind- and UBSan-clean |
 | **M3** | Generics, traits, default methods, operators, `Display`/`Eq`/`Ord`, closures, `fn` values (incl. §14 items 4 and 6) | `nbody`, `traits`, `borrowing`, closure tests |
 | **M4** | Tensors, maths library, `linalg`, FFT | `tensors`, matrix and FFT tests |
 | **M5** | Thread pool, `par for`/`par sum`/`par_chunks`, `spawn`/`join`, task panics | `parallel`, `integrate`; ≥3.5× on 4 cores |
@@ -380,6 +380,40 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
   sanitizer builds; planned for M2, when there is heap ownership worth checking.
 - **Known, accepted differences**: the native stack is 1 GB, so very deep (but finite) recursion that makes
   the interpreter report a stack overflow still succeeds natively.
+
+### What M2 changed in the plan
+
+- **Monomorphization came early.** Each call records its generic arguments; every distinct set becomes one
+  C function (`request` in `cg.rs`), so generic functions, generic structs/enums (`Option<T>`, user
+  `Box2<T>`), trait methods and operator overloads resolve at compile time. This is most of what M3 was
+  going to be; M3 is now closures, `fn` values and the remaining trait corners.
+- **Ownership without drop flags.** Rather than a drop-flag analysis, a value that owns heap memory is
+  *zeroed when it is moved out* and every owning local is dropped at the end of its scope, so a drop of a
+  moved-from value is a no-op (the `free` of a null pointer). This is correct on every path (`return`,
+  `break`, `continue`, `?`) without any dataflow, and costs a few stores that clang usually removes.
+  Temporaries that own memory (`make().len`) are hoisted to the top of the function and dropped when the
+  statement ends. Values from `match` on an owned temporary are moved out of it; a match *guard* on such a
+  pattern is not supported yet (reported, not miscompiled).
+- **Representation.** `Vec<T>` is `{ptr, len, cap}`, `String` the runtime's byte buffer, `[T]` a `{ptr, len}`
+  view, `[T; N]` a struct wrapping a C array (so it copies by value), `str` a `{ptr, len}` view. Implicit
+  conversions the checker allows (`Vec`/array to slice, `String` to `str`) become views of the place.
+- **Memory checking.** `TAU_VALGRIND=1 cargo test --test native` runs every program under valgrind and fails
+  on any invalid access, double free or definite leak. Interpolated strings that are *not* printed directly
+  (`let s = "n = {n}"`) are still allocated and never freed: the language types them as `str`, which cannot
+  own memory, so they need a decision (make them `String`, or intern) before they can be freed.
+- **Maps** are generated per `(K, V)`: insertion-ordered arrays of keys and values plus an open-addressing
+  index table; keys may be integers, `bool`, `char`, `str`/`String` and tuples of those (anything else is
+  reported as unsupported). `top(n)` clones its entries (a generated deep-clone function per type).
+  The differential tests found a language hole here: the spec let `m[k] += x` create an entry but gave no
+  way to insert with `=`. Now `m[k] = v` inserts or overwrites (SPEC and interpreter updated), and any other
+  use of a missing `m[k]` panics.
+- **A bug the valgrind run caught**: a slice view of a computed value (`for x in make_vec()`) evaluated the
+  value twice (once for the pointer, once for the length). Views now bind their place once; a regression
+  test counts the side effects.
+- **Known differences from the interpreter.** `lowercase`/`uppercase` map ASCII only (the interpreter maps
+  all of Unicode) and `split_whitespace` splits on ASCII whitespace.
+- **Bugs found on the way, fixed**: `mut v[2..]` (a mutable view of part of a vector) failed in the
+  interpreter; `str` and slices were not `Copy` in the checker although the spec says they are.
 
 M1 to M3 are the bulk of the work; M4 and M5 are mostly runtime code; M6 is polish.
 

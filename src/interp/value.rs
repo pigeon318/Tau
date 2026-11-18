@@ -57,7 +57,8 @@ pub enum Value<'a> {
 pub enum RefTarget<'a> {
     Var(Rc<Env<'a>>, usize),
     Slot(Slot<'a>, usize),
-    MapEntry(Rc<RefCell<MapVal<'a>>>, MapKey),
+    /// A map entry: the map, the key's hashable form, and the key as a value (to insert it).
+    MapEntry(Rc<RefCell<MapVal<'a>>>, MapKey, Box<Value<'a>>),
     TensorElem(Rc<RefCell<Tensor>>, usize),
 }
 

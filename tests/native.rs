@@ -333,9 +333,8 @@ fn fizzbuzz_example() {
 #[test]
 fn unsupported_programs_say_so_instead_of_miscompiling() {
     for src in [
-        "fn main() { let v = vec[1, 2, 3]\n print(v[0]) }",
+        "fn main() { let z = 3i\n print(z) }",
         "fn main() { let f = |x: i64| x + 1\n print(f(1)) }",
-        "fn id<T: Copy>(x: T) -> T { x }\nfn main() { print(id(1)) }",
         "fn main() { let t = Tensor<f64, [2]>.ones()\n print(t) }",
     ] {
         match native::emit_c(src) {
@@ -423,4 +422,178 @@ fn float_printing_matches_the_interpreter_on_many_values() {
     }
     prog.push_str(&format!("fn main() {{\n{calls}}}\n"));
     same(&prog);
+}
+
+// ------------------------------------------------------------------ structs, enums and generics
+
+#[test]
+fn structs() {
+    same("struct P { x: i64, y: f64 }\nfn main() {\n let p = P(3, 2.5)\n print(p.x)\n print(p.y * 2.0)\n let mut q = P(1, 1.0)\n q.x = 10\n q.y += 0.5\n print(q.x)\n print(q.y)\n}");
+    same("struct Pair { a: (i64, i64), b: bool }\nfn main() {\n let p = Pair((1, 2), true)\n print(p.a.1)\n let Pair((x, y), flag) = p\n print(x + y)\n print(flag)\n}");
+    same("struct Unit {}\nstruct One { v: i8 }\nfn main() {\n let u = Unit()\n let o = One(5)\n print(o.v)\n}");
+    same("struct Acc { total: i64 }\nfn bump(a: mut Acc, by: i64) { a.total += by }\nfn read(a: Acc) -> i64 { a.total }\nfn main() {\n let mut a = Acc(0)\n bump(mut a, 5)\n bump(mut a, 6)\n print(read(a))\n}");
+    same("struct In { v: i64 }\nstruct Out { i: In, w: i64 }\nfn main() {\n let mut o = Out(In(1), 2)\n o.i.v = 7\n o.i.v += 1\n print(o.i.v + o.w)\n}");
+}
+
+#[test]
+fn enums_and_match() {
+    same("enum Shape { Circle(f64), Rect(f64, f64), Empty }\nfn area(s: Shape) -> f64 {\n match s {\n Circle(r) => 3.0 * r * r\n Rect(w, h) => w * h\n Empty => 0.0\n }\n}\nfn main() {\n print(area(Circle(2.0)))\n print(area(Rect(2.0, 3.5)))\n print(area(Empty))\n}");
+    same("enum Color { Red, Green, Blue }\nfn name(c: Color) -> str {\n match c {\n Red => \"red\"\n Green => \"green\"\n Blue => \"blue\"\n }\n}\nfn main() {\n print(name(Green))\n print(name(Color.Blue))\n let c = Color.Red\n print(name(c))\n}");
+    same("enum T { A(i64), B(i64, i64) }\nfn f(t: T) -> i64 {\n match t {\n A(x) if x > 5 => x\n A(x) => 0 - x\n B(x, y) => x * y\n }\n}\nfn main() {\n print(f(A(9)))\n print(f(A(2)))\n print(f(B(3, 4)))\n}");
+    same("enum E { V(i64) }\nfn main() {\n let e = V(4)\n let r = match e { V(x) => x + 1 }\n print(r)\n}");
+}
+
+#[test]
+fn option_and_result() {
+    same("fn find(n: i64) -> Option<i64> { if n > 0 { Some(n * 2) } else { None } }\nfn main() {\n match find(4) {\n Some(v) => print(\"got {v}\")\n None => print(\"none\")\n }\n match find(-1) {\n Some(v) => print(\"got {v}\")\n None => print(\"none\")\n }\n}");
+    same("fn div(a: i64, b: i64) -> Result<i64, str> { if b == 0 { Err(\"div by zero\") } else { Ok(a / b) } }\nfn main() {\n for d in 0..3 {\n match div(6, d) {\n Ok(v) => print(v)\n Err(m) => print(m)\n }\n }\n}");
+    same("fn half(n: i64) -> Result<i64, str> { if n % 2 == 0 { Ok(n / 2) } else { Err(\"odd\") } }\nfn quarter(n: i64) -> Result<i64, str> {\n let h = half(n)?\n let q = half(h)?\n Ok(q)\n}\nfn main() {\n print(match quarter(8) { Ok(v) => v, Err(_) => -1 })\n print(match quarter(6) { Ok(v) => v, Err(_) => -1 })\n print(match quarter(7) { Ok(v) => v, Err(_) => -2 })\n}");
+    same("fn pos(n: i64) -> Option<i64> { if n > 0 { Some(n) } else { None } }\nfn sum2(a: i64, b: i64) -> Option<i64> {\n let x = pos(a)?\n let y = pos(b)?\n Some(x + y)\n}\nfn main() {\n print(match sum2(1, 2) { Some(v) => v, None => 0 })\n print(match sum2(1, -2) { Some(v) => v, None => 0 })\n}");
+    same("fn main() {\n let a: Option<f64> = Some(1.5)\n let b: Result<(), str> = Ok(())\n let c: Option<(i64, bool)> = Some((1, true))\n match c {\n Some((n, f)) => print(\"{n} {f}\")\n None => print(\"none\")\n }\n match b {\n Ok(_) => print(\"ok\")\n Err(e) => print(e)\n }\n match a {\n Some(x) => print(x)\n None => print(0.0)\n }\n}");
+}
+
+#[test]
+fn methods_and_associated_functions() {
+    same("struct C { n: i64 }\nimpl C {\n fn new() -> C { C(0) }\n fn bump(mut self) { self.n += 1 }\n fn get(self) -> i64 { self.n }\n fn plus(self, k: i64) -> C { C(self.n + k) }\n}\nfn main() {\n let mut c = C.new()\n c.bump()\n c.bump()\n print(c.get())\n print(c.plus(5).get())\n}");
+    same("struct V { x: f64, y: f64 }\nimpl V {\n fn dot(self, o: V) -> f64 { self.x * o.x + self.y * o.y }\n fn norm(self) -> f64 { sqrt(self.dot(self)) }\n}\nfn main() {\n let v = V(3.0, 4.0)\n print(v.norm())\n print(v.dot(V(1.0, 2.0)))\n}");
+}
+
+#[test]
+fn operator_overloading() {
+    same("struct V { x: f64, y: f64 }\nimpl Copy for V {}\nimpl Add for V { fn add(self, o: V) -> V { V(self.x + o.x, self.y + o.y) } }\nimpl Sub for V { fn sub(self, o: V) -> V { V(self.x - o.x, self.y - o.y) } }\nimpl Mul for V { fn mul(self, k: f64) -> V { V(self.x * k, self.y * k) } }\nimpl Neg for V { fn neg(self) -> V { V(0.0 - self.x, 0.0 - self.y) } }\nfn main() {\n let a = V(1.0, 2.0)\n let b = V(0.5, 0.25)\n let c = (a + b) * 2.0 - a\n print(c.x)\n print(c.y)\n let mut d = a\n d += b\n d *= 3.0\n print(d.x)\n let n = -a\n print(n.y)\n}");
+    same("struct M { v: i64 }\nimpl Copy for M {}\nimpl Eq for M { fn eq(self, o: M) -> bool { self.v == o.v } }\nimpl Ord for M { fn lt(self, o: M) -> bool { self.v < o.v } }\nfn main() {\n let a = M(1)\n let b = M(2)\n print(a == b)\n print(a != b)\n print(a < b)\n print(a > b)\n print(a <= b)\n print(b >= a)\n print(a == M(1))\n}");
+}
+
+#[test]
+fn generic_functions_and_types() {
+    same("fn id<T: Copy>(x: T) -> T { x }\nfn main() {\n print(id(5))\n print(id(2.5))\n print(id(\"s\"))\n print(id((1, 2)))\n}");
+    same("struct Box2<T> { a: T, b: T }\nfn swap2<T: Copy>(p: Box2<T>) -> Box2<T> { Box2(p.b, p.a) }\nfn main() {\n let p = swap2(Box2(1, 2))\n print(p.a)\n let q = swap2(Box2(1.5, 2.5))\n print(q.a)\n}");
+    same("enum Maybe<T> { Just(T), Nothing }\nfn unwrap_or<T: Copy>(m: Maybe<T>, d: T) -> T {\n match m {\n Just(v) => v\n Nothing => d\n }\n}\nfn main() {\n print(unwrap_or(Just(3), 0))\n print(unwrap_or(Maybe.Nothing, 9))\n print(unwrap_or(Just(1.5), 0.0))\n}");
+    same("fn pick<T: Ord + Copy>(a: T, b: T) -> T { if a < b { b } else { a } }\nfn main() {\n print(pick(1, 2))\n print(pick(2.5, 1.5))\n print(pick(\"a\", \"b\"))\n}");
+}
+
+#[test]
+fn traits_with_static_dispatch() {
+    same("trait Shape {\n fn area(self) -> f64\n fn name(self) -> str { \"shape\" }\n}\nstruct Sq { s: f64 }\nstruct Ci { r: f64 }\nimpl Shape for Sq {\n fn area(self) -> f64 { self.s * self.s }\n fn name(self) -> str { \"square\" }\n}\nimpl Shape for Ci { fn area(self) -> f64 { 3.0 * self.r * self.r } }\nfn describe<T: Shape>(x: T) {\n print(x.name())\n print(x.area())\n}\nfn main() {\n describe(Sq(2.0))\n describe(Ci(1.0))\n}");
+    same("trait Zero { fn zero() -> Self }\nimpl Zero for i64 { fn zero() -> i64 { 0 } }\nimpl Zero for f64 { fn zero() -> f64 { 0.0 } }\nfn z<T: Zero>() -> T { T.zero() }\nfn main() {\n let a: i64 = z()\n let b: f64 = z()\n print(a)\n print(b)\n}");
+}
+
+// ------------------------------------------------------------------ strings, vectors, arrays, slices
+
+#[test]
+fn arrays_and_indexing() {
+    body("let a = [1, 2, 3]\nprint(a)\nprint(a[1])\nlet mut b = [0; 5]\nb[2] = 7\nb[4] += 3\nprint(b)\nprint(b.len)");
+    body("let mut m = [[0; 3]; 2]\nm[1][2] = 5\nprint(m)\nprint(m[1][2])");
+    body("let a = [1, 2, 3]\nlet i = 3\nprint(a[i])");
+    body("let a = [1.5, 2.5]\nlet k = 0 - 1\nprint(a[k as usize])");
+    body("let a = [10, 20, 30, 40]\nlet s = a[1..3]\nprint(s)\nprint(s.len)\nprint(a[..2])\nprint(a[2..])\nprint(a[1..=2])");
+    body("let a = [1, 2, 3]\nlet s = a[2..5]\nprint(s)");
+    body("let a = [1, 2, 3]\nlet s = a[3..1]\nprint(s)");
+}
+
+#[test]
+fn vectors() {
+    body("let mut v = Vec<i64>.new()\nv.push(1)\nv.push(2)\nv.push(3)\nprint(v)\nprint(v.len)\nprint(v[1])\nv[1] = 20\nprint(v)\nmatch v.pop() {\n Some(x) => print(x)\n None => print(\"empty\")\n}\nprint(v.len)\nprint(v.is_empty())");
+    body("let v = vec[1.5, 2.5, 3.0]\nprint(v)\nprint(v[2])\nlet e = Vec<i64>.new()\nprint(e)\nprint(e.is_empty())");
+    body("let mut v = Vec<i64>.new()\nfor i in 0..1000 { v.push(i * i) }\nlet mut t = 0\nfor x in v { t += x }\nprint(t)\nprint(v.len)\nprint(v[999])");
+    body("let v = vec[1, 2, 3]\nprint(v[3])");
+    body("let mut v = vec[3, 1, 2]\nfor x in mut v { x *= 2 }\nprint(v)\nprint(sum(v))\nprint(v.sum())");
+    body("let v = vec[1, 2, 3, 4, 5]\nprint(v[1..4])\nlet w = v[1..4].to_vec()\nprint(w)\nprint(sum(v[..2]))");
+    body("let mut v = Vec<(i64, str)>.new()\nv.push((1, \"a\"))\nv.push((2, \"b\"))\nfor (n, s) in v { print(\"{n}={s}\") }\nprint(v)");
+    body("let mut v = Vec<f64>.new()\nv.push(0.5)\nlet mut w = v\nw.push(1.5)\nprint(w)");
+    body("let a = vec[1, 2]\nlet b = vec[1, 2]\nlet c = vec[1, 3]\nprint(a == b)\nprint(a == c)\nprint(a < c)\nprint([1, 2] == [1, 2])\nassert_eq(a, b)");
+}
+
+#[test]
+fn strings() {
+    body("let mut s = String.new()\ns.push_str(\"hello\")\ns.push_str(\", world\")\nprint(s)\nprint(s.len)\nprint(\"{s}!\")");
+    body("let s = String.from(\"abc\")\nlet t = \"xyz\".to_string()\nprint(s)\nprint(t)\nprint(s == String.from(\"abc\"))\nprint(s == t)\nprint(s < t)");
+    body("let s = \"Hello World\"\nprint(s.lowercase())\nprint(s.uppercase())\nlet words = \"  the quick  brown\\tfox\\n\".split_whitespace()\nprint(words)\nprint(words.len)\nfor w in words { print(w) }");
+    body("let mut parts = Vec<String>.new()\nparts.push(String.from(\"a\"))\nparts.push(\"b\".to_string())\nprint(parts)\nprint(parts.len)\nlet mut total = 0\nfor p in parts { total += p.len }\nprint(total)");
+    body("let s = String.from(\"abc\")\nlet n = s.len\nassert_eq(s, String.from(\"abc\"))\nprint(n)\nassert_eq(String.from(\"a\"), String.from(\"b\"))");
+}
+
+#[test]
+fn ownership_moves_and_drops() {
+    same("fn make() -> Vec<i64> {\n let mut v = Vec<i64>.new()\n v.push(1)\n v.push(2)\n v\n}\nfn total(v: Vec<i64>) -> i64 { sum(v) }\nfn consume(own v: Vec<i64>) -> i64 {\n let mut t = 0\n for x in v { t += x }\n t\n}\nfn main() {\n let v = make()\n print(total(v))\n print(consume(v))\n print(make().len)\n}");
+    same("struct Person { name: String, age: i64 }\nfn describe(p: Person) -> String {\n let mut s = String.new()\n s.push_str(p.name)\n s\n}\nfn main() {\n let p = Person(String.from(\"Ann\"), 30)\n print(describe(p))\n print(p.age)\n let n = p.name\n print(n)\n}");
+    same("fn main() {\n let mut names = Vec<String>.new()\n for i in 0..100 {\n names.push(\"x\".to_string())\n }\n let moved = names\n print(moved.len)\n let mut v2 = Vec<Vec<i64>>.new()\n v2.push(vec[1, 2])\n v2.push(vec[3])\n print(v2)\n print(v2[0].len)\n}");
+    same("fn main() {\n let mut s = String.from(\"a\")\n s = String.from(\"b\")\n s = String.from(\"c\")\n print(s)\n let t = if s.len > 0 { String.from(\"yes\") } else { String.from(\"no\") }\n print(t)\n}");
+    same("enum Msg { Text(String), Num(i64), Pair(String, Vec<i64>) }\nfn show(m: Msg) {\n match m {\n Text(s) => print(s)\n Num(n) => print(n)\n Pair(s, v) => print(\"{s} {v}\")\n }\n}\nfn main() {\n let a = Text(String.from(\"hi\"))\n show(a)\n show(Num(4))\n show(Pair(String.from(\"p\"), vec[1, 2]))\n}");
+    same("fn first(v: Vec<String>) -> Option<String> {\n if v.len == 0 { None } else { Some(v[0].to_string()) }\n}\nfn main() {\n let v = vec[String.from(\"a\"), String.from(\"b\")]\n match first(v) {\n Some(s) => print(s)\n None => print(\"none\")\n }\n}".replace("v[0].to_string()", "String.from(v[0])").as_str());
+}
+
+#[test]
+fn loops_and_early_exits_with_owned_values() {
+    same("fn find(v: Vec<String>, k: str) -> i64 {\n let mut i = 0\n for s in v {\n let t = String.from(s)\n if t == String.from(k) { return i }\n i += 1\n }\n -1\n}\nfn main() {\n let v = vec[String.from(\"a\"), String.from(\"b\"), String.from(\"c\")]\n print(find(v, \"b\"))\n print(find(v, \"z\"))\n}");
+    same("fn main() {\n let mut n = 0\n while n < 5 {\n let s = String.from(\"tmp\")\n n += 1\n if n == 2 { continue }\n if n == 4 { break }\n print(\"{n} {s}\")\n }\n let r = loop {\n let v = vec[1, 2, 3]\n break v\n }\n print(r)\n}");
+    same("fn parse(s: str) -> Result<i64, str> {\n if s.len == 0 { Err(\"empty\") } else { Ok(s.len as i64) }\n}\nfn run(items: Vec<String>) -> Result<i64, str> {\n let mut t = 0\n for it in items {\n let n = parse(it)?\n t += n\n }\n Ok(t)\n}\nfn main() {\n print(match run(vec[String.from(\"ab\"), String.from(\"c\")]) { Ok(n) => n, Err(_) => -1 })\n print(match run(vec[String.from(\"ab\"), String.from(\"\")]) { Ok(n) => n, Err(_) => -1 })\n}".replace("match run(vec[String.from(\"ab\"), String.from(\"c\")]) { Ok(n) => n, Err(_) => -1 }", "match run(vec[String.from(\"ab\"), String.from(\"c\")]) {\n Ok(n) => n\n Err(_) => -1\n }").replace("match run(vec[String.from(\"ab\"), String.from(\"\")]) { Ok(n) => n, Err(_) => -1 }", "match run(vec[String.from(\"ab\"), String.from(\"\")]) {\n Ok(n) => n\n Err(_) => -1\n }").as_str());
+}
+
+#[test]
+fn slices_and_borrowing() {
+    same("fn total(xs: [i64]) -> i64 {\n let mut t = 0\n for x in xs { t += x }\n t\n}\nfn double(xs: mut [i64]) {\n for i in 0..xs.len { xs[i] *= 2 }\n}\nfn main() {\n let mut v = vec[1, 2, 3, 4]\n print(total(v))\n print(total(v[1..3]))\n double(mut v)\n print(v)\n let mut a = [5, 6, 7]\n double(mut a)\n print(a)\n print(total(a))\n double(mut v[2..])\n print(v)\n}");
+    same("fn longest(a: str, b: str) -> str { if a.len >= b.len { a } else { b } }\nfn main() {\n let s = String.from(\"hello\")\n print(longest(s, \"hi\"))\n print(longest(\"a\", \"abc\"))\n}");
+    same("struct Grid { cells: [i64; 4] }\nfn main() {\n let mut g = Grid([0; 4])\n g.cells[2] = 9\n g.cells[0] += 1\n print(g.cells)\n let h = g\n print(h.cells[2])\n}");
+}
+
+#[test]
+fn display_of_user_types() {
+    same("struct P { x: i64, y: i64 }\nimpl Display for P {\n fn fmt(self) -> String {\n let mut s = String.new()\n s.push_str(\"P(\")\n s.push_str(\"x\")\n s.push_str(\")\")\n s\n }\n}\nfn main() {\n let p = P(1, 2)\n print(p)\n print(\"p = {p}\")\n print(vec[P(1, 2), P(3, 4)])\n}");
+}
+
+// ------------------------------------------------------------------ maps, files, programs
+
+#[test]
+fn run_examples_match_their_expected_output() {
+    if !have_cc() {
+        return;
+    }
+    for name in ["primes", "sort", "bank", "collatz", "nbody", "wordcount"] {
+        let src = std::fs::read_to_string(format!("examples/run/{name}.tau")).unwrap();
+        let want = std::fs::read_to_string(format!("examples/run/{name}.expected")).unwrap();
+        let got = same(&src);
+        assert_eq!(got, want, "{name}: output differs from the Python reference");
+    }
+}
+
+#[test]
+fn maps() {
+    same("use std.map.Map\nfn main() {\n let mut m = Map<str, i64>.new()\n m[\"b\"] = 2\n m[\"a\"] = 1\n m[\"b\"] += 5\n m[\"c\"] += 1\n print(m[\"b\"])\n print(m[\"a\"])\n print(m[\"c\"])\n print(m.contains(\"a\"))\n print(m.contains(\"z\"))\n}");
+    same("use std.map.Map\nfn main() {\n let mut m = Map<str, i64>.new()\n m[\"a\"] = 1\n print(m[\"missing\"])\n}");
+    same("use std.map.Map\nfn main() {\n let mut counts = Map<String, usize>.new()\n let text = \"the cat and the dog and the bird\"\n for w in text.split_whitespace() {\n counts[w.uppercase()] += 1\n }\n for (w, n) in counts.top(3) {\n print(\"{w}: {n}\")\n }\n print(counts.top(100).len)\n print(counts.top(0).len)\n}");
+    same("use std.map.Map\nfn main() {\n let mut m = Map<i64, f64>.new()\n for i in 0..50 { m[i % 7] += 0.5 }\n for (k, v) in m.top(7) { print(\"{k} {v}\") }\n}");
+    same("use std.map.Map\nfn main() {\n let mut m = Map<(i64, i64), str>.new()\n m[(1, 2)] = \"x\"\n m[(2, 1)] = \"y\"\n m[(1, 2)] = \"z\"\n print(m[(1, 2)])\n print(m[(2, 1)])\n print(m.contains((3, 3)))\n}");
+    same("use std.map.Map\nfn main() {\n let mut m = Map<str, Vec<i64>>.new()\n m[\"a\"].push(1)\n m[\"a\"].push(2)\n m[\"b\"].push(3)\n print(m[\"a\"])\n print(m[\"b\"].len)\n}");
+    same("use std.map.Map\nfn main() {\n let mut m = Map<String, String>.new()\n m[String.from(\"k\")] = String.from(\"one\")\n m[String.from(\"k\")] = String.from(\"two\")\n print(m[String.from(\"k\")])\n let mut big = Map<i64, i64>.new()\n for i in 0..20000 { big[i] = i * 2 }\n print(big[19999])\n print(big.contains(20000))\n}");
+}
+
+#[test]
+fn files_and_main_results() {
+    same("use std.fs\nfn main() -> Result<(), IoError> {\n let path = \"/tmp/tau-native-test.txt\"\n fs.write(path, \"alpha\\nbeta\\n\")?\n print(fs.exists(path))\n let t = fs.read(path)?\n print(t.len)\n print(t)\n print(fs.exists(\"/tmp/tau-no-such-file\"))\n Ok(())\n}");
+    if !have_cc() {
+        return;
+    }
+    // main returning Err: the message goes to stderr, exit status 1, stdout is kept
+    let src = "use std.fs\nfn main() -> Result<(), IoError> {\n print(\"before\")\n let t = fs.read(\"/tmp/tau-no-such-file\")?\n print(t)\n Ok(())\n}";
+    let got = native::run_captured(src).unwrap();
+    assert_eq!(got.stdout, "before\n");
+    assert_eq!(got.code, 1);
+    assert_eq!(got.stderr, "error: io error: No such file or directory (os error 2)\n");
+    let cap = Capture(Arc::new(Mutex::new(Vec::new())));
+    let r = tau::run_source(src, Box::new(cap.clone())).unwrap();
+    match r.outcome.unwrap() {
+        Outcome::Error(m) => assert_eq!(m, "io error: No such file or directory (os error 2)"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn clones_of_owned_values() {
+    same("fn main() {\n let v = vec[String.from(\"a\"), String.from(\"bb\")]\n let w = v[0..2].to_vec()\n print(w)\n let u = v[1..2].to_vec()\n print(u)\n print(v)\n}");
+}
+
+#[test]
+fn computed_values_are_evaluated_exactly_once() {
+    same("fn mk(tag: str) -> Vec<i64> {\n print(tag)\n vec[1, 2, 3]\n}\nfn name() -> String {\n print(\"name\")\n String.from(\"abc\")\n}\nfn main() {\n for x in mk(\"loop\") { print(x) }\n print(sum(mk(\"sum\")))\n print(mk(\"len\").len)\n print(mk(\"idx\")[1])\n print(mk(\"slice\")[1..3])\n print(name().len)\n print(name().uppercase())\n let n = name()\n print(n)\n}");
 }

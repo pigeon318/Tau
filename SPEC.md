@@ -671,7 +671,7 @@ variable; `Vec`, `String`, maps and tensors are moved, never copied. Arguments f
 are references to the caller's variable, field or element, so assigning to a `mut` parameter
 replaces the caller's value. `for x in mut v` binds `x` to a reference to each element.
 
-**Maps.** `m[k]` on a missing key panics, except that `m[k] += x` starts a missing entry at zero.
+**Maps.** Reading `m[k]` on a missing key panics. `m[k] = v` adds the entry or overwrites it, and `m[k] += x` (or any other compound assignment) starts a missing entry at zero. Entries keep their insertion order.
 `top(n)` returns the `n` entries with the largest values, ties ordered by key.
 
 **Tensors** are stored column-major. `random` uses a fixed seed, so runs are reproducible.
