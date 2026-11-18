@@ -1,0 +1,29 @@
+fn shout(s: str) -> String {
+    let mut r = s.uppercase()
+    r.push_str("!")
+    r
+}
+
+fn main() {
+    let name = "tau"
+    print("hello, {name}")
+    print(shout(name))
+    let mut s = String.new()
+    for i in 0..5 {
+        s.push_str("ab")
+        if i % 2 == 0 { s.push_str("-") }
+    }
+    print(s)
+    print(s.len)
+    let t = (1, "two", 3.5, 'c', true)
+    print(t)
+    print("{t}")
+    print('é')
+    print("tab\there")
+    print(0.1 + 0.2)
+    print(1e21)
+    print(5e-324)
+    let big: u64 = 18446744073709551615
+    print(big)
+    print(big + 1)
+}

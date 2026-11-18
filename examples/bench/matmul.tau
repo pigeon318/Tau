@@ -1,0 +1,11 @@
+// Tensors: random matrices, products and a determinant.
+use math.linalg
+
+fn main() {
+    let a = Tensor<f64, [_, _]>.random(400, 400)
+    let b = Tensor<f64, [_, _]>.random(400, 400)
+    let mut c = a @ b
+    for i in 0..3 { c = c @ b * 0.001 }
+    print("trace = {trace(c)}")
+    print("det sign = {linalg.det(a) > 0.0}")
+}

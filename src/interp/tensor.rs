@@ -41,7 +41,10 @@ impl<'a> Interp<'a> {
             }
             out
         };
-        let n: usize = sizes.iter().product();
+        let n = match sizes.iter().try_fold(1usize, |a, &d| a.checked_mul(d)) {
+            Some(n) if n <= crate::types::MAX_TENSOR_ELEMS => n,
+            _ => return panic(format!("a tensor can have at most {} elements", crate::types::MAX_TENSOR_ELEMS)),
+        };
         let single = matches!(*elem, Ty::Float(FloatTy::F32) | Ty::Complex(FloatTy::F32));
         let complex = matches!(*elem, Ty::Complex(_));
         let next = |this: &mut Self| match kind {
@@ -179,6 +182,9 @@ impl<'a> Interp<'a> {
                 let (k2, n) = if b.dims.len() == 2 { (b.dims[0], b.dims[1]) } else { (b.dims[0], 1) };
                 if k != k2 {
                     return panic(format!("shape mismatch for `@`: {:?} and {:?}", a.dims, b.dims));
+                }
+                if m.checked_mul(n).map_or(true, |t| t > crate::types::MAX_TENSOR_ELEMS) {
+                    return panic(format!("a tensor can have at most {} elements", crate::types::MAX_TENSOR_ELEMS));
                 }
                 let mut c = vec![0.0f64; m * n];
                 for j in 0..n {

@@ -1,0 +1,46 @@
+struct Account { id: i64, balance: i64, frozen: bool }
+enum Tx { Deposit(i64), Withdraw(i64), Freeze, Transfer(i64, i64) }
+enum Fail { Short(i64), Frozen, Unknown }
+
+fn apply(a: mut Account, t: Tx) -> Result<i64, Fail> {
+    match t {
+        Deposit(n) => {
+            a.balance += n
+            Ok(a.balance)
+        }
+        Withdraw(n) => {
+            if a.frozen { return Err(Frozen) }
+            if a.balance < n { return Err(Short(n - a.balance)) }
+            a.balance -= n
+            Ok(a.balance)
+        }
+        Freeze => {
+            a.frozen = true
+            Ok(a.balance)
+        }
+        Transfer(n, k) => {
+            if n > 100 { Err(Unknown) } else { Ok(a.balance - n * k) }
+        }
+    }
+}
+
+fn show(r: Result<i64, Fail>) {
+    match r {
+        Ok(v) => print("ok {v}")
+        Err(Short(s)) => print("short by {s}")
+        Err(Frozen) => print("frozen")
+        Err(Unknown) => print("unknown")
+    }
+}
+
+fn main() {
+    let mut a = Account(1, 100, false)
+    show(apply(mut a, Deposit(50)))
+    show(apply(mut a, Withdraw(30)))
+    show(apply(mut a, Withdraw(500)))
+    show(apply(mut a, Transfer(5, 3)))
+    show(apply(mut a, Transfer(500, 3)))
+    show(apply(mut a, Freeze))
+    show(apply(mut a, Withdraw(1)))
+    print("{a.balance} {a.frozen}")
+}

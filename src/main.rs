@@ -12,14 +12,34 @@ USAGE:
     tau run <file>             check a program and run it (natively when possible)
     tau run <file> --native    ... natively only: fail if the program cannot be compiled to C
     tau run <file> --interp    ... with the interpreter only
+    tau run <file> -v          ... and say why a program ran on the interpreter instead
     tau build <file>           compile a program to a native executable (cached) and print its path
     tau build <file> --emit-c  print the generated C instead
     tau test <file> [filter]   run the #[test] functions (those whose name contains `filter`)
     tau check <file> --types   ... and list the inferred type of every binding
+    tau clean                  delete the cache of compiled programs
+    tau --version              show the version and which C compiler the native backend would use
+
+ENVIRONMENT:
+    TAU_THREADS=n   threads for parallel code (default: all cores; results never depend on it)
+    TAU_CC=cc       the C compiler to use (default: clang, gcc, cc)
+    TAU_CACHE=dir   where compiled programs are cached (default: ~/.cache/tau)
 ";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("clean") => {
+            println!("removed {} cached program(s)", tau::native::clean_cache());
+            return ExitCode::SUCCESS;
+        }
+        Some("--version") | Some("version") => {
+            let cc = tau::native::find_cc();
+            println!("tau {} (native backend: {})", env!("CARGO_PKG_VERSION"), cc.as_deref().unwrap_or("no C compiler found, interpreter only"));
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
     let (cmd, file) = match (args.get(0), args.get(1)) {
         (Some(c), Some(f)) => (c.as_str(), f.as_str()),
         _ => {
@@ -129,6 +149,10 @@ fn main() -> ExitCode {
                     }
                     run_interpreted(&src, file)
                 }
+                Err(tau::native::NativeError::NoCompiler) if !forced => {
+                    eprintln!("note: no C compiler found (install clang or gcc for native speed); running with the interpreter");
+                    run_interpreted(&src, file)
+                }
                 Err(e) => report_native_error(&e, &src, file),
             }
         }
@@ -218,6 +242,7 @@ fn report_native_error(e: &tau::native::NativeError, src: &str, file: &str) -> E
             eprintln!("{} error(s); the program was not built", ds.len());
         }
         Unsupported(why) => eprintln!("error: {why}\nhint: `tau run --interp` runs it with the interpreter"),
+        NoCompiler => eprintln!("error: no C compiler found: install clang or gcc (or set TAU_CC) to build native programs"),
         Other(m) => eprintln!("error: {m}"),
     }
     ExitCode::from(1)

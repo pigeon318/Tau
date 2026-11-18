@@ -25,7 +25,9 @@ pub enum NativeError {
     Rejected(Vec<Diagnostic>),
     /// The program uses something the native backend cannot compile yet.
     Unsupported(String),
-    /// Some other problem (no `main`, no C compiler, the C compiler failed).
+    /// No C compiler is installed (the interpreter can still run the program).
+    NoCompiler,
+    /// Some other problem (no `main`, the C compiler failed).
     Other(String),
 }
 
@@ -84,9 +86,42 @@ fn cache_dir() -> PathBuf {
 ///  * `-fwrapv`: nothing in generated code relies on signed overflow being undefined.
 const CFLAGS: &[&str] = &["-O2", "-std=gnu11", "-ffp-contract=off", "-fno-optimize-sibling-calls", "-fwrapv", "-w"];
 
+/// Keep the cache from growing without bound: when it holds more than `max` programs, remove the
+/// least recently used until `keep` remain.
+pub fn prune_cache(dir: &Path, max: usize, keep: usize) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("tau-") && e.path().extension().is_none())
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    if entries.len() <= max {
+        return;
+    }
+    entries.sort();
+    let excess = entries.len() - keep;
+    for (_, p) in entries.into_iter().take(excess) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// Delete every cached program; returns how many were removed.
+pub fn clean_cache() -> usize {
+    let dir = cache_dir();
+    let mut n = 0;
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.filter_map(|e| e.ok()) {
+            if e.file_name().to_string_lossy().starts_with("tau-") && std::fs::remove_file(e.path()).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// Compile C source to an executable (cached by content); returns its path.
 pub fn compile_c(c_src: &str) -> Result<PathBuf, NativeError> {
-    let cc = find_cc().ok_or_else(|| NativeError::plain("no C compiler found: install clang or gcc, or set TAU_CC"))?;
+    let cc = find_cc().ok_or(NativeError::NoCompiler)?;
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).map_err(|e| NativeError::plain(format!("cannot create {}: {e}", dir.display())))?;
     // TAU_SANITIZE=1 builds with UBSan and aborts on the first report (used by the test suite's
@@ -103,8 +138,13 @@ pub fn compile_c(c_src: &str) -> Result<PathBuf, NativeError> {
     let key = format!("{:016x}", h.finish());
     let exe = dir.join(format!("tau-{key}"));
     if exe.exists() {
+        // remember that it is in use, so pruning removes the ones nobody runs
+        if let Ok(f) = std::fs::OpenOptions::new().append(true).open(&exe) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
         return Ok(exe);
     }
+    prune_cache(&dir, 200, 100);
     let c_path = dir.join(format!("tau-{key}-{}.c", std::process::id()));
     std::fs::write(&c_path, c_src).map_err(|e| NativeError::plain(format!("cannot write {}: {e}", c_path.display())))?;
     let tmp_exe = dir.join(format!("tau-{key}-{}.tmp", std::process::id()));
@@ -116,7 +156,7 @@ pub fn compile_c(c_src: &str) -> Result<PathBuf, NativeError> {
         .arg(&tmp_exe)
         .args(["-lm", "-lpthread"])
         .output()
-        .map_err(|e| NativeError::plain(format!("cannot run `{cc}`: {e}")))?;
+        .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { NativeError::NoCompiler } else { NativeError::plain(format!("cannot run `{cc}`: {e}")) })?;
     let _ = std::fs::remove_file(&c_path);
     if !out.status.success() {
         let _ = std::fs::remove_file(&tmp_exe);

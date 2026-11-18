@@ -1,0 +1,23 @@
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
+fn twice(f: fn(i64) -> i64, x: i64) -> i64 { f(f(x)) }
+fn make_adder(n: i64) -> fn(i64) -> i64 { |x: i64| x + n }
+
+fn main() {
+    let k = 10
+    let add_k = |x: i64| x + k
+    print(apply(add_k, 5))
+    print(twice(|x: i64| x * 3, 2))
+    let add5 = make_adder(5)
+    print(add5(100))
+    let mut count = 0
+    let mut bump = || count += 2
+    bump()
+    bump()
+    bump()
+    print(count)
+    let names = vec[String.from("ann"), String.from("bob"), String.from("cy")]
+    let lens = names.map(|s| s.len)
+    print(lens)
+    let long = names.filter(|s| s.len > 2)
+    print(long)
+}

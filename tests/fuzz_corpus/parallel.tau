@@ -1,0 +1,27 @@
+fn work(x: i64) -> i64 { x * x % 101 }
+
+fn main() {
+    let n = 5000
+    let mut out = Vec<i64>.new()
+    for i in 0..n { out.push(0) }
+    par for i in 0..n {
+        out[i] = work(i as i64)
+    }
+    print(par sum(i in 0..n) out[i])
+    print(par max(i in 0..n) out[i])
+    print(par min(i in 1..n) out[i])
+    let a = spawn { par sum(i in 0..1000) i * 2 }
+    let b = spawn {
+        print("task")
+        42
+    }
+    match a.join() {
+        Ok(v) => print(v)
+        Err(_) => print("failed")
+    }
+    match b.join() {
+        Ok(v) => print(v)
+        Err(_) => print("failed")
+    }
+    print(par sum(i in 0..10000) 1.0 / (i as f64 + 1.0))
+}

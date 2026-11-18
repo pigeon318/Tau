@@ -176,6 +176,9 @@ impl<'a> Interp<'a> {
                     Value::Int(n) if n >= 0 => n as usize,
                     _ => return panic("an array length must be a non-negative integer"),
                 };
+                if n as u128 > crate::types::MAX_ARRAY_LEN {
+                    return panic(format!("an array can have at most {} elements, not {n}", crate::types::MAX_ARRAY_LEN));
+                }
                 Ok(Value::Array(Value::slot((0..n).map(|_| v.copy_shell()).collect())))
             }
             ExprKind::Unary { op, expr } => self.unary(e, *op, expr, f),

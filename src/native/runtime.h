@@ -421,8 +421,12 @@ static tau_tensor tau_t_new(int rank, const size_t *dims, int cplx, int single) 
     memset(&t, 0, sizeof t);
     if (rank > 8) tau_panic_cstr("tensors have at most 8 dimensions");
     t.rank = (uint8_t)rank; t.cplx = (uint8_t)cplx; t.single = (uint8_t)single;
-    for (int i = 0; i < rank; i++) t.dims[i] = dims[i];
-    size_t n = tau_t_len(&t) * (cplx ? 2 : 1);
+    size_t count = 1;
+    for (int i = 0; i < rank; i++) {
+        t.dims[i] = dims[i];
+        if (__builtin_mul_overflow(count, dims[i], &count) || count > ((size_t)1 << 28)) tau_panic_cstr("a tensor can have at most 268435456 elements");
+    }
+    size_t n = count * (cplx ? 2 : 1);
     t.data = (double *)calloc(n ? n : 1, sizeof(double));
     if (!t.data) tau_panic_cstr("out of memory");
     return t;
@@ -704,7 +708,8 @@ static tau_cpx *tau_fft_pow2(const tau_cpx *x, size_t n, double sign) {
     tau_cpx *e = tau_fft_pow2(even, h, sign), *o = tau_fft_pow2(odd, h, sign);
     for (size_t k = 0; k < h; k++) {
         double ang = sign * 2.0 * M_PI * (double)k / (double)n;
-        double sn = sin(ang), cs = cos(ang);
+        double sn, cs;
+        sincos(ang, &sn, &cs);
         tau_cpx t = { o[k].re * cs - o[k].im * sn, o[k].re * sn + o[k].im * cs };
         out[k] = (tau_cpx){ e[k].re + t.re, e[k].im + t.im };
         out[k + h] = (tau_cpx){ e[k].re - t.re, e[k].im - t.im };
@@ -728,7 +733,8 @@ static tau_cpx *tau_dft(const tau_cpx *x, size_t n, int inverse) {
             double re = 0.0, im = 0.0;
             for (size_t j = 0; j < n; j++) {
                 double ang = sign * 2.0 * M_PI * (double)((k * j) % n) / (double)n;
-                double sn = sin(ang), cs = cos(ang);
+                double sn, cs;
+                sincos(ang, &sn, &cs);
                 re += x[j].re * cs - x[j].im * sn;
                 im += x[j].re * sn + x[j].im * cs;
             }

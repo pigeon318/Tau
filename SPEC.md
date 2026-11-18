@@ -655,10 +655,12 @@ local variable or an `own` parameter.
 
 ---
 
-## 14d. Running programs (the interpreter)
+## 14d. Running programs (the interpreter and the native backend)
 
-`tau run file.tau` checks a program (types, then borrowing) and, only if it is accepted, runs it.
-Errors stop it before anything executes. Exit codes: `0` normal, `1` rejected or `main` returned an
+`tau run file.tau` checks a program (types, then borrowing) and, only if it is accepted, runs it: natively
+(translated to C and built with the system `clang` or `gcc`, cached by content) when it can, otherwise
+on the interpreter, which is the reference implementation. `--native` and `--interp` force one; both
+must print exactly the same thing, and the test suite checks that. Errors stop it before anything executes. Exit codes: `0` normal, `1` rejected or `main` returned an
 `Err`, `101` panic.
 
 **Numbers.** Each integer type has its own range. Arithmetic that leaves the range **panics**
@@ -686,14 +688,23 @@ and combine the block results in block order. This is the definition of the resu
 on how many threads run it: a float `par sum` prints the same digits on any machine, and differs from a
 plain left-to-right loop in the last digits for long sums.
 
-**Concurrency.** `spawn`, `par for`, `par sum`... and `on` run **one after another on a single
-thread**: results are the same as a parallel run would give for programs the borrow checker accepts,
-but nothing is faster. A panic inside a task is reported by `join()` instead of ending the program.
-There is no cluster yet, so `on` runs locally.
+**Concurrency.** `par for`, `par sum`... and `spawn` run on a pool of threads in a native build (`TAU_THREADS=n`
+sets how many; the default is every core) and **one after another on a single thread** in the interpreter.
+A program means the same thing either way, whatever the thread count, because:
+- reductions have the fixed order above;
+- what a parallel iteration or a task prints is kept apart and shown in iteration order (a `spawn`ed task's
+  output appears when the task is **joined**, or when its handle is dropped);
+- if several iterations panic, the one a sequential run would reach first is reported, after the output
+  that precedes it.
+
+A panic inside a task is reported by `join()` (as `Err(TaskPanicked)`) instead of ending the program. A
+parallel body cannot `return`, use `?` or `break` out of its loop. There is no cluster yet, so `on` runs
+locally (on the interpreter).
 
 **Limits.** Deep recursion ends in a "stack overflow" panic rather than a crash. The interpreter is a
 tree walker: roughly 0.5 microseconds per simple expression, so about two million loop iterations per
-second. It exists to run and test programs; the native backend is where speed will come from.
+second. It exists as the reference and for programs the native backend cannot build; the native backend runs
+typically 50 to 100 times faster (see `examples/bench/`).
 
 ---
 
