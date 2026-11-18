@@ -352,7 +352,7 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
 | **M0** | Prerequisites (§14, items 1 to 3) | **done**: interpreter and checker changes, with tests |
 | **M1** | Scalars, tuples, functions, control flow, checked arithmetic, panics, `print` of scalars/strings/tuples | **done**: `hello`, `fizzbuzz`, `collatz`, 36 differential tests (`tests/native.rs`) including a 10,000-value float-printing fuzz |
 | **M2** | Structs, enums, `Option`/`Result`/`?`, `match` on them, arrays, `Vec`, slices, `String`, `str`, `Map`, `std.fs`/`std.io`, `main` returning `Result`, ownership and drops; generics and trait dispatch came along (see below) | **done**: every program in `examples/run/` except `integrate` (closures) runs natively and matches its Python reference; 55 differential tests, valgrind- and UBSan-clean |
-| **M3** | Generics, traits, default methods, operators, `Display`/`Eq`/`Ord`, closures, `fn` values (incl. §14 items 4 and 6) | `nbody`, `traits`, `borrowing`, closure tests |
+| **M3** | Closures and `fn` values (generics, traits and operators already came with M2) | **done**: closure tests, `map`/`filter`; `integrate` still waits for `par sum` (M5) |
 | **M4** | Tensors, maths library, `linalg`, FFT | `tensors`, matrix and FFT tests |
 | **M5** | Thread pool, `par for`/`par sum`/`par_chunks`, `spawn`/`join`, task panics | `parallel`, `integrate`; ≥3.5× on 4 cores |
 | **M6** | `tau build`/`run`/`test` integration, caching, error messages, docs, benchmark suite | all of the above, native by default |
@@ -414,6 +414,22 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
   all of Unicode) and `split_whitespace` splits on ASCII whitespace.
 - **Bugs found on the way, fixed**: `mut v[2..]` (a mutable view of part of a vector) failed in the
   interpreter; `str` and slices were not `Copy` in the checker although the spec says they are.
+
+### What M3 changed in the plan
+
+- **Closures** are a heap-allocated environment plus a C function (`fnv_*` = `{env, call, drop}`), the same
+  shape for closures, function items used as values (a trampoline) and constructors used as functions
+  (`v.map(Some)`). The environment follows the borrow checker's capture classification, now exported
+  (`borrowck::capture_modes`): a *shared* capture is copied (nothing can change it while the closure lives),
+  a *mutable* capture is a pointer to the variable, and a *moved* capture is owned by the environment and
+  dropped with it. A closure owns its environment, so function types need dropping like `Vec`.
+- **A hole in the borrow checker, found by the first closure test.** A view of a *temporary*
+  (`let s = first(vec[1, 2, 3])`) or of a variable from an inner block was accepted; the interpreter
+  hid it and native code read freed memory. The checker now gives a computed value that owns memory a hidden
+  local that dies at the end of its statement, and reports a borrow of anything that dies while the borrow is
+  still used later (`does not live long enough`). No existing program was affected. A consequence worth
+  knowing: a closure that captures a loop variable cannot be stored beyond the iteration (Tau has no `move`
+  closures yet).
 
 M1 to M3 are the bulk of the work; M4 and M5 are mostly runtime code; M6 is polish.
 

@@ -624,6 +624,8 @@ body cannot modify (resp. touch) `v`. `for i in 0..v.len` borrows nothing.
 **Closures** capture by the least they need: by move if the body moves the variable, by mutable
 borrow if it changes it, otherwise by shared borrow. The closure holds those loans while it is used.
 
+**Views and scope.** A view cannot outlive the value it views. A view of a temporary (`let s = first(vec[1, 2, 3])`, where `first` returns a view) is an error, because the temporary is dropped at the end of the statement; so is a view of a variable declared in an inner block that is still used after the block. Use it within the statement, or copy the data (`to_vec`, `String.from`).
+
 **Returning borrows.** A function may only return a view of its own borrowed parameters, never of a
 local variable or an `own` parameter.
 

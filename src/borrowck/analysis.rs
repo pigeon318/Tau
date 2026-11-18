@@ -74,6 +74,7 @@ fn uses_defs(mir: &Mir, ev: &Ev) -> (Vec<LocalId>, Vec<LocalId>) {
         Ev::Call { groups, .. } => (groups.iter().flat_map(|g| held(g)).collect(), vec![]),
         Ev::Decl { local, .. } => (vec![], vec![*local]),
         Ev::DropUse { local } | Ev::Touch { local } => (vec![*local], vec![]),
+        Ev::Dead { .. } => (vec![], vec![]),
         Ev::Escape { srcs, .. } => (held(srcs), vec![]),
     }
 }
@@ -324,6 +325,25 @@ impl<'m> Cx<'m> {
                 }
             }
             Ev::DropUse { .. } | Ev::Touch { .. } => {}
+            Ev::Dead { local, span } => {
+                if report {
+                    for (l, h) in self.active(st, live_after) {
+                        let loan = &self.mir.loans[l];
+                        if loan.place.local != *local || h == *local {
+                            continue;
+                        }
+                        let name = self.name(&loan.place);
+                        let what = if self.mir.locals[*local].name.is_empty() { "the temporary" } else { "this variable" };
+                        let (ns, nm) = self.conflict_note(loan, Some(h));
+                        self.error(
+                            "dead",
+                            Diagnostic::new(format!("`{name}` does not live long enough: {what} is dropped here, but a borrow of it is still used later"), *span)
+                                .with_note(ns, nm)
+                                .with_hint("keep the value in a variable that lives long enough, or copy the data (`to_vec`, `String.from`) instead of keeping a view"),
+                        );
+                    }
+                }
+            }
             Ev::Escape { srcs, span } => {
                 if report {
                     for l in self.resolve(st, srcs) {

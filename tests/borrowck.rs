@@ -518,3 +518,21 @@ fn par_for_cannot_read_elements_other_iterations_write() {
     ok("fn f(a: [f64], out: mut [f64]) {\n par for i in 1..out.len {\n out[i] = a[i - 1] + a[i]\n }\n}");
     ok("fn f(a: [f64], out: mut [f64]) {\n par for i in 0..out.len {\n let mut t = 0.0\n for j in 0..a.len { t += a[j] }\n out[i] = t\n }\n}");
 }
+
+// ------------------------------------------------------------------ views must not outlive their data
+
+#[test]
+fn a_view_of_a_temporary_cannot_outlive_the_statement() {
+    err("fn first(v: Vec<i64>) -> [i64] { v[0..1] }\nfn main() {\n let s = first(vec[1, 2, 3])\n print(s)\n}", "does not live long enough");
+    err("fn main() {\n let w = \"a b\".to_string().split_whitespace()\n print(w)\n}", "does not live long enough");
+    // used within the statement, or only copied out, it is fine
+    ok("fn first(v: Vec<i64>) -> [i64] { v[0..1] }\nfn main() {\n print(first(vec[1, 2, 3]))\n let n = first(vec[4, 5]).len\n print(n)\n let c = first(vec[7, 8]).to_vec()\n print(c)\n}");
+}
+
+#[test]
+fn a_view_of_an_inner_variable_cannot_outlive_its_block() {
+    err_m("let mut s = vec[0]\nlet t = [0]\nlet mut v2 = [t[0..1]]\n{\n let v = vec[1, 2, 3]\n v2[0] = v[0..1]\n}\nprint(v2)", "does not live long enough");
+    err_m("let r = {\n let v = vec[1, 2, 3]\n v[0..2]\n}\nprint(r)", "does not live long enough");
+    ok_m("let r = {\n let v = vec[1, 2, 3]\n v[0..2].to_vec()\n}\nprint(r)");
+    ok_m("let n = {\n let v = vec[1, 2, 3]\n v.len\n}\nprint(n)");
+}
