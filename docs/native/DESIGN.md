@@ -1,8 +1,7 @@
 # Tau native backend: design proposal
 
-**Status:** design approved (decisions in §19). Milestone 0 (prerequisites, §14) and **milestone 1**
-(scalars, tuples, strings, functions, control flow, checked arithmetic, panics, `print`) are done; see §17
-for what M1 turned out to need. The measurement spikes are in [`spikes/`](spikes/).
+**Status:** implemented (milestones 0 to 6, §17), and merged. Differences between this proposal and what was
+built are recorded under each milestone in §17. The measurement spikes are in [`spikes/`](spikes/).
 
 **Summary.** Compile Tau to **C**, then let the system C compiler (`clang`, else `gcc`) produce the
 executable. Between the checked AST and the C text sits a small monomorphic, explicitly-dropped IR.
@@ -354,8 +353,8 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
 | **M2** | Structs, enums, `Option`/`Result`/`?`, `match` on them, arrays, `Vec`, slices, `String`, `str`, `Map`, `std.fs`/`std.io`, `main` returning `Result`, ownership and drops; generics and trait dispatch came along (see below) | **done**: every program in `examples/run/` except `integrate` (closures) runs natively and matches its Python reference; 55 differential tests, valgrind- and UBSan-clean |
 | **M3** | Closures and `fn` values (generics, traits and operators already came with M2) | **done**: closure tests, `map`/`filter`; `integrate` still waits for `par sum` (M5) |
 | **M4** | Tensors, complex numbers, `linalg`, FFT | **done** (f64/c128 throughout, f32 tensors for the basic operations): 7 differential tests that match the interpreter bit for bit, valgrind- and UBSan-clean |
-| **M5** | Thread pool, `par for`/`par sum`/`par_chunks`, `spawn`/`join`, task panics | `parallel`, `integrate`; ≥3.5× on 4 cores |
-| **M6** | `tau build`/`run`/`test` integration, caching, error messages, docs, benchmark suite | all of the above, native by default |
+| **M5** | Thread pool, `par for`/`par sum`/`par_chunks`, `spawn`/`join`, task panics | **done**: `integrate` runs natively and matches its reference; 5 parallel tests agree with the interpreter on 1, 2 and 8 threads; ThreadSanitizer-clean |
+| **M6** | `tau build`/`run`/`test` integration, caching, error messages, docs, benchmark suite | **done**: native by default with fallback (no compiler, or an unsupported construct), cache pruning and `tau clean`, differential mutation fuzzing, benchmark programs. `tau test` still runs on the interpreter |
 
 ### What M1 changed in the plan
 
@@ -447,6 +446,45 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
 - **Speed**: tensor kernels are already compiled Rust in the interpreter, so a 300x300 `@`, `eig` and `det`
   take 0.30 s natively against 0.47 s interpreted. The gain is in the code around them, and later in
   threading (M5).
+
+### What M5 changed in the plan
+
+- **One queue of jobs, no waiting on a free worker.** Workers take jobs from a single queue. A parallel region
+  posts helper jobs and the posting thread helps with the blocks itself; a task that is joined before any
+  worker has started it simply runs on the joining thread. So nothing can deadlock, regions nest freely (a
+  `par sum` inside a `par for`, or inside a task), and one core still works. `TAU_THREADS=n` sets the count.
+- **Results never depend on the thread count.** Reductions are cut into fixed blocks of 4096 items, each block
+  is reduced in order, and the block results are combined in block order (the definition the interpreter
+  already used). Tests run every program with 1, 2 and 8 threads and require identical output.
+- **Output and panics follow the sequential order.** Inside a block or task, `print` goes to that block's own
+  buffer; the buffers are appended in block order when the region ends. A panic in a block jumps back to the
+  block runner and is recorded; the region reports the *earliest* panicking block after the blocks before it
+  have printed, exactly what a sequential run would show.
+- **A language decision**: a task's output appears when the task is **joined** (a task nobody joins prints when
+  its handle is dropped natively, at the end of the program in the interpreter). The interpreter was changed
+  to match, since it used to print at `spawn`.
+- **Limits (reported as unsupported, so the program runs on the interpreter instead)**: `return`, `?` or
+  `break` inside a parallel body; `random` or file/terminal input/output written directly in a parallel body
+  (their order would depend on the threads; the check does not look inside functions the body calls); `on`
+  blocks; parallel `min`/`max` of anything but numbers, `bool` and `char`.
+- **Checks**: `TAU_CC=gcc TAU_SANITIZE=thread cargo test --test native -- parallel nested tasks` runs the
+  parallel tests under ThreadSanitizer.
+
+### What M6 added
+
+- **Fallbacks**: no C compiler (or `TAU_CC` pointing nowhere) gives a one-line note and the interpreter;
+  a construct the native backend cannot compile falls back silently (`-v` says why, `--native` makes it an
+  error).
+- **Cache**: programs are cached by a hash of the generated C, the compiler and its flags; the cache is
+  pruned (least recently used first) above 200 entries; `tau clean` empties it.
+- **Differential mutation fuzzing** (`tests/native_fuzz.rs`, corpus in `tests/fuzz_corpus/`): numbers and
+  operators in the corpus programs are mutated, and every mutant that still passes the checkers runs on both
+  backends, which must agree on output, panic and message. `TAU_FUZZ_N` and `TAU_FUZZ_SEED` scale it.
+- **Benchmarks** (`examples/bench/`, `tests/native_bench.rs`, ignored by default): native is 170 to 200 times
+  faster on scalar, struct, array and parallel code, 7 times on a string- and map-heavy program, and level on
+  tensor kernels (compiled code in both).
+- **Not done**: `tau test` on the native backend (tests are small; the interpreter is fine), `on` blocks and
+  clusters, platforms other than Linux (the runtime uses POSIX threads and signals).
 
 M1 to M3 are the bulk of the work; M4 and M5 are mostly runtime code; M6 is polish.
 

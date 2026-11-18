@@ -333,8 +333,8 @@ fn fizzbuzz_example() {
 #[test]
 fn unsupported_programs_say_so_instead_of_miscompiling() {
     for src in [
-        "fn main() { let s = par sum(i in 0..10) i\n print(s) }",
-        "fn main() { let h = spawn { 1 + 1 }\n print(h.join().is_ok()) }".replace("print(h.join().is_ok())", "let r = h.join()").as_str(),
+        "fn f(v: Vec<i64>) -> i64 {\n par for i in 0..4 {\n if i == 2 { return 1 }\n }\n 0\n}\nfn main() { print(f(vec[1])) }",
+        "fn main() {\n let mut t = Tensor<f64, [4]>.zeros()\n par for i in 0..4 {\n let r = Tensor<f64, [2]>.random()\n t[i] = r[0]\n }\n}",
         "use math.linalg\nfn main() { let m = Tensor<f32, [2, 2]>.ones()\n print(linalg.det(m)) }",
         "fn main() { let a = Tensor<c128, [2]>.ones()\n print(a * 2.0) }",
     ] {
@@ -679,6 +679,13 @@ fn linear_algebra() {
 }
 
 #[test]
+fn huge_tensors_panic_the_same_way() {
+    same("fn main() {\n let a = Tensor<f64, [2147483647]>.ones()\n print(a.len)\n}");
+    same("fn main() {\n let n = 100000\n let a = Tensor<f64, [_, _]>.zeros(n, n)\n print(a.len)\n}");
+    same("fn main() {\n let n = 100000\n let a = Tensor<f64, [_, _]>.ones(n, 1)\n let b = Tensor<f64, [_, _]>.ones(1, n)\n print((a @ b).len)\n}");
+}
+
+#[test]
 fn fft_and_complex_tensors() {
     same("use math.fft\nfn main() {\n let mut x = Tensor<f64, [4]>.zeros()\n x[0] = 1.0\n let sp = fft.fft(x)\n print(sp)\n print(fft.ifft(sp))\n}");
     same("use math.fft\nfn main() {\n let x = Tensor<f64, [_]>.random(16)\n let sp = fft.fft(x)\n print(sp)\n print(fft.ifft(sp))\n let y = Tensor<f64, [_]>.random(12)\n print(fft.fft(y))\n let z = Tensor<f64, [_]>.random(7)\n print(fft.ifft(fft.fft(z)))\n let one = Tensor<f64, [_]>.random(1)\n print(fft.fft(one))\n let none = Tensor<f64, [_]>.zeros(0)\n print(fft.fft(none))\n}");
@@ -691,4 +698,67 @@ fn tensors_are_owned_values() {
     same("fn scale(t: mut Tensor<f64, [2, 2]>, k: f64) {\n for i in 0..2 {\n for j in 0..2 { t[i, j] *= k }\n }\n}\nfn total(t: Tensor<f64, [2, 2]>) -> f64 { t[0, 0] + t[0, 1] + t[1, 0] + t[1, 1] }\nfn make() -> Tensor<f64, [2, 2]> {\n let mut m = Tensor<f64, [2, 2]>.ones()\n m[1, 1] = 5.0\n m\n}\nfn main() {\n let mut a = make()\n scale(mut a, 2.0)\n print(a)\n print(total(a))\n let b = a\n print(b)\n print(make().len)\n}");
     same("struct Body { pos: Tensor<f64, [3]>, mass: f64 }\nfn main() {\n let mut b = Body(Tensor<f64, [3]>.zeros(), 2.0)\n b.pos[1] = 4.0\n b.pos[2] += 1.5\n print(b.pos)\n let mut ts = Vec<Tensor<f64, [2]>>.new()\n for i in 0..3 {\n ts.push(Tensor<f64, [2]>.ones() * i as f64)\n }\n print(ts)\n print(ts[2][1])\n let o: Option<Tensor<f64, [2]>> = Some(Tensor<f64, [2]>.ones())\n match o {\n Some(t) => print(t)\n None => print(\"none\")\n }\n}");
     same("fn main() {\n let a = Tensor<f64, [100, 100]>.random()\n let b = Tensor<f64, [100, 100]>.random()\n let mut acc = Tensor<f64, [100, 100]>.zeros()\n for i in 0..5 {\n acc = acc + a @ b\n }\n print(acc[3, 4])\n print(trace(acc))\n}");
+}
+
+// ------------------------------------------------------------------ parallelism
+
+/// Run natively with 1, 2 and 8 threads: all three must agree with each other and with the
+/// interpreter (a parallel program means the same thing however many cores it gets).
+fn same_on_any_thread_count(src: &str) -> String {
+    if !have_cc() {
+        return String::new();
+    }
+    let want = same(src);
+    for t in ["1", "2", "8"] {
+        let got = native::run_captured_env(src, &[("TAU_THREADS", t)]).unwrap_or_else(|e| panic!("{e:?}"));
+        let (want_out, want_panic) = interpret(src);
+        assert_eq!(got.stdout, want_out, "stdout differs with {t} threads for:\n{src}");
+        match want_panic {
+            None => assert_eq!(got.code, 0, "{t} threads: {}", got.stderr),
+            Some(m) => {
+                assert_eq!(got.code, 101);
+                assert_eq!(got.stderr, format!("panic: {m}\n"), "{t} threads");
+            }
+        }
+    }
+    want
+}
+
+#[test]
+fn parallel_for() {
+    same_on_any_thread_count("fn main() {\n let n = 10000\n let mut out = Vec<i64>.new()\n for i in 0..n { out.push(0) }\n par for i in 0..n {\n out[i] = (i * 3 % 7) as i64\n }\n let mut t = 0\n for x in out { t += x }\n print(t)\n print(out[1234])\n}");
+    same_on_any_thread_count("fn main() {\n let mut a = [0; 50]\n par for i in 0..50 where i % 3 != 0 {\n if i == 10 { continue }\n a[i] = i\n }\n print(a)\n par for i in 0..0 { a[i] = 99 }\n par for i in 5..=7 { a[i] = 0 - 1 }\n print(a)\n}");
+    same_on_any_thread_count("fn main() {\n let mut v = vec[1, 2, 3, 4, 5, 6]\n par for x in mut v { x *= 10 }\n print(v)\n let w = vec[1, 2, 3]\n let mut o = vec[0, 0, 0]\n par for i in 0..3 {\n o[i] = w[i] * w[i]\n }\n print(o)\n}");
+    same_on_any_thread_count("fn main() {\n let mut out = vec[0, 0, 0, 0, 0, 0, 0]\n par for c in par_chunks(mut out, 3) {\n for i in 0..c.len { c[i] = c.len }\n }\n print(out)\n}");
+    same_on_any_thread_count("fn main() {\n let mut grid = Tensor<f64, [4, 4]>.zeros()\n let k = 2.5\n par for i in 0..4 {\n print(\"row {i}\")\n }\n print(trace(grid))\n}");
+}
+
+#[test]
+fn parallel_output_and_panics_keep_the_sequential_order() {
+    same_on_any_thread_count("fn main() {\n par for i in 0..20 {\n print(\"item {i}\")\n }\n print(\"done\")\n}");
+    same_on_any_thread_count("fn main() {\n let mut v = vec[0, 0, 0, 0, 0, 0, 0, 0]\n par for i in 0..8 {\n if i == 5 { panic(\"five\") }\n if i == 3 { panic(\"three\") }\n print(\"ok {i}\")\n v[i] = 1\n }\n}");
+    same_on_any_thread_count("fn main() {\n let s = par sum(i in 0..100000) {\n if i == 77777 { panic(\"late\") }\n if i == 50000 { panic(\"early\") }\n i\n }\n print(s)\n}");
+    same_on_any_thread_count("fn main() {\n let big: i32 = 2000000000\n let s = par sum(i in 0..10) big\n print(s)\n}");
+}
+
+#[test]
+fn parallel_reductions_do_not_depend_on_the_thread_count() {
+    same_on_any_thread_count("fn main() {\n let n = 1000000\n let s = par sum(i in 1..n) 1.0 / (i as f64)\n print(s)\n let p = par sum(i in 0..n) i\n print(p)\n}");
+    same_on_any_thread_count("fn main() {\n print(par sum(i in 0..100) i * i)\n print(par prod(i in 1..10) i)\n print(par min(i in 0..100) (i - 50) * (i - 50))\n print(par max(i in 0..100) i % 37)\n print(par any(i in 0..100) i == 42)\n print(par all(i in 0..100) i < 100)\n print(par any(i in 0..10) i > 20)\n print(par all(i in 0..0) i > 20)\n print(par sum(i in 5..5) i)\n print(par prod(i in 5..5) i)\n}");
+    same_on_any_thread_count("fn main() {\n let v = vec[1.5, 2.5, 3.5, 4.5]\n print(par sum(x in v) x * 2.0)\n let w = vec[3, 1, 4, 1, 5, 9, 2, 6]\n print(par max(x in w) x)\n print(par min(x in w) x)\n print(par sum(i in 0..w.len) w[i] * i)\n print(par sum(i in 0..10) 1i * (i as c128))\n}");
+    same_on_any_thread_count("fn f(x: f64) -> f64 { sin(x) * x }\nfn integrate(g: fn(f64) -> f64, a: f64, b: f64, n: usize) -> f64 {\n let h = (b - a) / n as f64\n let s = par sum(i in 1..n) g(a + i as f64 * h)\n h * (s + 0.5 * (g(a) + g(b)))\n}\nfn main() {\n print(integrate(f, 0.0, 3.0, 200000))\n print(integrate(|x| x * x, 0.0, 1.0, 100000))\n}");
+    same_on_any_thread_count("fn main() {\n print(par min(i in 0..0) i)\n}");
+}
+
+#[test]
+fn nested_parallel_regions() {
+    same_on_any_thread_count("fn main() {\n let mut m = Tensor<f64, [_, _]>.zeros(6, 6)\n let mut rows = vec[0, 0, 0, 0, 0, 0]\n par for i in 0..6 {\n rows[i] = par sum(j in 0..1000) (i * j) % 7\n }\n print(rows)\n print(par sum(i in 0..50) par sum(j in 0..50) i * j)\n}");
+}
+
+#[test]
+fn tasks_spawn_and_join() {
+    same_on_any_thread_count("fn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\nfn main() {\n let a = spawn { fib(20) }\n let b = spawn { fib(22) }\n let c = spawn { fib(18) }\n match a.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n match b.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n match c.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n}");
+    same_on_any_thread_count("fn main() {\n let h = spawn {\n print(\"in task\")\n 5\n }\n print(\"main\")\n let g = spawn {\n print(\"second\")\n 6\n }\n match h.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n match g.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n}");
+    same_on_any_thread_count("fn main() {\n let h = spawn {\n print(\"before\")\n panic(\"boom\")\n 1\n }\n match h.join() {\n Ok(_) => print(\"ok\")\n Err(_) => print(\"task failed\")\n }\n print(\"main continues\")\n}");
+    same_on_any_thread_count("fn main() {\n let data = vec[1, 2, 3, 4]\n let names = vec[String.from(\"a\"), String.from(\"b\")]\n let h = spawn { sum(data) + names.len }\n let g = spawn {\n let mut s = String.new()\n s.push_str(\"made in a task\")\n s\n }\n match h.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n match g.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n print(data)\n}");
 }

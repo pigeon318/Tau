@@ -242,7 +242,10 @@ impl<'a> Interp<'a> {
             "Task::join" => match &a[0] {
                 Value::Task(cell) => {
                     let outcome = cell.borrow_mut().take();
-                    match outcome {
+                    if let Some((_, sink)) = &outcome {
+                        let _ = self.out.write_all(&sink.borrow());
+                    }
+                    match outcome.map(|(r, _)| r) {
                         Some(Ok(v)) => Ok(self.ok_value(v)),
                         Some(Err(_)) => {
                             let adt = self.prog.find_adt("TaskPanicked").expect("prelude defines TaskPanicked");

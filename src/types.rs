@@ -15,6 +15,11 @@ macro_rules! id {
     };
 }
 
+/// The most elements an array may have (it lives on the stack; use a `Vec` for more).
+pub const MAX_ARRAY_LEN: u128 = 1 << 24;
+/// The most elements a tensor may have (2 GB of `f64`).
+pub const MAX_TENSOR_ELEMS: usize = 1 << 28;
+
 id!(AdtId);
 id!(TraitId);
 id!(FnId);

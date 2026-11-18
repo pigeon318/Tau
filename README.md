@@ -11,12 +11,13 @@ The design lives in [`SPEC.md`](SPEC.md).
 **Tau programs run.** The compiler reads Tau source, resolves names, infers types, checks traits,
 generics, operators and mutability, then checks ownership (use after move, conflicting borrows,
 views that outlive their data, race-free `spawn` and `par for`), and an interpreter runs what is
-accepted. A **native backend** (Tau to C, compiled by the system `clang`/`gcc`) is under way: it
-currently handles everything except parallelism (so: scalars, structs, enums, generics, traits, closures,
-`Vec`/`String`/arrays/slices/`Map`, tensors, complex numbers, linear algebra, FFT, files, ownership and
-checked arithmetic),
-about 100× faster than the interpreter; the rest still runs on the interpreter, and `par`/`spawn`
-run on a single thread. See [`docs/native/DESIGN.md`](docs/native/DESIGN.md).
+accepted. A **native backend** (Tau to C, compiled by the system `clang` or `gcc`) runs
+everything except `on` blocks and a few corner cases: scalars, structs, enums, generics, traits, closures,
+`Vec`/`String`/arrays/slices/`Map`, tensors, complex numbers, linear algebra, FFT, files, ownership, checked
+arithmetic, and `par for`/`par sum`/`spawn` on a thread pool whose results never depend on the number of
+cores. It is typically 10 to 200 times faster than the interpreter, which remains the reference and the
+fallback (used automatically when a program needs something native cannot do, or no C compiler is installed).
+See [`docs/native/DESIGN.md`](docs/native/DESIGN.md).
 
 | Stage | Deliverable | State |
 |---|---|---|
@@ -24,9 +25,9 @@ run on a single thread. See [`docs/native/DESIGN.md`](docs/native/DESIGN.md).
 | 2 | Name resolution, type checker | done |
 | 3 | Borrow checker | done |
 | 3.5 | Interpreter (`tau run`) | done |
-| 4 | Native code generation via C (see `docs/native/DESIGN.md`) | milestones 1 to 4 of 6 done |
+| 4 | Native code generation via C (see `docs/native/DESIGN.md`) | done |
 | 5 | Std library, tensors | |
-| 6 | Thread pool, `par` | |
+| 6 | Thread pool, `par` | done (part of stage 4) |
 | 7 | Package manager, `tau test`, `tau fmt` | |
 
 ## Try it
