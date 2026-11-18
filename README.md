@@ -58,6 +58,29 @@ cargo build --release && ./target/release/tau run examples/run/nbody.tau   # muc
 ./target/release/tau build examples/run/collatz.tau --emit-c   # show the generated C
 ```
 
+## Windows
+
+Tau runs on Windows 10 and 11 (64-bit). There are two ways to get it:
+
+1. **A prebuilt `tau.exe`**: every push builds one in GitHub Actions (the `ci` workflow, artifact
+   `tau-windows-x86_64`).
+2. **From source**: install Rust with `rustup` (the default MSVC toolchain, which needs the "Desktop
+   development with C++" build tools), then `cargo build --release`; the program is
+   `target\release\tau.exe`.
+
+By itself `tau.exe` runs programs with the **interpreter**. For the native (fast) backend it needs a C
+compiler on the `PATH`. The easiest is MinGW-w64 gcc from [MSYS2](https://www.msys2.org/): install MSYS2,
+run `pacman -S mingw-w64-ucrt-x86_64-gcc` in its UCRT64 shell, then add `C:\msys64\ucrt64\bin` to your
+`PATH` (LLVM clang built for MinGW also works). `tau --version` shows which compiler it found, and
+`tau run -v file.tau` says why a program ran on the interpreter. If no compiler is found, `tau run` says so
+in one line and uses the interpreter.
+
+Differences from Linux: compiled programs are cached in `%LOCALAPPDATA%\tau\cache`; error messages from the
+operating system (a missing file, say) are Windows's; a stack overflow inside a `spawn`ed task ends the
+program with the usual panic instead of being reported by `join`; and maths functions (`sin`, `exp`, `^` on
+floats) come from the system's C library, so their last digits can differ from Linux's. The interpreter and
+the native backend still agree with each other on the same machine.
+
 ## Layout
 
 | Path | Contents |
