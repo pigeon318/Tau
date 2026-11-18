@@ -1,0 +1,8 @@
+// error: cannot modify `count` from inside `spawn`
+// A task cannot modify the variables around it; it returns a result instead.
+
+fn main() {
+    let mut count = 0
+    let task = spawn { count += 1 }
+    task.join()
+}

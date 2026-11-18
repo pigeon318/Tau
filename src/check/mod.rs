@@ -31,6 +31,29 @@ use crate::types::Dim;
 
 // ------------------------------------------------------------------ public results
 
+/// A fast hasher for `NodeKey`s: they are addresses, so there is nothing to defend
+/// against, and the interpreter looks them up for every expression it evaluates.
+#[derive(Default, Clone, Copy)]
+pub struct PtrHasher(u64);
+
+impl std::hash::Hasher for PtrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0 ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    fn write_usize(&mut self, n: usize) {
+        let k = ((n as u64) >> 3).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = k ^ (k >> 32);
+    }
+}
+
+/// A map keyed by AST node.
+pub type NodeMap<V> = HashMap<NodeKey, V, std::hash::BuildHasherDefault<PtrHasher>>;
+
 /// Identifies an AST node by address.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeKey(pub usize);
@@ -45,9 +68,11 @@ impl NodeKey {
 #[derive(Clone, Debug)]
 pub enum Res {
     Local(u32),
-    /// A function, method or overloaded operator, with its generic arguments
-    /// (the impl's/trait's generics first, then the function's own).
-    Fn(FnId, Vec<Ty>),
+    /// A function, method or overloaded operator, with the types its generic
+    /// parameters were instantiated to (the impl's/trait's first, then its own).
+    Fn(FnId, Vec<(GenericId, Ty)>),
+    /// A construct the runtime implements directly (tensor constructors).
+    Builtin(&'static str),
     Const(ConstId),
     StructCtor(AdtId, Vec<Ty>),
     Variant(AdtId, usize, Vec<Ty>),
@@ -63,8 +88,14 @@ pub struct Binding {
 
 #[derive(Default, Debug)]
 pub struct Results {
-    pub expr_ty: HashMap<NodeKey, Ty>,
-    pub expr_res: HashMap<NodeKey, Res>,
+    pub expr_ty: NodeMap<Ty>,
+    pub expr_res: NodeMap<Res>,
+    /// The type of every pattern (and so of every binding it introduces).
+    pub pat_ty: NodeMap<Ty>,
+    /// Which function each `fn` declaration became.
+    pub fn_decl: NodeMap<FnId>,
+    /// Which constant each `const` declaration became.
+    pub const_decl: NodeMap<ConstId>,
     /// Every binding (parameters, `let`s, pattern variables) in the user's module.
     pub bindings: Vec<Binding>,
 }
@@ -194,6 +225,7 @@ pub(crate) struct Body {
     pub unsafe_depth: u32,
     pub obligations: Vec<Obligation>,
     pub touched: Vec<NodeKey>,
+    pub touched_pats: Vec<NodeKey>,
     pub local_fns: Vec<HashMap<String, ValueItem>>,
     /// Index into `results.bindings` where this body's bindings start.
     pub bind_start: usize,
@@ -345,7 +377,38 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------------ bodies
 
+    /// `#[test]` functions are run with no arguments; they return nothing, or a `Result`.
+    fn check_test_functions(&mut self) {
+        let module: &'a Module = self.mods[self.user].1;
+        for item in &module.items {
+            let ItemKind::Fn(f) = &item.kind else { continue };
+            if !item.attrs.iter().any(|a| a.name.name == "test") {
+                continue;
+            }
+            if !f.params.is_empty() || !f.generics.is_empty() {
+                self.err_hint(
+                    f.name.span,
+                    format!("the test function `{}` cannot take parameters or be generic", f.name.name),
+                    "tests are called with no arguments",
+                );
+                continue;
+            }
+            let Some(id) = self.results.fn_decl.get(&NodeKey::of(f)).copied() else { continue };
+            let ret = self.prog.fns[id.idx()].sig.ret.clone();
+            let is_result = matches!(&ret, Ty::Adt(a, _) if Some(*a) == self.prog.find_adt("Result"));
+            if !ret.is_unit() && !is_result {
+                let shown = self.show(&ret);
+                self.err_hint(
+                    f.name.span,
+                    format!("the test function `{}` returns `{shown}`", f.name.name),
+                    "a test returns nothing, or a `Result` that fails the test when it is `Err`",
+                );
+            }
+        }
+    }
+
     fn check_bodies(&mut self) {
+        self.check_test_functions();
         // free functions, methods and trait defaults defined in the user's module
         let user = self.user;
         let ids: Vec<FnId> = (0..self.prog.fns.len())
@@ -474,7 +537,7 @@ impl<'a> Checker<'a> {
                 self.results.expr_ty.insert(k, r);
             }
             if let Some(Res::Fn(f, args)) = self.results.expr_res.get(&k).cloned() {
-                let args = args.iter().map(|a| self.infer.zonk(a)).collect();
+                let args = args.iter().map(|(g, a)| (*g, self.infer.zonk(a))).collect();
                 self.results.expr_res.insert(k, Res::Fn(f, args));
             }
             if let Some(Res::StructCtor(a, args)) = self.results.expr_res.get(&k).cloned() {
@@ -484,6 +547,13 @@ impl<'a> Checker<'a> {
             if let Some(Res::Variant(a, i, args)) = self.results.expr_res.get(&k).cloned() {
                 let args = args.iter().map(|x| self.infer.zonk(x)).collect();
                 self.results.expr_res.insert(k, Res::Variant(a, i, args));
+            }
+        }
+        let pats = std::mem::take(&mut self.body.touched_pats);
+        for k in pats {
+            if let Some(t) = self.results.pat_ty.get(&k).cloned() {
+                let r = self.infer.zonk(&t);
+                self.results.pat_ty.insert(k, r);
             }
         }
         for i in self.body.bind_start..self.results.bindings.len() {

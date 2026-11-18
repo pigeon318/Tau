@@ -1,0 +1,27 @@
+// Sieve of Eratosthenes.
+
+fn main() {
+    let n = 100
+    let mut sieve = [true; 101]
+    sieve[0] = false
+    sieve[1] = false
+    let mut i = 2
+    while i * i <= n {
+        if sieve[i] {
+            let mut j = i * i
+            while j <= n {
+                sieve[j] = false
+                j += i
+            }
+        }
+        i += 1
+    }
+    let mut primes = Vec<usize>.new()
+    for k in 0..101 {
+        if sieve[k] {
+            primes.push(k)
+        }
+    }
+    print(primes)
+    print("{primes.len} primes up to {n}")
+}

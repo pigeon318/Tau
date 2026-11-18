@@ -1,0 +1,94 @@
+// Safe patterns the borrow checker accepts.
+
+struct Stack { items: Vec<i64> }
+
+impl Stack {
+    fn push(mut self, x: i64) { self.items.push(x) }
+    fn top(self) -> [i64] { self.items[0..1] }
+    fn len(self) -> usize { self.items.len }
+}
+
+// Borrows end at their last use, so the view can be dropped before the push.
+fn nonlexical() {
+    let mut v = vec[1, 2, 3]
+    let head = v[0..2]
+    print(head.len)
+    v.push(4)
+}
+
+// Returning a borrowed parameter needs `own`; borrowing a view of it does not.
+fn longer(own a: Vec<i64>, own b: Vec<i64>) -> Vec<i64> {
+    if a.len > b.len { a } else { b }
+}
+
+fn first_half(v: [i64]) -> [i64] { v[0..v.len / 2] }
+
+// `mut` parameters can be handed on and reused.
+fn fill(v: mut Vec<i64>, n: i64) {
+    for i in 0..n { v.push(i) }
+}
+
+fn fill_twice(v: mut Vec<i64>) {
+    fill(mut v, 3)
+    fill(mut v, 3)
+    v.push(99)
+}
+
+// Index loops may read and write the same slice.
+fn prefix_sums(v: mut [i64]) {
+    for i in 1..v.len {
+        v[i] = v[i] + v[i - 1]
+    }
+}
+
+// A closure that only reads borrows its captures shared; once it is no longer used
+// the captures are free again.
+fn closures() {
+    let mut v = vec[1, 2, 3]
+    let k = 10
+    let scaled = v.map(|x| x * k)
+    let len = || v.len
+    print(len())
+    v.push(scaled.len as i64)
+}
+
+// A task keeps its captures borrowed until it is joined.
+fn work(v: [i64]) -> i64 { v.len as i64 }
+
+fn tasks() {
+    let mut data = vec[1, 2, 3]
+    let a = spawn { work(data) }
+    let b = spawn { work(data) }
+    match a.join() {
+        Ok(n) => print(n)
+        Err(_) => print(0)
+    }
+    match b.join() {
+        Ok(n) => print(n)
+        Err(_) => print(0)
+    }
+    data.push(4)
+}
+
+// Parallel loops write only their own element, or their own chunk.
+fn scale(a: [f64], k: f64, out: mut [f64]) {
+    par for i in 0..a.len {
+        out[i] = a[i] * k
+    }
+}
+
+fn zero_chunks(out: mut [f64]) {
+    par for chunk in par_chunks(mut out, 8) {
+        chunk[0] = 0.0
+    }
+}
+
+fn main() {
+    nonlexical()
+    let mut s = Stack(vec[1])
+    s.push(2)
+    print(s.top().len)
+    print(s.len())
+    closures()
+    tasks()
+}

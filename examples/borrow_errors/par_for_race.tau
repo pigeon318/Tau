@@ -1,0 +1,10 @@
+// error: cannot modify `total` inside a `par for`
+// Iterations run at the same time. Accumulate with `par sum` instead.
+
+fn sum(a: [f64]) -> f64 {
+    let mut total = 0.0
+    par for i in 0..a.len {
+        total += a[i]
+    }
+    total
+}

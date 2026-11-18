@@ -1,0 +1,16 @@
+// Count words in a file and show the most common ones.
+
+use std.fs
+use std.map.Map
+
+fn main() -> Result<(), IoError> {
+    let text = fs.read("examples/run/words.txt")?
+    let mut counts = Map<String, usize>.new()
+    for w in text.split_whitespace() {
+        counts[w.lowercase()] += 1
+    }
+    for (word, n) in counts.top(4) {
+        print("{word}: {n}")
+    }
+    Ok(())
+}
