@@ -495,6 +495,69 @@ Still open, for v2: the exact definition of "pure" for cluster tasks.
 
 ---
 
+## 14b. Type-checking rules (settled while writing the stage-2 checker)
+
+**Inference.** Types are inferred inside function bodies by unification; signatures are explicit.
+An unsuffixed integer literal has a hidden "integer-literal" type that may become any integer,
+float or complex type, and a float literal any float or complex type, so `2 * x` works for
+`x: f64` and `let y: f64 = 1` is allowed. Variables themselves never convert: `let a: i64 = 1`
+then `let b: f64 = a` is an error (write `a as f64`). A literal nothing constrains defaults to
+`i64` / `f64`. An unconstrained *non*-literal type is an error ("cannot infer a type here").
+
+**Coercions** (the only implicit conversions): `Never` to any type; `[T; N]` and `Vec<T>` to `[T]`;
+`String` to `str`. They apply to call arguments, `let` with a type, assignment and returns.
+
+**A function that returns unit may end in an expression of any type.** There are no semicolons to
+discard a value with, so `fn f() { v.pop() }` is allowed. (A function with any other return type
+must produce exactly that type.)
+
+**Modes and mutability.**
+- Parameters are read-only borrows by default; `v: mut T` is a mutable borrow; `own v: T` takes
+  ownership. Inside the function, `mut` and `own` parameters may be modified; plain ones may not.
+- The call site must write `mut` exactly for `mut` parameters: `scale(mut data, 2.0)`. A `mut` that
+  is missing, or on a parameter that doesn't take one, is an error. `mut` is only legal on call
+  arguments and on a `for` iterable.
+- Assigning to a place (`x = ..`, `p.f = ..`, `a[i] = ..`, `x += ..`) or borrowing it `mut` requires
+  the root variable to be `let mut` or a `mut`/`own` parameter, and a `mut self` method requires
+  a mutable receiver. `for x in mut v` binds `x` mutably; the items of `par_chunks(mut v, n)`
+  are mutable slices. Writing through a raw pointer (`p[i] = ..`) does not need `let mut p`.
+- Ownership and borrow *conflicts* (use after move, aliasing) are stage 3, not checked yet.
+
+**Operators.**
+- Built-in numbers, `Num`-bounded type parameters, and tensors use the operators directly. Tensor
+  `+ - * /` are elementwise (also with a scalar); `a @ b` is a matrix or vector product whose result
+  shape is computed from the operands. Fixed dimensions that cannot line up are an error today;
+  everything else is checked at run time in v1.
+- On any other type the operator is an overloaded trait call: `+ - * / % ^ @ & | ^^ << >>` use
+  `Add Sub Mul Div Rem Pow MatMul BitAnd BitOr BitXor Shl Shr`; unary `-` uses `Neg`; `[]` on
+  non-array types uses `Index`; `==` `!=` use `Eq` (`eq`); `< <= > >=` use `Ord` (`lt`). An operator
+  trait impl may use any signature with the right method name and arity, and the impl is chosen by
+  the type of the right-hand operand, so `impl Mul for V { fn mul(self, k: f64) -> V }` and
+  `impl Mul for V { fn mul(self, o: V) -> f64 }` can coexist.
+
+**Traits.** `Num Int Float Copy Clone Eq Ord Display` hold for the built-in types by rule, and for any
+other type by an explicit `impl`. A generic function's bounds are checked at every call. Methods
+without a body in a trait must be implemented; methods with a body are defaults. Impls on built-in
+types (`impl Double for i64`) are allowed.
+
+**Patterns.** A bare name in a pattern that is an enum variant with no fields (`None`, `Empty`) is
+that variant; any other bare name binds. Enum variants live in one namespace with functions, so two
+enums in one file cannot both have a variant `Empty`. `match` on an enum must name every variant (or
+have a catch-all arm), on `bool` both values; on anything else it needs a catch-all `_` arm.
+
+**Unsafe.** Calling an `unsafe fn` and indexing a raw pointer (`Ptr<T>`) both require an `unsafe` block.
+
+**The built-in library** is declared in Tau itself (`src/prelude/*.tau`): `prelude.tau` is visible
+everywhere, and `std.fs`, `std.io`, `std.map`, `math.linalg`, `math.fft` are reached with `use`.
+Functions declared without a body are provided by the runtime. User definitions shadow the prelude.
+
+**Not checked yet** (deliberately deferred): `pub`/privacy across modules (there is one file today);
+duplicate or overlapping impls (the first match wins); associated types; closure capture analysis;
+`struct`/`enum`/`impl` declared inside a function; compile-time checking of symbolic tensor
+dimensions; ownership and borrowing (stage 3).
+
+---
+
 ## 15. v1 scope and build plan
 
 ### In v1

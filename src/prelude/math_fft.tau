@@ -1,0 +1,2 @@
+pub fn fft(x: Tensor<f64, [_]>) -> Tensor<c128, [_]>
+pub fn ifft(x: Tensor<c128, [_]>) -> Tensor<f64, [_]>

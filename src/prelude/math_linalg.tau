@@ -1,0 +1,4 @@
+pub fn eig<T: Float>(a: Tensor<T, [_, _]>) -> (Tensor<T, [_]>, Tensor<T, [_, _]>)
+pub fn det<T: Float>(a: Tensor<T, [_, _]>) -> T
+pub fn inv<T: Float>(a: Tensor<T, [_, _]>) -> Tensor<T, [_, _]>
+pub fn transpose<T>(a: Tensor<T, [_, _]>) -> Tensor<T, [_, _]>
