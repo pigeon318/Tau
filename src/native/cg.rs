@@ -226,6 +226,12 @@ impl<'a> Cg<'a> {
                 let parts: CgResult<Vec<String>> = ts.iter().map(|t| self.mangle(t)).collect();
                 format!("T{}_{}", ts.len(), parts?.join("_"))
             }
+            Ty::Complex(FloatTy::F32) => "c64".to_string(),
+            Ty::Complex(FloatTy::F64) => "c128".to_string(),
+            Ty::Tensor(el, dims) => {
+                self.tensor_elem(el)?;
+                format!("Tn{}_{}", dims.len(), self.mangle(el)?)
+            }
             Ty::Fn(ps, r) => {
                 let parts: CgResult<Vec<String>> = ps.iter().map(|t| self.mangle(t)).collect();
                 format!("F{}_{}_{}", ps.len(), parts?.join("_"), self.mangle(r)?)
@@ -288,6 +294,12 @@ impl<'a> Cg<'a> {
             .to_string(),
             Ty::Float(FloatTy::F32) => "float".to_string(),
             Ty::Float(FloatTy::F64) => "double".to_string(),
+            Ty::Complex(FloatTy::F32) => "tau_c64".to_string(),
+            Ty::Complex(FloatTy::F64) => "tau_c128".to_string(),
+            Ty::Tensor(el, _) => {
+                self.tensor_elem(el)?;
+                "tau_tensor".to_string()
+            }
             Ty::Bool => "bool".to_string(),
             Ty::Char => "uint32_t".to_string(),
             Ty::Str => "tau_str".to_string(),
@@ -478,6 +490,7 @@ impl<'a> Cg<'a> {
     fn needs_drop(&self, ty: &Ty) -> bool {
         match ty {
             Ty::Tuple(ts) => ts.iter().any(|t| self.needs_drop(t)),
+            Ty::Tensor(..) => true,
             // a closure owns its environment
             Ty::Fn(..) => true,
             Ty::Array(t, _) => self.needs_drop(t),
@@ -511,6 +524,7 @@ impl<'a> Cg<'a> {
         let mut body = String::new();
         match ty {
             Ty::Fn(..) => body.push_str("if (p->drop) p->drop(p->env);\n"),
+            Ty::Tensor(..) => body.push_str("free(p->data);\n"),
             Ty::Tuple(ts) => {
                 for (i, t) in ts.iter().enumerate() {
                     if let Some(f) = self.drop_fn(t)? {
@@ -625,6 +639,18 @@ impl<'a> Cg<'a> {
             }
         }
         Ok(name)
+    }
+
+    /// (is complex, is single precision) for a tensor element type; only floats and complex
+    /// numbers can be tensor elements.
+    fn tensor_elem(&self, el: &Ty) -> CgResult<(bool, bool)> {
+        match el {
+            Ty::Float(FloatTy::F64) => Ok((false, false)),
+            Ty::Float(FloatTy::F32) => Ok((false, true)),
+            Ty::Complex(FloatTy::F64) => Ok((true, false)),
+            Ty::Complex(FloatTy::F32) => Ok((true, true)),
+            other => unsupported(format!("a tensor of {}", self.describe(other))),
+        }
     }
 
     /// Name used in the runtime's per-integer-type helpers (`tau_add_i64`, ...).
@@ -1170,6 +1196,9 @@ impl<'a> Cg<'a> {
             Ty::Int(it) => format!("tau_fmt_{}({buf}, {value});", Self::int_suffix(*it)),
             Ty::Float(FloatTy::F64) => format!("tau_fmt_f64({buf}, {value});"),
             Ty::Float(FloatTy::F32) => format!("tau_fmt_f32({buf}, {value});"),
+            Ty::Complex(FloatTy::F64) => format!("tau_fmt_c128({buf}, {value});"),
+            Ty::Complex(FloatTy::F32) => format!("tau_fmt_c64({buf}, {value});"),
+            Ty::Tensor(..) => format!("tau_t_fmt({buf}, {value});"),
             Ty::Bool => format!("tau_fmt_bool({buf}, {value});"),
             Ty::Char => format!("tau_fmt_char({buf}, {value});"),
             Ty::Str => format!("tau_fmt_str({buf}, {value});"),
@@ -1351,6 +1380,7 @@ impl<'a> Cg<'a> {
     fn eq_expr(&mut self, a: &str, b: &str, ty: &Ty) -> CgResult<String> {
         Ok(match ty {
             Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char => format!("({a} == {b})"),
+            Ty::Complex(f) => format!("tau_c{}_eq({a}, {b})", if *f == FloatTy::F32 { 64 } else { 128 }),
             Ty::Str => format!("tau_str_eq({a}, {b})"),
             Ty::Never => "1".to_string(),
             Ty::Tuple(ts) if ts.is_empty() => "1".to_string(),
@@ -1405,12 +1435,14 @@ impl<'a> Cg<'a> {
         let ty = self.ty_of(e);
         match &e.kind {
             ExprKind::Int { value, .. } => match &ty {
+                Ty::Complex(f) => Ok(format!("((tau_c{}){{ {value}.0, 0.0 }})", if *f == FloatTy::F32 { 64 } else { 128 })),
                 Ty::Int(it) => self.int_literal(*value, *it),
                 Ty::Float(FloatTy::F32) => Ok(format!("((float)(double){value}.0)")),
                 Ty::Float(FloatTy::F64) => Ok(format!("((double){value}.0)")),
                 other => unsupported(self.describe(other)),
             },
             ExprKind::Float { value, .. } => match &ty {
+                Ty::Complex(f) => Ok(format!("((tau_c{}){{ {value:?}, 0.0 }})", if *f == FloatTy::F32 { 64 } else { 128 })),
                 Ty::Float(FloatTy::F32) => Ok(format!("((float){value:?})")),
                 Ty::Float(FloatTy::F64) => Ok(format!("((double){value:?})")),
                 other => unsupported(self.describe(other)),
@@ -1496,7 +1528,7 @@ impl<'a> Cg<'a> {
             }
             ExprKind::Try(inner) => self.try_expr(&ty, inner),
             ExprKind::MutBorrow(inner) => self.expr(inner),
-            ExprKind::Imag(_) => unsupported("complex numbers (milestone 4)"),
+            ExprKind::Imag(v) => Ok(format!("((tau_c128){{ 0.0, {v:?} }})")),
             ExprKind::Array(es) => self.array_literal(&ty, es),
             ExprKind::ArrayRepeat { value, .. } => self.array_repeat(&ty, value),
             ExprKind::Index { base, indices } => self.index_expr(e, &ty, base, indices),
@@ -1690,8 +1722,8 @@ impl<'a> Cg<'a> {
             let subst = self.apply_sub(subst);
             return self.call_resolved(*fid, &subst, None, &[base, &indices[0]]);
         }
-        if indices.len() != 1 {
-            return unsupported("indexing with several indices (tensors, milestone 4)");
+        if indices.len() != 1 && !matches!(self.ty_of(base), Ty::Tensor(..)) {
+            return unsupported("indexing with several indices");
         }
         if let ExprKind::Range { start, end, inclusive } = &indices[0].kind {
             let bt = self.ty_of(base);
@@ -1712,8 +1744,12 @@ impl<'a> Cg<'a> {
             ));
         }
         let bt = self.ty_of(base);
+        if matches!(bt, Ty::Tensor(..)) {
+            let (pre, el) = self.tensor_access(base, indices, true)?;
+            return Ok(format!("({{ {pre}{}; }})", self.tensor_get(&el)));
+        }
         if self.seq_elem(&bt).is_none() {
-            return unsupported("indexing this type (milestone 4)");
+            return unsupported("indexing this type");
         }
         let (p, _) = self.place(e)?;
         Ok(p)
@@ -1737,6 +1773,10 @@ impl<'a> Cg<'a> {
             _ => {}
         }
         let bt = self.ty_of(base);
+        if name == "len" && matches!(bt, Ty::Tensor(..)) {
+            let b = self.borrow(base)?;
+            return Ok(format!("((uint64_t)tau_t_len(&({b})))"));
+        }
         if name == "len" && (self.seq_elem(&bt).is_some() || self.is_string(&bt) || matches!(bt, Ty::Str)) {
             let b = self.borrow(base)?;
             return Ok(match &bt {
@@ -1780,11 +1820,16 @@ impl<'a> Cg<'a> {
                 _ => format!("(({ct})((__int128)1 << 127))"),
             });
         }
+        if let (UnOp::Neg, Ty::Tensor(..)) = (op, ty) {
+            let v = self.borrow(inner)?;
+            return Ok(format!("tau_t_scalar('*', {v}, -1.0, 0)"));
+        }
         let v = self.expr(inner)?;
         Ok(match (op, ty) {
             (UnOp::Not, _) => format!("(!{v})"),
             (UnOp::Neg, Ty::Int(it)) => format!("tau_neg_{}({v})", Self::int_suffix(*it)),
             (UnOp::Neg, Ty::Float(_)) => format!("(-{v})"),
+            (UnOp::Neg, Ty::Complex(f)) => format!("tau_c{}_neg({v})", if *f == FloatTy::F32 { 64 } else { 128 }),
             (UnOp::BitNot, Ty::Int(it)) => {
                 let ct = self.cty(&Ty::Int(*it))?;
                 format!("(({ct})(~{v}))")
@@ -1813,6 +1858,12 @@ impl<'a> Cg<'a> {
                 ("lt", _) => Ok(format!("(!{})", call(self, lhs, rhs)?)),
                 _ => call(self, lhs, rhs),
             };
+        }
+        let rt = self.ty_of(rhs);
+        if matches!(lt, Ty::Tensor(..)) || matches!(rt, Ty::Tensor(..)) {
+            let (decls, n) = self.ordered(&[lhs, rhs])?;
+            let v = self.tensor_binary(op, &n[0], &lt, &n[1], &rt)?;
+            return Ok(Self::wrap(decls, v));
         }
         let (decls, n) = self.ordered(&[lhs, rhs])?;
         let (l, r) = (n[0].clone(), n[1].clone());
@@ -1866,6 +1917,16 @@ impl<'a> Cg<'a> {
                     _ => return unsupported(format!("`{}` on floats", op.symbol())),
                 }
             }
+            Ty::Complex(f) => {
+                let n = if *f == FloatTy::F32 { 64 } else { 128 };
+                match op {
+                    BinOp::Add => format!("tau_c{n}_add({l}, {r})"),
+                    BinOp::Sub => format!("tau_c{n}_sub({l}, {r})"),
+                    BinOp::Mul => format!("tau_c{n}_mul({l}, {r})"),
+                    BinOp::Div => format!("tau_c{n}_div({l}, {r})"),
+                    _ => return unsupported(format!("`{}` on complex numbers", op.symbol())),
+                }
+            }
             Ty::Bool => match op {
                 BinOp::BitAnd => format!("({l} & {r})"),
                 BinOp::BitOr => format!("({l} | {r})"),
@@ -1887,6 +1948,11 @@ impl<'a> Cg<'a> {
     }
 
     fn assign(&mut self, e: &'a Expr, op: Option<BinOp>, lhs: &'a Expr, rhs: &'a Expr) -> CgResult<String> {
+        if let ExprKind::Index { base, indices } = &lhs.kind {
+            if matches!(self.ty_of(base), Ty::Tensor(..)) {
+                return self.tensor_assign(op, lhs, base, indices, rhs);
+            }
+        }
         let lt = self.ty_of(lhs);
         let rty = self.ty_of(rhs);
         let lct = self.cty(&lt)?;
@@ -1926,6 +1992,8 @@ impl<'a> Cg<'a> {
             (Ty::Float(_), Ty::Int(it)) => format!("tau_from_f64_{}((double)({v}))", Self::int_suffix(*it)),
             (Ty::Float(_), Ty::Float(_)) => format!("(({to_c})({v}))"),
             (Ty::Int(_), Ty::Char) => format!("tau_char_from_int((__int128)({v}))"),
+            (Ty::Int(_) | Ty::Float(_), Ty::Complex(_)) => format!("(({to_c}){{ (double)({v}), 0.0 }})"),
+            (Ty::Complex(_), Ty::Complex(_)) => format!("(({to_c}){{ ({v}).re, ({v}).im }})"),
             (a, b) if a == b => v.to_string(),
             (a, b) => return unsupported(format!("casting {} to {}", self.describe(a), self.describe(b))),
         })
@@ -2038,7 +2106,10 @@ impl<'a> Cg<'a> {
             }
             Some(Res::StructCtor(adt, _)) => self.construct_call(e, *adt, None, args),
             Some(Res::Variant(adt, i, _)) => self.construct_call(e, *adt, Some(*i), args),
-            Some(Res::Builtin(_)) => unsupported("tensors (milestone 4)"),
+            Some(Res::Builtin(kind)) => {
+                let kind = *kind;
+                self.tensor_ctor(e, kind, args)
+            }
             _ => unsupported("this method call"),
         }
     }
@@ -2226,6 +2297,7 @@ impl<'a> Cg<'a> {
                 Ok(match targ {
                     Some(Ty::Float(FloatTy::F32)) => format!("fabsf({x})"),
                     Some(Ty::Float(_)) => format!("fabs({x})"),
+                    Some(Ty::Complex(f)) => format!("tau_c{}_abs({x})", if f == FloatTy::F32 { 64 } else { 128 }),
                     Some(Ty::Int(it)) => {
                         let n = Self::int_suffix(it);
                         let ct = self.cty(&Ty::Int(it))?;
@@ -2255,12 +2327,13 @@ impl<'a> Cg<'a> {
                 let st = self.cty(&ops[0].2)?;
                 let ct = self.cty(&t)?;
                 let v = self.borrowed_as(ops[0].0, &ops[0].2)?;
-                let zero = match &t {
-                    Ty::Float(_) => "0.0".to_string(),
-                    _ => "0".to_string(),
+                let init = match &t {
+                    Ty::Float(_) => format!("({ct})0.0"),
+                    Ty::Complex(_) => format!("({ct}){{ 0.0, 0.0 }}"),
+                    _ => format!("({ct})0"),
                 };
                 let add = self.arith(BinOp::Add, "acc_", "s_.ptr[i_]", &t)?;
-                Ok(format!("({{ {st} s_ = {v}; {ct} acc_ = ({ct}){zero}; for (size_t i_ = 0; i_ < s_.len; i_++) acc_ = {add}; acc_; }})"))
+                Ok(format!("({{ {st} s_ = {v}; {ct} acc_ = {init}; for (size_t i_ = 0; i_ < s_.len; i_++) acc_ = {add}; acc_; }})"))
             }
             "slice::map" | "slice::filter" => {
                 let Ty::Slice(el) = &ops[0].2 else { return unsupported("this `map`/`filter`") };
@@ -2279,6 +2352,12 @@ impl<'a> Cg<'a> {
                         None => "s_.ptr[i_]".to_string(),
                     };
                     Ok(format!("({{ {st} s_ = {v}; {fct} f_ = {f}; {vt} r_ = {{0}}; {alloc} for (size_t i_ = 0; i_ < s_.len; i_++) if (f_.call(f_.env, s_.ptr[i_])) r_.ptr[r_.len++] = {keep}; r_; }})"))
+                }
+            }
+            n if matches!(n, "trace" | "math.linalg::transpose" | "math.linalg::det" | "math.linalg::inv" | "math.linalg::eig" | "math.fft::fft" | "math.fft::ifft") => {
+                match self.tensor_builtin(n, &targ, ret, ops)? {
+                    Some(v) => Ok(v),
+                    None => unsupported("this library function"),
                 }
             }
             "slice::is_empty" => {
@@ -2438,6 +2517,7 @@ impl<'a> Cg<'a> {
         self.protos.push_str(&format!("static {ct} {name}(const {ct} *p);\n"));
         let mut body = format!("{ct} r = *p;\n");
         match ty {
+            Ty::Tensor(..) => body.push_str("r = tau_t_clone(p);\n"),
             Ty::Tuple(ts) => {
                 for (i, t) in ts.iter().enumerate() {
                     if let Some(f) = self.clone_fn(t)? {
@@ -2757,6 +2837,172 @@ static {vect} {top}({mt} *m, uint64_t n) {{
             self.bodies.push_str(&format!("static {rct} {tname}({plist}) {{ (void)env_; return {v}; }}\n"));
         }
         Ok(format!("(({fct}){{ 0, {tname}, 0 }})"))
+    }
+
+
+    // ------------------------------------------------------------ tensors
+
+    /// `l op r` where at least one side is a tensor (the operands are already C values).
+    fn tensor_binary(&mut self, op: BinOp, l: &str, lt: &Ty, r: &str, rt: &Ty) -> CgResult<String> {
+        let sym = match op {
+            BinOp::Add => '+',
+            BinOp::Sub => '-',
+            BinOp::Mul => '*',
+            BinOp::Div => '/',
+            BinOp::MatMul => 'm',
+            _ => return unsupported(format!("`{}` on tensors", op.symbol())),
+        };
+        match (lt, rt) {
+            (Ty::Tensor(el, ld), Ty::Tensor(_, rd)) => {
+                self.tensor_elem(el)?;
+                if sym == 'm' {
+                    return Ok(match (ld.len(), rd.len()) {
+                        (2, 2) | (2, 1) => format!("tau_t_matmul({l}, {r})"),
+                        (1, 1) => {
+                            if matches!(**el, Ty::Float(FloatTy::F32)) {
+                                format!("((float)tau_t_dot({l}, {r}))")
+                            } else if matches!(**el, Ty::Float(FloatTy::F64)) {
+                                format!("tau_t_dot({l}, {r})")
+                            } else {
+                                return unsupported("a dot product of complex vectors");
+                            }
+                        }
+                        _ => return unsupported("`@` on tensors of this rank"),
+                    });
+                }
+                Ok(format!("tau_t_binop('{sym}', {l}, {r})"))
+            }
+            (Ty::Tensor(el, _), s) | (s, Ty::Tensor(el, _)) => {
+                self.tensor_elem(el)?;
+                if sym == 'm' {
+                    return unsupported("`@` with a number");
+                }
+                if !matches!(s, Ty::Float(_) | Ty::Int(_)) {
+                    return unsupported("arithmetic between a tensor and a complex number");
+                }
+                let left = !matches!(lt, Ty::Tensor(..));
+                let (t, k) = if left { (r, l) } else { (l, r) };
+                Ok(format!("tau_t_scalar('{sym}', {t}, (double)({k}), {})", if left { 1 } else { 0 }))
+            }
+            _ => unsupported("this tensor operation"),
+        }
+    }
+
+    /// `Tensor<T, [..]>.zeros(..)`, `.ones(..)` and `.random(..)`
+    fn tensor_ctor(&mut self, e: &'a Expr, kind: &str, args: &'a [Expr]) -> CgResult<String> {
+        let Ty::Tensor(el, dims) = self.ty_of(e) else { return unsupported("this tensor constructor") };
+        let (cplx, single) = self.tensor_elem(&el)?;
+        let k = match kind {
+            "tensor.zeros" => 0,
+            "tensor.ones" => 1,
+            _ => 2,
+        };
+        let n = dims.len();
+        let (decls, sizes): (String, Vec<String>) = if args.is_empty() {
+            let mut out = Vec::new();
+            for d in &dims {
+                match d {
+                    crate::types::Dim::Fixed(n) => out.push(format!("{n}")),
+                    _ => return unsupported("a tensor whose shape is not fixed and has no sizes"),
+                }
+            }
+            (String::new(), out)
+        } else {
+            let refs: Vec<&'a Expr> = args.iter().collect();
+            let usz = vec![Ty::usize(); args.len()];
+            self.ordered_with(&refs, Some(&usz), true)?
+        };
+        Ok(Self::wrap(
+            decls,
+            format!("({{ size_t d_[{}] = {{ {} }}; tau_t_fill({k}, {n}, d_, {}, {}); }})", n.max(1), sizes.join(", "), cplx as u8, single as u8),
+        ))
+    }
+
+    /// The pieces of an element access `t[i, j]`: C text binding `t_` (the tensor), `ix_` (the
+    /// indices) and, once `flat` is called, `f_` (the flat position).
+    fn tensor_access(&mut self, base: &'a Expr, indices: &'a [Expr], read: bool) -> CgResult<(String, Ty)> {
+        let Ty::Tensor(el, _) = self.ty_of(base) else { return unsupported("indexing this type") };
+        self.tensor_elem(&el)?;
+        let (b, _) = self.place(base)?;
+        let refs: Vec<&'a Expr> = indices.iter().collect();
+        let usz = vec![Ty::usize(); indices.len()];
+        let (decls, idx) = self.ordered_with(&refs, Some(&usz), true)?;
+        let n = indices.len();
+        let pre = format!(
+            "tau_tensor *t_ = &({b}); {decls}size_t ix_[{}] = {{ {} }}; size_t f_ = tau_t_flat(t_, ix_, {n}, {}); ",
+            n.max(1),
+            idx.join(", "),
+            if read { 1 } else { 0 }
+        );
+        Ok((pre, (*el).clone()))
+    }
+
+    fn tensor_get(&self, el: &Ty) -> String {
+        match el {
+            Ty::Float(FloatTy::F32) => "((float)t_->data[f_])".to_string(),
+            Ty::Float(_) => "t_->data[f_]".to_string(),
+            Ty::Complex(f) => format!("((tau_c{}){{ t_->data[2 * f_], t_->data[2 * f_ + 1] }})", if *f == FloatTy::F32 { 64 } else { 128 }),
+            _ => "0".to_string(),
+        }
+    }
+
+    fn tensor_set(&self, el: &Ty, v: &str) -> String {
+        match el {
+            Ty::Float(FloatTy::F32) => format!("t_->data[f_] = (double)(float)({v});"),
+            Ty::Float(_) => format!("t_->data[f_] = {v};"),
+            Ty::Complex(f) => format!("{{ tau_c{} z_ = {v}; t_->data[2 * f_] = z_.re; t_->data[2 * f_ + 1] = z_.im; }}", if *f == FloatTy::F32 { 64 } else { 128 }),
+            _ => String::new(),
+        }
+    }
+
+    /// `t[i, j] = v` and `t[i, j] += v`
+    fn tensor_assign(&mut self, op: Option<BinOp>, lhs: &'a Expr, base: &'a Expr, indices: &'a [Expr], rhs: &'a Expr) -> CgResult<String> {
+        let lt = self.ty_of(lhs);
+        let lct = self.cty(&lt)?;
+        let rv = self.fresh("rv");
+        let r = self.expr(rhs)?;
+        let (pre, el) = self.tensor_access(base, indices, false)?;
+        let value = match op {
+            None => rv.clone(),
+            Some(bop) => {
+                let cur = self.tensor_get(&el);
+                self.arith(bop, &cur, &rv, &lt)?
+            }
+        };
+        let store = self.tensor_set(&el, &value);
+        Ok(format!("({{ {lct} {rv} = {r}; {pre}{store} ((tau_unit)0); }})"))
+    }
+
+    /// `trace`, `math.linalg::*` and `math.fft::*`
+    fn tensor_builtin(&mut self, name: &str, targ: &Option<Ty>, ret: &Ty, ops: &[(&'a Expr, ParamMode, Ty)]) -> CgResult<Option<String>> {
+        let known = matches!(name, "trace" | "math.linalg::transpose" | "math.linalg::det" | "math.linalg::inv" | "math.linalg::eig" | "math.fft::fft" | "math.fft::ifft");
+        if !known {
+            return Ok(None);
+        }
+        let a = self.borrowed_as(ops[0].0, &ops[0].2)?;
+        let f64_only = |t: &Option<Ty>| matches!(t, Some(Ty::Float(FloatTy::F64)));
+        let v = match name {
+            "trace" => match targ {
+                Some(Ty::Float(FloatTy::F64)) => format!("tau_t_trace({a})"),
+                Some(Ty::Complex(FloatTy::F64)) => format!("tau_t_trace_c({a})"),
+                Some(Ty::Complex(FloatTy::F32)) => format!("({{ tau_c128 z_ = tau_t_trace_c({a}); (tau_c64){{ z_.re, z_.im }}; }})"),
+                _ => return unsupported("`trace` of single-precision values"),
+            },
+            "math.linalg::transpose" => match targ {
+                Some(Ty::Float(_)) => format!("tau_la_transpose({a})"),
+                _ => return unsupported("`transpose` of this element type"),
+            },
+            "math.linalg::det" if f64_only(targ) => format!("tau_la_det({a})"),
+            "math.linalg::inv" if f64_only(targ) => format!("tau_la_inv({a})"),
+            "math.linalg::eig" if f64_only(targ) => {
+                let tt = self.cty(ret)?;
+                format!("({{ tau_tensor v_, w_; tau_la_eig({a}, &v_, &w_); ({tt}){{ v_, w_ }}; }})")
+            }
+            "math.fft::fft" => format!("tau_fft({a})"),
+            "math.fft::ifft" => format!("tau_ifft({a})"),
+            other => return unsupported(format!("`{other}` on single-precision values")),
+        };
+        Ok(Some(v))
     }
 
     fn vec_adt(&self) -> CgResult<AdtId> {
