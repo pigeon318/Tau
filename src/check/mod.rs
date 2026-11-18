@@ -377,7 +377,38 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------------ bodies
 
+    /// `#[test]` functions are run with no arguments; they return nothing, or a `Result`.
+    fn check_test_functions(&mut self) {
+        let module: &'a Module = self.mods[self.user].1;
+        for item in &module.items {
+            let ItemKind::Fn(f) = &item.kind else { continue };
+            if !item.attrs.iter().any(|a| a.name.name == "test") {
+                continue;
+            }
+            if !f.params.is_empty() || !f.generics.is_empty() {
+                self.err_hint(
+                    f.name.span,
+                    format!("the test function `{}` cannot take parameters or be generic", f.name.name),
+                    "tests are called with no arguments",
+                );
+                continue;
+            }
+            let Some(id) = self.results.fn_decl.get(&NodeKey::of(f)).copied() else { continue };
+            let ret = self.prog.fns[id.idx()].sig.ret.clone();
+            let is_result = matches!(&ret, Ty::Adt(a, _) if Some(*a) == self.prog.find_adt("Result"));
+            if !ret.is_unit() && !is_result {
+                let shown = self.show(&ret);
+                self.err_hint(
+                    f.name.span,
+                    format!("the test function `{}` returns `{shown}`", f.name.name),
+                    "a test returns nothing, or a `Result` that fails the test when it is `Err`",
+                );
+            }
+        }
+    }
+
     fn check_bodies(&mut self) {
+        self.check_test_functions();
         // free functions, methods and trait defaults defined in the user's module
         let user = self.user;
         let ids: Vec<FnId> = (0..self.prog.fns.len())

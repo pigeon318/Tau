@@ -242,8 +242,26 @@ fn adds() {
     assert(1 + 1 == 2)
     assert_eq(hypot(3.0, 4.0), 5.0)
 }
+
+#[test]
+fn parses() -> Result<(), str> {
+    let n = parse_digit('1')?
+    assert_eq(n, 1)
+    Ok(())
+}
+
+#[test]
+#[should_panic("overflow")]
+fn too_big() { ... }
 ```
-`tau test` compiles and runs every `#[test]` function and reports pass/fail per test.
+`tau test file.tau [filter]` checks the program (type and borrow errors stop it before any test runs)
+and runs every top-level `#[test]` function whose name contains `filter`, one after another, each in a
+fresh scope. A test passes if it finishes; it fails if it panics (a failed `assert`/`assert_eq`, an
+integer overflow, an out-of-range index, ...) or returns `Err`. `#[should_panic]` inverts that, and
+`#[should_panic("text")]` also requires the panic message to contain `text`. A failing test shows what
+it printed and why it failed; output from passing tests is kept quiet. A failing test never stops the
+ones after it. The exit code is `0` if all passed, `1` otherwise. `main` is not run. A test takes no
+parameters, is not generic, and returns nothing or a `Result`.
 
 ---
 

@@ -42,6 +42,8 @@ cargo test
 
 ./target/debug/tau run examples/run/primes.tau                 # check, then run
 cargo build --release && ./target/release/tau run examples/run/nbody.tau   # much faster
+
+./target/debug/tau test examples/tests/stack.tau               # run the #[test] functions
 ```
 
 ## Layout
@@ -61,6 +63,7 @@ cargo build --release && ./target/release/tau run examples/run/nbody.tau   # muc
 | `src/prelude/*.tau` | The built-in library's signatures, written in Tau |
 | `examples/` | Programs from the spec; every one must parse |
 | `examples/checked/` | Realistic programs that must type-check and borrow-check with no errors |
+| `examples/tests/` | A program with `#[test]` functions, for `tau test` |
 | `examples/run/` | Programs that run, each with a `.expected` output from an independent Python port (`reference.py`) |
 | `examples/borrow_errors/` | One program per kind of borrow mistake; each must be rejected with the stated error |
 | `tests/` | Parser, type-checker and borrow-checker tests, error-message tests, and no-panic fuzzing |

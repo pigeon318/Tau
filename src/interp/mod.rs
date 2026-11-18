@@ -80,10 +80,15 @@ pub struct Interp<'a> {
 }
 
 
-/// Run `main` in the user's module. The program must have passed the type checker and
-/// the borrow checker.
-pub fn run_main(user: &Module, check: &CheckResult, lib_paths: Vec<String>, out: Box<dyn Write>, stack_bytes: usize, max_steps: u64) -> Outcome {
-    let marker = 0u8;
+fn make_interp<'a>(
+    user: &'a Module,
+    check: &'a CheckResult,
+    lib_paths: Vec<String>,
+    out: Box<dyn Write>,
+    stack_base: usize,
+    stack_bytes: usize,
+    max_steps: u64,
+) -> Interp<'a> {
     let mut mod_paths = lib_paths;
     mod_paths.push("main".to_string());
     let prog = &check.program;
@@ -98,7 +103,7 @@ pub fn run_main(user: &Module, check: &CheckResult, lib_paths: Vec<String>, out:
         key_cache: vec![None; prog.fns.len()],
         out,
         rng: 0x9E37_79B9_7F4A_7C15,
-        stack_base: &marker as *const u8 as usize,
+        stack_base,
         stack_limit: stack_bytes / 10 * 9,
         steps: 0,
         max_steps,
@@ -107,6 +112,15 @@ pub fn run_main(user: &Module, check: &CheckResult, lib_paths: Vec<String>, out:
         range_adt: prog.find_adt("Range"),
     };
     it.collect(&user.items);
+    it
+}
+
+/// Run `main` in the user's module. The program must have passed the type checker and
+/// the borrow checker.
+pub fn run_main(user: &Module, check: &CheckResult, lib_paths: Vec<String>, out: Box<dyn Write>, stack_bytes: usize, max_steps: u64) -> Outcome {
+    let marker = 0u8;
+    let mut it = make_interp(user, check, lib_paths, out, &marker as *const u8 as usize, stack_bytes, max_steps);
+    let res = &check.results;
     let main = user.items.iter().find_map(|i| match &i.kind {
         ItemKind::Fn(f) if f.name.name == "main" => res.fn_decl.get(&NodeKey::of(f)).copied(),
         _ => None,
@@ -136,6 +150,98 @@ pub fn run_main(user: &Module, check: &CheckResult, lib_paths: Vec<String>, out:
             Outcome::Ok
         }
     }
+}
+
+/// How one `#[test]` function ended.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestResult {
+    pub name: String,
+    pub passed: bool,
+    /// Why it failed (empty when it passed).
+    pub message: String,
+    /// What the test printed.
+    pub output: String,
+}
+
+/// A `Write` whose contents can be read back: each test's output is captured.
+#[derive(Clone, Default)]
+struct SharedBuf(Rc<std::cell::RefCell<Vec<u8>>>);
+
+impl Write for SharedBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The text of a string literal argument: `#[should_panic("text")]`.
+fn attr_text(a: &Attribute) -> Option<String> {
+    match a.args.first().map(|e| &e.kind) {
+        Some(ExprKind::Str(pieces)) => Some(
+            pieces
+                .iter()
+                .filter_map(|p| if let StrPiece::Lit(l) = p { Some(l.as_str()) } else { None })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Run every `#[test]` function in the user's module whose name contains `filter`.
+/// Each test runs in a fresh scope; a panic (or an `Err` result) fails it. A test marked
+/// `#[should_panic]` passes only if it panics, and `#[should_panic("text")]` also needs
+/// the message to contain `text`.
+pub fn run_tests(
+    user: &Module,
+    check: &CheckResult,
+    lib_paths: Vec<String>,
+    stack_bytes: usize,
+    max_steps: u64,
+    filter: Option<&str>,
+) -> Vec<TestResult> {
+    let marker = 0u8;
+    let mut it = make_interp(user, check, lib_paths, Box::new(std::io::sink()), &marker as *const u8 as usize, stack_bytes, max_steps);
+    let mut results = Vec::new();
+    for item in &user.items {
+        let ItemKind::Fn(f) = &item.kind else { continue };
+        if !item.attrs.iter().any(|a| a.name.name == "test") {
+            continue;
+        }
+        if let Some(pat) = filter {
+            if !f.name.name.contains(pat) {
+                continue;
+            }
+        }
+        let Some(fid) = check.results.fn_decl.get(&NodeKey::of(f)).copied() else { continue };
+        let should_panic = item.attrs.iter().find(|a| a.name.name == "should_panic");
+        let buf = SharedBuf::default();
+        it.out = Box::new(buf.clone());
+        it.steps = 0;
+        let outcome = it.call_fn(fid, Vec::new(), Vec::new());
+        let output = String::from_utf8_lossy(&buf.0.borrow()).to_string();
+        let (passed, message) = match (outcome, should_panic) {
+            (Ok(v), None) => match &v {
+                Value::Variant(adt, 1, payload) if *adt == it.result => {
+                    let e = payload.borrow()[0].clone();
+                    let text = it.display(&e).unwrap_or_else(|_| "<error>".to_string());
+                    (false, format!("returned an error: {text}"))
+                }
+                _ => (true, String::new()),
+            },
+            (Ok(_), Some(_)) => (false, "expected the test to panic, but it did not".to_string()),
+            (Err(Ctl::Panic(m)), None) => (false, format!("panicked: {m}")),
+            (Err(Ctl::Panic(m)), Some(a)) => match attr_text(a) {
+                Some(want) if !m.contains(&want) => (false, format!("panicked with {m:?}, which does not contain {want:?}")),
+                _ => (true, String::new()),
+            },
+            (Err(_), _) => (true, String::new()),
+        };
+        results.push(TestResult { name: f.name.name.clone(), passed, message, output });
+    }
+    results
 }
 
 impl<'a> Interp<'a> {
