@@ -1,0 +1,30 @@
+use std.map.Map
+
+fn mean(v: [f64]) -> f64 {
+    let mut s = 0.0
+    for x in v { s += x }
+    s / v.len as f64
+}
+
+fn main() {
+    let mut v = Vec<f64>.new()
+    for i in 0..10 { v.push(i as f64 * 1.5) }
+    print(v)
+    print(mean(v))
+    print(v[2..5])
+    let mut counts = Map<String, usize>.new()
+    let words = "the quick brown fox jumps over the lazy dog the end".split_whitespace()
+    for w in words { counts[w.uppercase()] += 1 }
+    for (w, n) in counts.top(3) { print("{w}: {n}") }
+    let mut grid = [[0; 4]; 3]
+    for i in 0..3 {
+        for j in 0..4 { grid[i][j] = i * 4 + j }
+    }
+    print(grid)
+    let evens = vec[1, 2, 3, 4, 5, 6].filter(|x| x % 2 == 0)
+    print(evens)
+    let squares = evens.map(|x| x * x)
+    print(squares)
+    let idx = 12
+    print(v[idx])
+}

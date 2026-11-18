@@ -1,8 +1,7 @@
 # Tau native backend: design proposal
 
-**Status:** design approved (decisions in §19). Milestone 0 (prerequisites, §14) and **milestone 1**
-(scalars, tuples, strings, functions, control flow, checked arithmetic, panics, `print`) are done; see §17
-for what M1 turned out to need. The measurement spikes are in [`spikes/`](spikes/).
+**Status:** implemented (milestones 0 to 6, §17), and merged. Differences between this proposal and what was
+built are recorded under each milestone in §17. The measurement spikes are in [`spikes/`](spikes/).
 
 **Summary.** Compile Tau to **C**, then let the system C compiler (`clang`, else `gcc`) produce the
 executable. Between the checked AST and the C text sits a small monomorphic, explicitly-dropped IR.
@@ -355,7 +354,7 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
 | **M3** | Closures and `fn` values (generics, traits and operators already came with M2) | **done**: closure tests, `map`/`filter`; `integrate` still waits for `par sum` (M5) |
 | **M4** | Tensors, complex numbers, `linalg`, FFT | **done** (f64/c128 throughout, f32 tensors for the basic operations): 7 differential tests that match the interpreter bit for bit, valgrind- and UBSan-clean |
 | **M5** | Thread pool, `par for`/`par sum`/`par_chunks`, `spawn`/`join`, task panics | **done**: `integrate` runs natively and matches its reference; 5 parallel tests agree with the interpreter on 1, 2 and 8 threads; ThreadSanitizer-clean |
-| **M6** | `tau build`/`run`/`test` integration, caching, error messages, docs, benchmark suite | all of the above, native by default |
+| **M6** | `tau build`/`run`/`test` integration, caching, error messages, docs, benchmark suite | **done**: native by default with fallback (no compiler, or an unsupported construct), cache pruning and `tau clean`, differential mutation fuzzing, benchmark programs. `tau test` still runs on the interpreter |
 
 ### What M1 changed in the plan
 
@@ -470,6 +469,22 @@ Each milestone ends with: the listed programs passing differentially, sanitizers
   blocks; parallel `min`/`max` of anything but numbers, `bool` and `char`.
 - **Checks**: `TAU_CC=gcc TAU_SANITIZE=thread cargo test --test native -- parallel nested tasks` runs the
   parallel tests under ThreadSanitizer.
+
+### What M6 added
+
+- **Fallbacks**: no C compiler (or `TAU_CC` pointing nowhere) gives a one-line note and the interpreter;
+  a construct the native backend cannot compile falls back silently (`-v` says why, `--native` makes it an
+  error).
+- **Cache**: programs are cached by a hash of the generated C, the compiler and its flags; the cache is
+  pruned (least recently used first) above 200 entries; `tau clean` empties it.
+- **Differential mutation fuzzing** (`tests/native_fuzz.rs`, corpus in `tests/fuzz_corpus/`): numbers and
+  operators in the corpus programs are mutated, and every mutant that still passes the checkers runs on both
+  backends, which must agree on output, panic and message. `TAU_FUZZ_N` and `TAU_FUZZ_SEED` scale it.
+- **Benchmarks** (`examples/bench/`, `tests/native_bench.rs`, ignored by default): native is 30 to 190 times
+  faster on scalar, struct, array, string and parallel code; tensor kernels are at parity (both are compiled
+  code).
+- **Not done**: `tau test` on the native backend (tests are small; the interpreter is fine), `on` blocks and
+  clusters, platforms other than Linux (the runtime uses POSIX threads and signals).
 
 M1 to M3 are the bulk of the work; M4 and M5 are mostly runtime code; M6 is polish.
 

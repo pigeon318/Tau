@@ -679,6 +679,13 @@ fn linear_algebra() {
 }
 
 #[test]
+fn huge_tensors_panic_the_same_way() {
+    same("fn main() {\n let a = Tensor<f64, [2147483647]>.ones()\n print(a.len)\n}");
+    same("fn main() {\n let n = 100000\n let a = Tensor<f64, [_, _]>.zeros(n, n)\n print(a.len)\n}");
+    same("fn main() {\n let n = 100000\n let a = Tensor<f64, [_, _]>.ones(n, 1)\n let b = Tensor<f64, [_, _]>.ones(1, n)\n print((a @ b).len)\n}");
+}
+
+#[test]
 fn fft_and_complex_tensors() {
     same("use math.fft\nfn main() {\n let mut x = Tensor<f64, [4]>.zeros()\n x[0] = 1.0\n let sp = fft.fft(x)\n print(sp)\n print(fft.ifft(sp))\n}");
     same("use math.fft\nfn main() {\n let x = Tensor<f64, [_]>.random(16)\n let sp = fft.fft(x)\n print(sp)\n print(fft.ifft(sp))\n let y = Tensor<f64, [_]>.random(12)\n print(fft.fft(y))\n let z = Tensor<f64, [_]>.random(7)\n print(fft.ifft(fft.fft(z)))\n let one = Tensor<f64, [_]>.random(1)\n print(fft.fft(one))\n let none = Tensor<f64, [_]>.zeros(0)\n print(fft.fft(none))\n}");

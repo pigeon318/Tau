@@ -78,6 +78,13 @@ fn str_and_slices_are_copy() {
 }
 
 #[test]
+fn arrays_have_a_size_limit() {
+    em("let a = [0; 16777217]", "an array can have at most 16777216 elements");
+    em("let a: [i64; 100000000] = [0; 3]", "an array can have at most");
+    ok("fn main() {\n let a = [0; 16777216]\n}");
+}
+
+#[test]
 fn float_literals_default_to_f64() {
     assert_eq!(m("let x = 2.5", "x"), "f64");
 }

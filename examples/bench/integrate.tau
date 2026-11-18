@@ -1,0 +1,12 @@
+// Parallel reduction: the answer does not depend on the number of threads.
+fn f(x: f64) -> f64 { sin(x) * sqrt(x + 1.0) }
+
+fn integrate(g: fn(f64) -> f64, a: f64, b: f64, n: usize) -> f64 {
+    let h = (b - a) / n as f64
+    let s = par sum(i in 1..n) g(a + i as f64 * h)
+    h * (s + 0.5 * (g(a) + g(b)))
+}
+
+fn main() {
+    print(integrate(f, 0.0, 3.0, 30000000))
+}

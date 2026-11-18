@@ -144,6 +144,14 @@ fn a_tasks_output_appears_when_it_is_joined() {
 }
 
 #[test]
+fn huge_tensors_and_arrays_panic_instead_of_exhausting_memory() {
+    panics_prog("fn main() {\n let a = Tensor<f64, [2147483647]>.ones()\n print(a.len)\n}", "a tensor can have at most 268435456 elements");
+    panics_prog("fn main() {\n let n = 100000\n let a = Tensor<f64, [_, _]>.zeros(n, n)\n print(a.len)\n}", "a tensor can have at most");
+    panics_prog("fn main() {\n let n = 100000\n let a = Tensor<f64, [_, _]>.ones(n, 1)\n let b = Tensor<f64, [_, _]>.ones(1, n)\n print((a @ b).len)\n}", "a tensor can have at most");
+    panics_prog("fn main() {\n let n = 2147483647\n let a = [0; n]\n print(a.len)\n}", "an array can have at most");
+}
+
+#[test]
 fn division_by_zero_panics() {
     panics("let z = 0\nprint(1 / z)", "division by zero");
     assert_eq!(out("print(1.0 / 0.0)"), "inf\n");

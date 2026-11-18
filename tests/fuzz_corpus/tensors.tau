@@ -1,0 +1,23 @@
+use math.linalg
+use math.fft
+
+fn main() {
+    let mut m = Tensor<f64, [3, 3]>.zeros()
+    for i in 0..3 {
+        for j in 0..3 { m[i, j] = (i * 3 + j) as f64 + 1.0 }
+    }
+    print(m)
+    print(m @ m)
+    print(trace(m))
+    let s = m + linalg.transpose(m)
+    print(linalg.det(s))
+    let (vals, vecs) = linalg.eig(s)
+    print(vals)
+    let x = Tensor<f64, [8]>.ones()
+    let sp = fft.fft(x)
+    print(sp)
+    let z = 3.0 + 4i
+    print(z * z)
+    print(abs(z))
+    print(m[1, 5])
+}
