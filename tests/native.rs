@@ -333,9 +333,10 @@ fn fizzbuzz_example() {
 #[test]
 fn unsupported_programs_say_so_instead_of_miscompiling() {
     for src in [
-        "fn main() { let z = 3i\n print(z) }",
         "fn main() { let s = par sum(i in 0..10) i\n print(s) }",
-        "fn main() { let t = Tensor<f64, [2]>.ones()\n print(t) }",
+        "fn main() { let h = spawn { 1 + 1 }\n print(h.join().is_ok()) }".replace("print(h.join().is_ok())", "let r = h.join()").as_str(),
+        "use math.linalg\nfn main() { let m = Tensor<f32, [2, 2]>.ones()\n print(linalg.det(m)) }",
+        "fn main() { let a = Tensor<c128, [2]>.ones()\n print(a * 2.0) }",
     ] {
         match native::emit_c(src) {
             Err(NativeError::Unsupported(_)) => {}
@@ -630,4 +631,64 @@ fn constructors_as_values_and_generic_closures() {
     same("fn main() {\n let v = vec[1, 2, 3]\n let opts = v.map(Some)\n print(opts.len)\n match opts[1] {\n Some(x) => print(x)\n None => print(\"none\")\n }\n}");
     same("fn compose<A: Copy, B: Copy, C: Copy>(f: fn(A) -> B, g: fn(B) -> C, x: A) -> C { g(f(x)) }\nfn main() {\n print(compose(|x: i64| x + 1, |y: i64| y * 10, 4))\n print(compose(|x: i64| x as f64, |y: f64| y / 4.0, 3))\n}");
     same("fn adder(n: i64) -> fn(i64) -> fn(i64) -> i64 { |a| |b| a + b + n }\nfn main() {\n let f = adder(1)\n let g = f(10)\n print(g(100))\n}");
+}
+
+// ------------------------------------------------------------------ tensors, complex numbers, linear algebra, FFT
+
+#[test]
+fn complex_numbers() {
+    body("let a: c128 = 3\nlet b = 2i\nlet c = a + b\nprint(c)\nprint(c * c)\nprint(c - a)\nprint(-c)\nprint(c / (1.0 + 1i))\nprint(abs(c))\nprint(c == c)\nprint(c != a)\nprint(\"z = {c}\")");
+    body("let w: c128 = 1.5\nlet z = (w + 1i) * (w - 1i)\nprint(z)\nlet r = 2 as c128\nprint(r)\nprint(3.5 as c128)\nlet zz = 0.0 - 1i\nprint(zz)");
+    body("let a: c64 = 1.25\nlet b: c64 = a * a\nprint(b)\nlet c = b + a\nprint(c)\nlet d: c64 = 0.1\nprint(d * d)");
+    body("let v = vec[1i, 2i, 3.0 + 1i]\nprint(v)\nprint(sum(v))\nprint(v[1] * v[2])");
+}
+
+#[test]
+fn tensor_construction_and_indexing() {
+    body("let mut m = Tensor<f64, [2, 3]>.zeros()\nm[0, 0] = 1.0\nm[0, 2] = 5.0\nm[1, 1] = 2.0\nprint(m)\nprint(m[0, 2])\nprint(m.len)\nm[1, 2] += 0.5\nm[1, 2] *= 4.0\nprint(m[1, 2])\nlet o = Tensor<f64, [3]>.ones()\nprint(o)\nprint(o[1])");
+    body("let a = Tensor<f64, [_, _]>.zeros(2, 4)\nprint(a)\nprint(a.len)\nlet n = 3\nlet b = Tensor<f64, [_]>.ones(n + 1)\nprint(b)");
+    body("let t = Tensor<f64, [2, 2, 2]>.ones()\nprint(t)\nprint(t.len)\nlet mut u = Tensor<f64, [2, 2, 2]>.zeros()\nu[1, 0, 1] = 7.0\nprint(u[1, 0, 1])\nprint(u)");
+    body("let r = Tensor<f64, [3]>.random()\nprint(r)\nlet s = Tensor<f64, [2, 2]>.random()\nprint(s)");
+    body("let a = Tensor<f64, [2, 3]>.zeros()\nprint(a[2, 0])");
+    body("let mut a = Tensor<f64, [2, 3]>.zeros()\na[0, 3] = 1.0");
+    body("let mut a = Tensor<f64, [2, 3]>.zeros()\na[5, 5] += 1.0");
+}
+
+#[test]
+fn tensor_arithmetic() {
+    body("let a = Tensor<f64, [2, 2]>.ones()\nlet b = a * 3.0\nprint(a + b)\nprint(b - a)\nprint(b * b)\nprint(b / 2.0)\nprint(2.0 - a)\nprint(1.0 / b)\nprint(-b)\nprint(a + b * 2.0 - a)");
+    body("let a = Tensor<f64, [_, _]>.ones(2, 3)\nlet b = Tensor<f64, [_, _]>.ones(3, 2)\nprint(a + b)");
+    body("let a = Tensor<f64, [2, 3]>.ones()\nlet v = Tensor<f64, [3]>.ones()\nprint(a @ v)\nprint(v @ v)\nlet w = Tensor<f64, [_]>.ones(4)\nprint(v @ w)");
+    body("let a = Tensor<f64, [_, _]>.random(4, 3)\nlet b = Tensor<f64, [_, _]>.random(3, 5)\nprint(a @ b)\nlet c = Tensor<f64, [_, _]>.random(2, 2)\nprint(a @ c)");
+}
+
+#[test]
+fn single_precision_tensors() {
+    body("let a = Tensor<f32, [2, 2]>.ones()\nlet b = a * 0.1\nprint(b)\nprint(b + b + b)\nprint(b @ b)\nlet mut c = Tensor<f32, [2]>.zeros()\nc[0] = 0.1\nc[1] += 0.2\nprint(c)\nprint(c[0] + c[1])\nprint(c @ c)");
+    body("let r = Tensor<f32, [4]>.random()\nprint(r)\nprint(r * 3.0)");
+}
+
+#[test]
+fn linear_algebra() {
+    same("use math.linalg\nfn main() {\n let mut m = Tensor<f64, [2, 2]>.zeros()\n m[0, 0] = 1.0\n m[0, 1] = 2.0\n m[1, 0] = 3.0\n m[1, 1] = 4.0\n print(linalg.det(m))\n print(linalg.inv(m))\n print(linalg.transpose(m))\n print(trace(m))\n print(linalg.inv(m) @ m)\n}");
+    same("use math.linalg\nfn main() {\n let mut m = Tensor<f64, [3, 3]>.zeros()\n m[0, 0] = 4.0\n m[0, 1] = 1.0\n m[1, 0] = 1.0\n m[1, 1] = 3.0\n m[1, 2] = 0.5\n m[2, 1] = 0.5\n m[2, 2] = 2.0\n print(linalg.det(m))\n print(linalg.inv(m))\n let (vals, vecs) = linalg.eig(m)\n print(vals)\n print(vecs)\n print(linalg.transpose(vecs) @ vecs)\n}");
+    same("use math.linalg\nfn main() {\n let m = Tensor<f64, [2, 2]>.zeros()\n print(linalg.det(m))\n print(linalg.inv(m))\n}");
+    same("use math.linalg\nfn main() {\n let mut m = Tensor<f64, [2, 2]>.zeros()\n m[0, 1] = 1.0\n let (v, w) = linalg.eig(m)\n print(v)\n}");
+    same("use math.linalg\nfn main() {\n let m = Tensor<f64, [_, _]>.random(2, 3)\n print(linalg.det(m))\n}");
+    same("use math.linalg\nfn main() {\n let m = Tensor<f64, [_, _]>.random(6, 6)\n let s = m + linalg.transpose(m)\n let (vals, vecs) = linalg.eig(s)\n print(vals)\n print(trace(s))\n print(linalg.det(s))\n}");
+}
+
+#[test]
+fn fft_and_complex_tensors() {
+    same("use math.fft\nfn main() {\n let mut x = Tensor<f64, [4]>.zeros()\n x[0] = 1.0\n let sp = fft.fft(x)\n print(sp)\n print(fft.ifft(sp))\n}");
+    same("use math.fft\nfn main() {\n let x = Tensor<f64, [_]>.random(16)\n let sp = fft.fft(x)\n print(sp)\n print(fft.ifft(sp))\n let y = Tensor<f64, [_]>.random(12)\n print(fft.fft(y))\n let z = Tensor<f64, [_]>.random(7)\n print(fft.ifft(fft.fft(z)))\n let one = Tensor<f64, [_]>.random(1)\n print(fft.fft(one))\n let none = Tensor<f64, [_]>.zeros(0)\n print(fft.fft(none))\n}");
+    same("use math.fft\nfn main() {\n let x = Tensor<f64, [_]>.random(8)\n let a = fft.fft(x)\n let b = a + a\n let c = a * a\n let d = a - b\n print(b)\n print(c)\n print(d)\n print(a[3])\n print(trace(Tensor<c128, [2, 2]>.ones()))\n}");
+    same("fn main() {\n let a = Tensor<c128, [2]>.ones()\n print(a / a)\n}");
+}
+
+#[test]
+fn tensors_are_owned_values() {
+    same("fn scale(t: mut Tensor<f64, [2, 2]>, k: f64) {\n for i in 0..2 {\n for j in 0..2 { t[i, j] *= k }\n }\n}\nfn total(t: Tensor<f64, [2, 2]>) -> f64 { t[0, 0] + t[0, 1] + t[1, 0] + t[1, 1] }\nfn make() -> Tensor<f64, [2, 2]> {\n let mut m = Tensor<f64, [2, 2]>.ones()\n m[1, 1] = 5.0\n m\n}\nfn main() {\n let mut a = make()\n scale(mut a, 2.0)\n print(a)\n print(total(a))\n let b = a\n print(b)\n print(make().len)\n}");
+    same("struct Body { pos: Tensor<f64, [3]>, mass: f64 }\nfn main() {\n let mut b = Body(Tensor<f64, [3]>.zeros(), 2.0)\n b.pos[1] = 4.0\n b.pos[2] += 1.5\n print(b.pos)\n let mut ts = Vec<Tensor<f64, [2]>>.new()\n for i in 0..3 {\n ts.push(Tensor<f64, [2]>.ones() * i as f64)\n }\n print(ts)\n print(ts[2][1])\n let o: Option<Tensor<f64, [2]>> = Some(Tensor<f64, [2]>.ones())\n match o {\n Some(t) => print(t)\n None => print(\"none\")\n }\n}");
+    same("fn main() {\n let a = Tensor<f64, [100, 100]>.random()\n let b = Tensor<f64, [100, 100]>.random()\n let mut acc = Tensor<f64, [100, 100]>.zeros()\n for i in 0..5 {\n acc = acc + a @ b\n }\n print(acc[3, 4])\n print(trace(acc))\n}");
 }
