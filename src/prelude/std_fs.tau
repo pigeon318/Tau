@@ -1,0 +1,3 @@
+pub fn read(path: str) -> Result<String, IoError>
+pub fn write(path: str, data: str) -> Result<(), IoError>
+pub fn exists(path: str) -> bool

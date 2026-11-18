@@ -1,0 +1,14 @@
+// quaternion.tau, published as a package
+pub struct Quat { w: f64, x: f64, y: f64, z: f64 }
+
+impl Mul for Quat {
+    fn mul(self, o: Quat) -> Quat {
+        // Hamilton product
+        Quat(
+            self.w*o.w - self.x*o.x - self.y*o.y - self.z*o.z,
+            self.w*o.x + self.x*o.w + self.y*o.z - self.z*o.y,
+            self.w*o.y - self.x*o.z + self.y*o.w + self.z*o.x,
+            self.w*o.z + self.x*o.y - self.y*o.x + self.z*o.w
+        )
+    }
+}

@@ -1,0 +1,14 @@
+use std.fs
+use std.map.Map
+
+fn main() -> Result<(), IoError> {
+    let text = fs.read("book.txt")?
+    let mut counts = Map<String, usize>.new()
+    for w in text.split_whitespace() {
+        counts[w.lowercase()] += 1
+    }
+    for (w, n) in counts.top(10) {
+        print("{w}: {n}")
+    }
+    Ok(())
+}

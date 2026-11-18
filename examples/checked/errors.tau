@@ -1,0 +1,39 @@
+// Result, `?`, and error enums.
+
+enum ParseError {
+    Empty
+    Bad(str)
+}
+
+fn parse_digit(c: char) -> Result<i64, ParseError> {
+    match c {
+        '0' => Ok(0)
+        '1' => Ok(1)
+        '2' => Ok(2)
+        _ => Err(Bad("not a digit"))
+    }
+}
+
+fn sum_two(a: char, b: char) -> Result<i64, ParseError> {
+    let x = parse_digit(a)?
+    let y = parse_digit(b)?
+    Ok(x + y)
+}
+
+fn first(xs: [i64]) -> Option<i64> {
+    if xs.is_empty() { return None }
+    Some(xs[0])
+}
+
+fn double_first(xs: [i64]) -> Option<i64> {
+    let f = first(xs)?
+    Some(f * 2)
+}
+
+fn main() {
+    match sum_two('1', '2') {
+        Ok(n) => print(n)
+        Err(Empty) => print("empty")
+        Err(Bad(msg)) => print(msg)
+    }
+}

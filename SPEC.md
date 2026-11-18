@@ -50,7 +50,21 @@ Tau is a low-level, statically typed language focused on math and science. It is
 - An unsuffixed integer literal is `i64` unless inference says otherwise, and a float literal is `f64`. Suffixes force a type: `5u8`, `2.0f32`.
 - Attributes: `#[name]` or `#[name(args)]` on the line before an item, e.g. `#[test]`.
 - Strings: `"text"` with `{expr}` interpolation, so `"x = {x}"`. Use `\{` for a literal brace.
-- Keywords (small set): `fn let mut const struct enum trait impl use pub if else match for while loop break continue return own par spawn on unsafe type as in true false`
+- Keywords (small set): `fn let mut const struct enum trait impl use pub if else match for while loop break continue return own par spawn on unsafe type as in true false where cluster`
+  (`where` guards `for` loops; `cluster` is reserved for the post-v1 cluster declaration. `self` and `Self` are ordinary identifiers with special meaning in `impl`/`trait`.)
+
+### Grammar notes (settled while writing the stage-1 parser)
+- **Newlines.** A line break ends a statement unless the line ends with a binary operator, `,`, `=`, `->` or `=>`; the next line starts with `.` (a method chain); or the break is inside `( )` or `[ ]` (but not `{ }`). `else` may start the line after the closing `}` of an `if`.
+- **Semicolons** are a hard error with a hint, except inside `[T; N]` and `[value; count]`.
+- **Operator precedence**, loosest to tightest: assignment, `..`, `||`, `&&`, comparisons, `|`, `^^`, `&`, `<< >>`, `+ -`, `* / % @`, `as`, unary `- ! ~ mut`, `^`, postfix. Power binds tighter than unary minus (`-x^2` is `-(x^2)`) and is right-associative.
+- **Generics in expressions** have no turbofish: `Map<String, usize>.new()` and `alloc<u8>(n)` are read as generic applications when the `<...>` parses as types and the closing `>` is directly followed by `.` or `(`. Otherwise `<` is a comparison. This means `f(a < b, c > (d))` is misread as a generic call; write `f(a < b, (c > d))`.
+- **`>>`** is a shift only when the two `>` are adjacent, so `Vec<Vec<f64>>` works.
+- **Parameter modes.** `own` goes before the name (`own v: Vec<f64>`), `mut` goes on the type (`v: mut [f64]`). `self` takes `mut self` / `own self`.
+- **Struct construction** is positional, like a call: `Vec3(1.0, 2.0, 3.0)`. There is no `Name { field: value }` form, so `if x { ... }` is never ambiguous.
+- **Unit literals** (`9.8 m/s`) do not parse in v1. The form is reserved.
+- **Builtin constructors** such as `vec[1, 2, 3]` parse as indexing with several indices; name resolution (stage 2) will treat `vec` specially.
+- **Tuple fields** are `t.0`, `t.0.1`.
+- **Numeric literals**: `1_000`, `0xFF`, `0b1010`, `0o17`, `1e-9`, suffixes `u8..u128`, `i8..i128`, `usize`, `isize`, `f32`, `f64`, and `4i` for an imaginary literal.
 
 ---
 
@@ -478,6 +492,69 @@ source -> lexer -> parser -> AST -> name resolution
 7. One `Tensor` type, with `_` for dynamic dimensions.
 
 Still open, for v2: the exact definition of "pure" for cluster tasks.
+
+---
+
+## 14b. Type-checking rules (settled while writing the stage-2 checker)
+
+**Inference.** Types are inferred inside function bodies by unification; signatures are explicit.
+An unsuffixed integer literal has a hidden "integer-literal" type that may become any integer,
+float or complex type, and a float literal any float or complex type, so `2 * x` works for
+`x: f64` and `let y: f64 = 1` is allowed. Variables themselves never convert: `let a: i64 = 1`
+then `let b: f64 = a` is an error (write `a as f64`). A literal nothing constrains defaults to
+`i64` / `f64`. An unconstrained *non*-literal type is an error ("cannot infer a type here").
+
+**Coercions** (the only implicit conversions): `Never` to any type; `[T; N]` and `Vec<T>` to `[T]`;
+`String` to `str`. They apply to call arguments, `let` with a type, assignment and returns.
+
+**A function that returns unit may end in an expression of any type.** There are no semicolons to
+discard a value with, so `fn f() { v.pop() }` is allowed. (A function with any other return type
+must produce exactly that type.)
+
+**Modes and mutability.**
+- Parameters are read-only borrows by default; `v: mut T` is a mutable borrow; `own v: T` takes
+  ownership. Inside the function, `mut` and `own` parameters may be modified; plain ones may not.
+- The call site must write `mut` exactly for `mut` parameters: `scale(mut data, 2.0)`. A `mut` that
+  is missing, or on a parameter that doesn't take one, is an error. `mut` is only legal on call
+  arguments and on a `for` iterable.
+- Assigning to a place (`x = ..`, `p.f = ..`, `a[i] = ..`, `x += ..`) or borrowing it `mut` requires
+  the root variable to be `let mut` or a `mut`/`own` parameter, and a `mut self` method requires
+  a mutable receiver. `for x in mut v` binds `x` mutably; the items of `par_chunks(mut v, n)`
+  are mutable slices. Writing through a raw pointer (`p[i] = ..`) does not need `let mut p`.
+- Ownership and borrow *conflicts* (use after move, aliasing) are stage 3, not checked yet.
+
+**Operators.**
+- Built-in numbers, `Num`-bounded type parameters, and tensors use the operators directly. Tensor
+  `+ - * /` are elementwise (also with a scalar); `a @ b` is a matrix or vector product whose result
+  shape is computed from the operands. Fixed dimensions that cannot line up are an error today;
+  everything else is checked at run time in v1.
+- On any other type the operator is an overloaded trait call: `+ - * / % ^ @ & | ^^ << >>` use
+  `Add Sub Mul Div Rem Pow MatMul BitAnd BitOr BitXor Shl Shr`; unary `-` uses `Neg`; `[]` on
+  non-array types uses `Index`; `==` `!=` use `Eq` (`eq`); `< <= > >=` use `Ord` (`lt`). An operator
+  trait impl may use any signature with the right method name and arity, and the impl is chosen by
+  the type of the right-hand operand, so `impl Mul for V { fn mul(self, k: f64) -> V }` and
+  `impl Mul for V { fn mul(self, o: V) -> f64 }` can coexist.
+
+**Traits.** `Num Int Float Copy Clone Eq Ord Display` hold for the built-in types by rule, and for any
+other type by an explicit `impl`. A generic function's bounds are checked at every call. Methods
+without a body in a trait must be implemented; methods with a body are defaults. Impls on built-in
+types (`impl Double for i64`) are allowed.
+
+**Patterns.** A bare name in a pattern that is an enum variant with no fields (`None`, `Empty`) is
+that variant; any other bare name binds. Enum variants live in one namespace with functions, so two
+enums in one file cannot both have a variant `Empty`. `match` on an enum must name every variant (or
+have a catch-all arm), on `bool` both values; on anything else it needs a catch-all `_` arm.
+
+**Unsafe.** Calling an `unsafe fn` and indexing a raw pointer (`Ptr<T>`) both require an `unsafe` block.
+
+**The built-in library** is declared in Tau itself (`src/prelude/*.tau`): `prelude.tau` is visible
+everywhere, and `std.fs`, `std.io`, `std.map`, `math.linalg`, `math.fft` are reached with `use`.
+Functions declared without a body are provided by the runtime. User definitions shadow the prelude.
+
+**Not checked yet** (deliberately deferred): `pub`/privacy across modules (there is one file today);
+duplicate or overlapping impls (the first match wins); associated types; closure capture analysis;
+`struct`/`enum`/`impl` declared inside a function; compile-time checking of symbolic tensor
+dimensions; ownership and borrowing (stage 3).
 
 ---
 
