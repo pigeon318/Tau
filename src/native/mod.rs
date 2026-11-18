@@ -48,7 +48,8 @@ pub fn emit_c(src: &str) -> Result<String, NativeError> {
     }
     // The checker's side tables are keyed by node address, so `user` must stay put.
     let paths = lib.iter().map(|m| m.path.clone()).collect();
-    cg::translate(&user, &result, paths)
+    let captures = crate::borrowck::capture_modes(&user, &result.program, &result.results);
+    cg::translate(&user, &result, paths, captures)
 }
 
 /// The C compiler to use: `$TAU_CC`, else the first of clang, gcc, cc that exists.

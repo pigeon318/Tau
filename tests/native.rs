@@ -334,7 +334,7 @@ fn fizzbuzz_example() {
 fn unsupported_programs_say_so_instead_of_miscompiling() {
     for src in [
         "fn main() { let z = 3i\n print(z) }",
-        "fn main() { let f = |x: i64| x + 1\n print(f(1)) }",
+        "fn main() { let s = par sum(i in 0..10) i\n print(s) }",
         "fn main() { let t = Tensor<f64, [2]>.ones()\n print(t) }",
     ] {
         match native::emit_c(src) {
@@ -596,4 +596,38 @@ fn clones_of_owned_values() {
 #[test]
 fn computed_values_are_evaluated_exactly_once() {
     same("fn mk(tag: str) -> Vec<i64> {\n print(tag)\n vec[1, 2, 3]\n}\nfn name() -> String {\n print(\"name\")\n String.from(\"abc\")\n}\nfn main() {\n for x in mk(\"loop\") { print(x) }\n print(sum(mk(\"sum\")))\n print(mk(\"len\").len)\n print(mk(\"idx\")[1])\n print(mk(\"slice\")[1..3])\n print(name().len)\n print(name().uppercase())\n let n = name()\n print(n)\n}");
+}
+
+// ------------------------------------------------------------------ closures and function values
+
+#[test]
+fn closures_and_function_values() {
+    same("fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }\nfn twice(f: fn(i64) -> i64, x: i64) -> i64 { f(f(x)) }\nfn double(x: i64) -> i64 { x * 2 }\nfn main() {\n let k = 10\n let add_k = |x: i64| x + k\n print(apply(add_k, 5))\n print(apply(|x: i64| x * x, 7))\n print(twice(double, 3))\n print(twice(|x: i64| x - 1, 3))\n print(add_k(1))\n let f = |a: i64, b: i64| a * b + k\n print(f(2, 3))\n}");
+    same("fn main() {\n let sq = |x: f64| x * x\n let hyp = |a: f64, b: f64| sqrt(sq(a) + sq(b))\n print(hyp(3.0, 4.0))\n let say = |s: str| print(\"hi {s}\")\n say(\"you\")\n}");
+}
+
+#[test]
+fn closures_capture_by_borrow_and_by_move() {
+    same("fn main() {\n let mut count = 0\n let mut bump = || count += 1\n bump()\n bump()\n bump()\n print(count)\n let mut total = 0\n let mut add = |x: i64| total += x\n add(5)\n add(7)\n print(total)\n}");
+    same("fn main() {\n let names = vec[String.from(\"a\"), String.from(\"bb\")]\n let count = || names.len\n print(count())\n print(names)\n let owned = String.from(\"keep\")\n let take = || owned\n let got = take()\n print(got)\n}");
+}
+
+#[test]
+fn closures_can_be_returned_and_stored() {
+    same("fn make_adder(n: i64) -> fn(i64) -> i64 { |x: i64| x + n }\nfn make_scaler(k: f64) -> fn(f64) -> f64 { |x: f64| x * k }\nfn main() {\n let add5 = make_adder(5)\n let add9 = make_adder(9)\n print(add5(1))\n print(add9(1))\n let half = make_scaler(0.5)\n print(half(9.0))\n}");
+    same("fn main() {\n let mut fs = Vec<fn(i64) -> i64>.new()\n for i in 1..4 {\n fs.push(|x: i64| x * 3)\n }\n let mut t = 0\n for f in fs { t += f(10) }\n print(t)\n print(fs.len)\n}");
+    same("struct Op { name: String, f: fn(i64, i64) -> i64 }\nfn main() {\n let ops = vec[Op(String.from(\"add\"), |a, b| a + b), Op(String.from(\"mul\"), |a, b| a * b)]\n for op in ops {\n print(\"{op.name}: {(op.f)(6, 7)}\")\n }\n}".replace("(op.f)(6, 7)", "apply2(op.f, 6, 7)").replace("struct Op", "fn apply2(f: fn(i64, i64) -> i64, a: i64, b: i64) -> i64 { f(a, b) }\nstruct Op").as_str());
+}
+
+#[test]
+fn map_and_filter() {
+    same("fn main() {\n let v = vec[1, 2, 3, 4, 5, 6]\n let sq = v.map(|x| x * x)\n print(sq)\n let ev = v.filter(|x| x % 2 == 0)\n print(ev)\n let k = 100\n print(v.map(|x| x + k).filter(|x| x > 102))\n let fl = vec[1.5, 2.5].map(|x| x * 2.0)\n print(fl)\n let strs = v.map(|x| \"n={x}\")\n print(strs)\n print(v[1..4].map(|x| x - 1))\n}");
+    same("fn double(x: i64) -> i64 { x * 2 }\nfn is_odd(x: i64) -> bool { x % 2 == 1 }\nfn main() {\n let v = vec[1, 2, 3]\n print(v.map(double))\n print(v.filter(is_odd))\n let words = vec[String.from(\"a\"), String.from(\"bbb\")]\n print(words.filter(|w| w.len > 1))\n print(words.map(|w| w.len))\n}");
+}
+
+#[test]
+fn constructors_as_values_and_generic_closures() {
+    same("fn main() {\n let v = vec[1, 2, 3]\n let opts = v.map(Some)\n print(opts.len)\n match opts[1] {\n Some(x) => print(x)\n None => print(\"none\")\n }\n}");
+    same("fn compose<A: Copy, B: Copy, C: Copy>(f: fn(A) -> B, g: fn(B) -> C, x: A) -> C { g(f(x)) }\nfn main() {\n print(compose(|x: i64| x + 1, |y: i64| y * 10, 4))\n print(compose(|x: i64| x as f64, |y: f64| y / 4.0, 3))\n}");
+    same("fn adder(n: i64) -> fn(i64) -> fn(i64) -> i64 { |a| |b| a + b + n }\nfn main() {\n let f = adder(1)\n let g = f(10)\n print(g(100))\n}");
 }
