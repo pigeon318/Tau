@@ -151,7 +151,7 @@ impl<'a> Checker<'a> {
             "Copy" => match ty {
                 Ty::Tuple(ts) => all(self, ts, "Copy"),
                 Ty::Array(t, _) => all(self, std::slice::from_ref(t), "Copy"),
-                Ty::Never => true,
+                Ty::Never | Ty::Str | Ty::Slice(_) => true,
                 _ => is_scalar,
             },
             "Eq" | "Ord" => match ty {
