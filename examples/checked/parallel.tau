@@ -1,0 +1,34 @@
+// par for, parallel reductions, spawn/join.
+
+fn saxpy(a: f64, x: [f64], y: mut [f64]) {
+    par for i in 0..x.len {
+        y[i] = a * x[i] + y[i]
+    }
+}
+
+fn dot(a: [f64], b: [f64]) -> f64 {
+    par sum(i in 0..a.len) a[i] * b[i]
+}
+
+fn zero_blocks(out: mut [f64]) {
+    par for chunk in par_chunks(mut out, 64) {
+        chunk[0] = 0.0
+    }
+}
+
+fn largest_square(n: usize) -> usize {
+    par max(i in 0..n) i * i
+}
+
+fn main() {
+    let x = vec[1.0, 2.0, 3.0]
+    let mut y = vec[4.0, 5.0, 6.0]
+    saxpy(2.0, x, mut y)
+    print(dot(x, y))
+    let h = spawn { dot(x, y) * 2.0 }
+    match h.join() {
+        Ok(v) => print(v)
+        Err(_) => print("task panicked")
+    }
+    print(largest_square(10))
+}

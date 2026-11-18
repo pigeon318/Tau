@@ -1,0 +1,56 @@
+// User-defined traits, bounds, default methods, impls on built-in types.
+
+trait Number {
+    fn zero() -> Self
+    fn add(self, o: Self) -> Self
+}
+
+impl Number for f64 {
+    fn zero() -> f64 { 0.0 }
+    fn add(self, o: f64) -> f64 { self + o }
+}
+
+impl Number for i64 {
+    fn zero() -> i64 { 0 }
+    fn add(self, o: i64) -> i64 { self + o }
+}
+
+fn total<T: Number>(xs: [T]) -> T {
+    let mut acc = T.zero()
+    for x in xs { acc = acc.add(x) }
+    acc
+}
+
+trait Named {
+    fn name(self) -> str
+    fn shout(self) -> String { self.name().uppercase() }
+}
+
+struct Dog { age: i64 }
+
+impl Named for Dog {
+    fn name(self) -> str { "dog" }
+}
+
+impl Display for Dog {
+    fn fmt(self) -> String { String.from("a dog") }
+}
+
+impl Eq for Dog {
+    fn eq(self, o: Dog) -> bool { self.age == o.age }
+}
+
+fn largest<T: Ord>(a: T, b: T) -> T {
+    if a < b { b } else { a }
+}
+
+fn main() {
+    print(total([1.5, 2.5]))
+    print(total([1, 2, 3]))
+    let d = Dog(3)
+    print(d.shout())
+    print(d)
+    print(d == Dog(3))
+    print(largest(3, 9))
+    print(largest("a", "b"))
+}

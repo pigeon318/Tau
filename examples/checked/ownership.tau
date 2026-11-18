@@ -1,0 +1,28 @@
+// Parameter modes: borrow (default), `mut`, and `own`.
+
+fn scale(v: mut [f64], k: f64) {
+    for x in mut v { x *= k }
+}
+
+fn total(v: [f64]) -> f64 { sum(v) }
+
+fn consume(own v: Vec<f64>) -> usize { v.len }
+
+struct Counter { n: i64 }
+
+impl Counter {
+    fn bump(mut self) { self.n += 1 }
+    fn get(self) -> i64 { self.n }
+}
+
+fn main() {
+    let mut data = vec[1.0, 2.0, 3.0]
+    scale(mut data, 2.0)
+    let t = total(data)
+    print(t)
+    let mut c = Counter(0)
+    c.bump()
+    c.bump()
+    print(c.get())
+    print(consume(data))
+}

@@ -1,0 +1,14 @@
+pub struct Map<K, V> {}
+
+impl<K, V> Map<K, V> {
+    pub fn new() -> Map<K, V>
+    pub fn contains(self, k: K) -> bool
+}
+
+impl<K, V: Ord> Map<K, V> {
+    pub fn top(self, n: usize) -> Vec<(K, V)>
+}
+
+impl<K, V> Index for Map<K, V> {
+    pub fn index(self, k: K) -> V
+}

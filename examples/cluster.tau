@@ -1,0 +1,9 @@
+cluster lab = nodes ["10.0.0.5:7000", "10.0.0.6:7000"]
+
+fn main() {
+    let samples = 400_000_000
+    let hits = on lab {
+        par sum(i in 0..samples) monte_carlo_point(i)
+    }
+    print("pi is about {4.0 * hits as f64 / samples as f64}")
+}
