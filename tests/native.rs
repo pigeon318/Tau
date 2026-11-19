@@ -773,3 +773,113 @@ fn tasks_spawn_and_join() {
     same_on_any_thread_count("fn main() {\n let h = spawn {\n print(\"before\")\n panic(\"boom\")\n 1\n }\n match h.join() {\n Ok(_) => print(\"ok\")\n Err(_) => print(\"task failed\")\n }\n print(\"main continues\")\n}");
     same_on_any_thread_count("fn main() {\n let data = vec[1, 2, 3, 4]\n let names = vec[String.from(\"a\"), String.from(\"b\")]\n let h = spawn { sum(data) + names.len }\n let g = spawn {\n let mut s = String.new()\n s.push_str(\"made in a task\")\n s\n }\n match h.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n match g.join() {\n Ok(v) => print(v)\n Err(_) => print(\"failed\")\n }\n print(data)\n}");
 }
+
+// ------------------------------------------------------------------ std.time
+
+#[test]
+fn time_calendar_and_formatting() {
+    let out = same(
+        "use std.time.*\n\
+         fn main() {\n\
+          print(format_iso(0))\n\
+          print(format_iso(1700000000))\n\
+          print(format_iso(951782400))\n\
+          print(format_iso(-1))\n\
+          print(format_iso(-62167219200 - 86400 * 366))\n\
+          print(format_iso(253402300799))\n\
+          let (y, mo, d, h, mi, s) = civil(1700000000)\n\
+          print(\"{y}-{mo}-{d} {h}:{mi}:{s}\")\n\
+          print(weekday(0))\n\
+          print(weekday(1700000000))\n\
+          print(weekday(-86400))\n\
+          print(from_civil(2023, 11, 14, 22, 13, 20))\n\
+          print(from_civil(2000, 2, 29, 0, 0, 0))\n\
+          print(from_civil(1969, 12, 31, 23, 59, 59))\n\
+          print(from_civil(-4, 2, 29, 0, 0, 0))\n\
+          for ns in [0, 1, 999, 1000, 1500, 999999, 12345678, 999999999, 1250000000, 59999999999, 60000000000, 125000000000, 3599999999999, 3725000000000, -1500, -125000000000, 9223372036854775807, -9223372036854775807 - 1] {\n\
+           print(format_duration(ns))\n\
+          }\n\
+          let mut ok = true\n\
+          let mut day = -100000\n\
+          while day < 200000 {\n\
+           let secs = day * 86400 + 12345\n\
+           let (yy, mm, dd, hh, mn, ss) = civil(secs)\n\
+           if from_civil(yy, mm, dd, hh, mn, ss) != secs { ok = false }\n\
+           day += 3\n\
+          }\n\
+          print(ok)\n\
+         }",
+    );
+    // the values are the same on both backends, and also right
+    assert!(out.starts_with("1970-01-01T00:00:00Z\n2023-11-14T22:13:20Z\n2000-02-29T00:00:00Z\n1969-12-31T23:59:59Z\n-0002-12-31T00:00:00Z\n9999-12-31T23:59:59Z\n2023-11-14 22:13:20\n3\n1\n2\n1700000000\n951782400\n-1\n"), "{out}");
+    assert!(out.contains("1.000 \u{b5}s\n1.500 \u{b5}s\n999.999 \u{b5}s\n"), "{out}");
+    assert!(out.contains("2m 05s\n59m 59s\n1h 02m 05s\n-1.500 \u{b5}s\n-2m 05s\n"), "{out}");
+    assert!(out.ends_with("true\n"), "{out}");
+}
+
+#[test]
+fn time_clocks_run_forward_and_sleep_waits() {
+    let out = same(
+        "use std.time.*\n\
+         fn main() {\n\
+          let a = monotonic_ns()\n\
+          let w0 = unix_ns()\n\
+          sleep(0.05)\n\
+          let b = monotonic_ns()\n\
+          print(b - a >= 50000000)\n\
+          print(b - a < 5000000000)\n\
+          print(w0 > 1700000000000000000)\n\
+          print(unix_ns() >= w0)\n\
+          sleep(0.0)\n\
+          let year = civil(unix_ns() / 1000000000).0\n\
+          print(year >= 2024)\n\
+         }",
+    );
+    assert_eq!(out, "true\ntrue\ntrue\ntrue\ntrue\n");
+}
+
+#[test]
+fn time_works_inside_parallel_code() {
+    let out = same(
+        "use std.time.*\n\
+         fn main() {\n\
+          let t0 = monotonic_ns()\n\
+          let n = par sum(i in 0..20000) { if monotonic_ns() >= t0 { 1 } else { 0 } }\n\
+          print(n)\n\
+          let h = spawn { let a = monotonic_ns()\n sleep(0.01)\n monotonic_ns() - a }\n\
+          match h.join() {\n\
+           Ok(v) => print(v >= 10000000)\n\
+           Err(_) => print(\"failed\")\n\
+          }\n\
+         }",
+    );
+    assert_eq!(out, "20000\ntrue\n");
+}
+
+#[test]
+fn time_errors_panic_with_the_same_messages() {
+    for (call, msg) in [
+        ("from_civil(2023, 13, 1, 0, 0, 0)", "invalid date or time"),
+        ("from_civil(2023, 2, 29, 0, 0, 0)", "invalid date or time"),
+        ("from_civil(1900, 2, 29, 0, 0, 0)", "invalid date or time"),
+        ("from_civil(2023, 4, 31, 0, 0, 0)", "invalid date or time"),
+        ("from_civil(2023, 1, 1, 24, 0, 0)", "invalid date or time"),
+        ("from_civil(2023, 1, 1, 0, 60, 0)", "invalid date or time"),
+        ("from_civil(5000000000, 1, 1, 0, 0, 0)", "invalid date or time"),
+    ] {
+        let src = format!("use std.time.*\nfn main() {{\n print({call})\n}}");
+        let (_, p) = interpret(&src);
+        assert_eq!(p.as_deref(), Some(msg), "{call}");
+        same(&src);
+    }
+    for secs in ["-1.0", "1e10"] {
+        same(&format!("use std.time.*\nfn main() {{\n sleep({secs})\n}}"));
+    }
+    // leap years are accepted
+    body_ok("use std.time.*\nfn main() {\n print(from_civil(2024, 2, 29, 0, 0, 0))\n print(from_civil(2000, 2, 29, 0, 0, 0))\n}");
+}
+
+fn body_ok(src: &str) {
+    let out = same(src);
+    assert_eq!(out, "1709164800\n951782400\n");
+}

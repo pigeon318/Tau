@@ -2607,6 +2607,33 @@ impl<'a> Cg<'a> {
                 let p = self.borrowed_as(ops[0].0, &Ty::Str)?;
                 Ok(format!("tau_fs_exists({p})"))
             }
+            "std.time::monotonic_ns" => Ok("tau_monotonic_ns()".to_string()),
+            "std.time::unix_ns" => Ok("tau_unix_ns()".to_string()),
+            "std.time::sleep" => {
+                let x = self.expr(args[0])?;
+                Ok(format!("({{ tau_sleep({x}); ((tau_unit)0); }})"))
+            }
+            "std.time::civil" => {
+                let ct = self.cty(ret)?;
+                let x = self.expr(args[0])?;
+                Ok(format!("({{ int64_t t_ = {x}; (({ct}){{ tau_civil_field(t_, 0), tau_civil_field(t_, 1), tau_civil_field(t_, 2), tau_civil_field(t_, 3), tau_civil_field(t_, 4), tau_civil_field(t_, 5) }}); }})"))
+            }
+            "std.time::weekday" => {
+                let x = self.expr(args[0])?;
+                Ok(format!("tau_weekday({x})"))
+            }
+            "std.time::from_civil" => {
+                let (decls, n) = self.ordered(&args)?;
+                Ok(Self::wrap(decls, format!("tau_from_civil({}, {}, {}, {}, {}, {})", n[0], n[1], n[2], n[3], n[4], n[5])))
+            }
+            "std.time::format_iso" => {
+                let x = self.expr(args[0])?;
+                Ok(format!("tau_time_iso({x})"))
+            }
+            "std.time::format_duration" => {
+                let x = self.expr(args[0])?;
+                Ok(format!("tau_time_dur({x})"))
+            }
             "Map::new" => {
                 let mt = self.cty(ret)?;
                 Ok(format!("(({mt}){{0}})"))

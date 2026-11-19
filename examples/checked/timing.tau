@@ -1,0 +1,29 @@
+// Timing code and printing dates with std.time.
+use std.time.*
+
+fn fib(n: i64) -> i64 {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn main() {
+    // measure a piece of work
+    let start = monotonic_ns()
+    let result = fib(30)
+    let elapsed = monotonic_ns() - start
+    print("fib(30) = {result}, took {format_duration(elapsed)}")
+
+    // the date and time now, in UTC
+    let now = unix_ns() / 1_000_000_000
+    print("now: {format_iso(now)}")
+    let (year, month, day, hour, minute, second) = civil(now)
+    print("{day}/{month}/{year} at {hour}:{minute}:{second} UTC")
+    let names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    print("it is a {names[weekday(now) as usize]}")
+
+    // days until the end of the year
+    let new_year = from_civil(year + 1, 1, 1, 0, 0, 0)
+    print("{(new_year - now) / 86400} days until {year + 1}")
+
+    // wait a moment
+    sleep(0.25)
+}

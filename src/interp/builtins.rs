@@ -7,6 +7,13 @@ use std::rc::Rc;
 use super::*;
 
 impl<'a> Interp<'a> {
+    fn i64_of(&self, v: &Value<'a>) -> R<'a, i64> {
+        match v {
+            Value::Int(i) => Ok(*i as i64),
+            other => panic(format!("expected an integer, found a {}", other.type_name())),
+        }
+    }
+
     fn f64_of(&self, v: &Value<'a>) -> R<'a, f64> {
         match v {
             Value::Float(x) => Ok(*x),
@@ -291,6 +298,32 @@ impl<'a> Interp<'a> {
                     Err(e) => self.io_error(e.to_string()),
                 })
             }
+
+            // ---- time
+            "std.time::monotonic_ns" => Ok(Value::Int(clock::monotonic_ns() as i128)),
+            "std.time::unix_ns" => Ok(Value::Int(clock::unix_ns() as i128)),
+            "std.time::sleep" => {
+                let secs = self.f64_of(&a[0])?;
+                if let Some(m) = clock::bad_sleep(secs) {
+                    return panic(m);
+                }
+                clock::sleep(secs);
+                Ok(Value::Unit)
+            }
+            "std.time::civil" => Ok(Value::tuple(clock::civil(self.i64_of(&a[0])?).iter().map(|&x| Value::Int(x as i128)).collect())),
+            "std.time::weekday" => Ok(Value::Int(clock::weekday(self.i64_of(&a[0])?) as i128)),
+            "std.time::from_civil" => {
+                let mut n = [0i64; 6];
+                for (slot, v) in n.iter_mut().zip(&a) {
+                    *slot = self.i64_of(v)?;
+                }
+                match clock::from_civil(n[0], n[1], n[2], n[3], n[4], n[5]) {
+                    Some(t) => Ok(Value::Int(t as i128)),
+                    None => panic("invalid date or time"),
+                }
+            }
+            "std.time::format_iso" => Ok(Value::string(&clock::iso(self.i64_of(&a[0])?))),
+            "std.time::format_duration" => Ok(Value::string(&clock::duration(self.i64_of(&a[0])?))),
 
             // ---- maps
             "Map::new" => Ok(Value::Map(Rc::new(RefCell::new(MapVal::default())))),
