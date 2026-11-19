@@ -8,6 +8,7 @@ USAGE:
     tau add <name> --path DIR  add a dependency on a package in a folder to tau.toml
     tau add <name> --git URL [--tag T | --branch B | --rev R]
                                ... or on a git repository
+    tau fetch [--update]       download the dependencies and pin git ones in tau.lock (--update: look up branches again)
     tau check [path]           type-check and borrow-check a program
     tau run [path]             check a program and run it (natively when possible)
     tau run [path] --native    ... natively only: fail if the program cannot be compiled to C
@@ -18,7 +19,8 @@ USAGE:
     tau test [path] [filter]   run the #[test] functions (those whose name contains `filter`)
     tau check [path] --types   ... and list the inferred type of every binding
     tau check <file> --json    ... and print diagnostics and hover types as JSON, for editors
-                               (`-` as the file reads the program from stdin)
+                               (`-` as the file reads the program from stdin; `--file PATH` says which file
+                               the text on stdin is, and checks it as part of its package)
     tau tokens <file>          print the token stream
     tau parse <file>           check that a file parses (--ast prints the tree, --sexp the function bodies)
     tau clean                  delete the cache of compiled programs
@@ -74,6 +76,7 @@ fn real_main() -> ExitCode {
         }
         Some("new") => return cmd_new(&args[1..]),
         Some("add") => return cmd_add(&args[1..]),
+        Some("fetch") => return cmd_fetch(&args[1..]),
         _ => {}
     }
     let Some(cmd) = args.first().map(String::as_str) else {
@@ -198,6 +201,31 @@ fn cmd_add(args: &[String]) -> ExitCode {
     }
 }
 
+/// `tau fetch [--update]`: download the dependencies of the package here (all of them, and theirs) and pin
+/// git dependencies in `tau.lock`; `--update` looks up branches again.
+fn cmd_fetch(args: &[String]) -> ExitCode {
+    if let Some(bad) = args.iter().find(|a| *a != "--update") {
+        eprintln!("error: unknown option `{bad}` (use `tau fetch` or `tau fetch --update`)");
+        return ExitCode::from(2);
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let Some(dir) = tau::project::find_project_dir(&cwd) else {
+        eprintln!("error: there is no tau.toml here or in a folder above");
+        return ExitCode::from(1);
+    };
+    let opts = tau::project::LoadOptions { fetch_all: true, update_locks: !args.is_empty(), ..Default::default() };
+    match tau::project::load(&dir, opts) {
+        Ok(_) => {
+            println!("dependencies are ready");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprint!("{}", e.render());
+            ExitCode::from(1)
+        }
+    }
+}
+
 // ------------------------------------------------------------------ tokens and parse (one file)
 
 fn single_file_tools(cmd: &str, rest: &[String]) -> ExitCode {
@@ -305,7 +333,7 @@ fn load_program(target: &Target, all_modules: bool) -> Result<tau::Workspace, Ex
                 ExitCode::from(1)
             })
         }
-        Target::Path(p) => tau::project::load(p, tau::project::LoadOptions { all_modules }).map_err(|e| {
+        Target::Path(p) => tau::project::load(p, tau::project::LoadOptions { all_modules, ..Default::default() }).map_err(|e| {
             eprint!("{}", e.render());
             ExitCode::from(1)
         }),
@@ -432,9 +460,22 @@ fn is_library(target: &Target) -> bool {
     }
 }
 
-/// `tau check <file|-> --json`: for editors. Always exits 0 once the output was produced; errors are in the JSON.
+/// `tau check <file|-> --json [--file PATH]`: for editors. Always exits 0 once the output was produced;
+/// errors are in the JSON. With `--file`, the text on standard input is the current text of that file,
+/// and it is checked as part of its package.
 fn check_json_command(args: &[String]) -> ExitCode {
-    let Some(file) = args.iter().find(|a| !a.starts_with('-') || *a == "-") else {
+    let mut file_arg: Option<&str> = None;
+    let mut real_path: Option<&str> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => {}
+            "--file" => real_path = it.next().map(String::as_str),
+            s if file_arg.is_none() && (!s.starts_with('-') || s == "-") => file_arg = Some(s),
+            _ => {}
+        }
+    }
+    let Some(file) = file_arg else {
         eprint!("{USAGE}");
         return ExitCode::from(2);
     };
@@ -442,7 +483,10 @@ fn check_json_command(args: &[String]) -> ExitCode {
         Ok(s) => s,
         Err(c) => return c,
     };
-    println!("{}", tau::editor::check_json(&src));
+    match real_path {
+        Some(p) => println!("{}", tau::editor::check_json_file(std::path::Path::new(p), &src)),
+        None => println!("{}", tau::editor::check_json(&src)),
+    }
     ExitCode::SUCCESS
 }
 

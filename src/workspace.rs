@@ -26,7 +26,7 @@ impl Workspace {
         let base = map.add(name, src.to_string());
         let module = crate::parser::parse_module_at(src, base)?;
         let mut mods = prelude::load_into(&mut map);
-        mods.push(ModuleSrc { path: "main".to_string(), module, builtin: false, package: String::new() });
+        mods.push(ModuleSrc { path: "main".to_string(), module, builtin: false, package: String::new(), file: Some(0) });
         let root = mods.len() - 1;
         Ok(Workspace { map, mods, root })
     }

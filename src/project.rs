@@ -63,6 +63,15 @@ pub struct Manifest {
 
 pub const MANIFEST: &str = "tau.toml";
 
+/// A path as people write it: on Windows, `canonicalize` gives `\\?\C:\dir`, and the `\\?\` is dropped.
+pub fn display_path(p: &Path) -> String {
+    let s = p.display().to_string();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => rest.to_string(),
+        _ => s,
+    }
+}
+
 /// A name that can be used in `use`: letters, digits and `_`, not starting with a digit.
 pub fn is_identifier(s: &str) -> bool {
     let mut cs = s.chars();
@@ -111,8 +120,8 @@ impl Manifest {
 
     pub fn read(dir: &Path) -> Result<Manifest, String> {
         let path = dir.join(MANIFEST);
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        Manifest::parse(&text, dir).map_err(|e| format!("{}: {e}", path.display()))
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", display_path(&path)))?;
+        Manifest::parse(&text, dir).map_err(|e| format!("{}: {e}", display_path(&path)))
     }
 }
 
@@ -174,6 +183,18 @@ pub fn find_project_dir(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The package folder that `file` is in the `src` of, if any (the file is then a module of that package).
+pub fn project_of_file(file: &Path) -> Option<PathBuf> {
+    let mut cur = file.parent();
+    while let Some(d) = cur {
+        if d.join(MANIFEST).is_file() && file.starts_with(d.join("src")) {
+            return Some(d.to_path_buf());
+        }
+        cur = d.parent();
+    }
+    None
+}
+
 /// The entry file of a package: `src/main.tau`, or for a library `src/lib.tau`. The flag says
 /// whether it is a library (nothing to run, but it can be checked and tested).
 pub fn project_entry(dir: &Path) -> Result<(PathBuf, bool), String> {
@@ -185,7 +206,7 @@ pub fn project_entry(dir: &Path) -> Result<(PathBuf, bool), String> {
     if lib.is_file() {
         return Ok((lib, true));
     }
-    Err(format!("{} has neither src/main.tau (a program) nor src/lib.tau (a library)", dir.display()))
+    Err(format!("{} has neither src/main.tau (a program) nor src/lib.tau (a library)", display_path(dir)))
 }
 
 // ------------------------------------------------------------------ loading
@@ -212,11 +233,20 @@ impl LoadError {
     }
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 pub struct LoadOptions {
     /// Also load every `.tau` file under the package's `src/` (so `tau test` finds all tests,
     /// even in modules that nothing imports).
     pub all_modules: bool,
+    /// Where git dependencies are kept (default: `crate::gitdeps::home()`).
+    pub home: Option<PathBuf>,
+    /// Forget the pinned commits of branch dependencies and look them up again.
+    pub update_locks: bool,
+    /// Fetch every dependency, also those no module uses (`tau fetch`).
+    pub fetch_all: bool,
+    /// Files whose text is given instead of read from disk (an editor's unsaved buffers); the paths
+    /// must be absolute and canonical.
+    pub overrides: Vec<(PathBuf, String)>,
 }
 
 struct Pkg {
@@ -237,7 +267,11 @@ struct Loader {
     pkg_by_name: HashMap<String, usize>,
     pkg_dirs: HashMap<usize, PathBuf>,
     queue: Vec<(Vec<String>, usize)>,
+    root_file: PathBuf,
     cwd: Option<PathBuf>,
+    lock: crate::gitdeps::Lock,
+    home: PathBuf,
+    overrides: Vec<(PathBuf, String)>,
 }
 
 /// Load the program whose entry is `entry`: a `.tau` file, a project folder, or a `tau.toml`.
@@ -251,11 +285,19 @@ pub fn load(entry: &Path, opts: LoadOptions) -> Result<Workspace, LoadError> {
         pkg_by_name: HashMap::new(),
         pkg_dirs: HashMap::new(),
         queue: Vec::new(),
+        root_file: root_file.clone(),
         cwd: std::env::current_dir().ok().and_then(|p| p.canonicalize().ok()),
+        lock: crate::gitdeps::Lock::default(),
+        home: opts.home.clone().unwrap_or_else(crate::gitdeps::home),
+        overrides: opts.overrides.clone(),
     };
     let (src_dir, deps) = match &project {
         Some(dir) => {
             let m = Manifest::read(dir).map_err(LoadError::plain)?;
+            l.lock = crate::gitdeps::Lock::read(dir).map_err(LoadError::plain)?;
+            if opts.update_locks {
+                l.lock.forget_moving();
+            }
             let deps = l.resolve_deps(&m).map_err(LoadError::plain)?;
             (dir.join("src"), deps)
         }
@@ -264,6 +306,9 @@ pub fn load(entry: &Path, opts: LoadOptions) -> Result<Workspace, LoadError> {
     l.pkgs.push(Pkg { prefix: String::new(), src: src_dir.clone(), deps });
     l.add_module(&root_file, "main".to_string(), 0)?;
     l.drain()?;
+    if opts.fetch_all {
+        l.ensure_all(0)?;
+    }
     if opts.all_modules {
         let mut files = Vec::new();
         collect_tau_files(&src_dir, &mut files);
@@ -276,6 +321,9 @@ pub fn load(entry: &Path, opts: LoadOptions) -> Result<Workspace, LoadError> {
             l.add_module(&f, rel.join("."), 0)?;
         }
         l.drain()?;
+    }
+    if let Some(dir) = &project {
+        l.lock.write(dir).map_err(LoadError::plain)?;
     }
     let mut mods = prelude::load_into(&mut l.map);
     let n_lib = mods.len();
@@ -379,8 +427,11 @@ fn use_paths(m: &Module) -> Vec<Vec<String>> {
 impl Loader {
     fn display(&self, p: &Path) -> String {
         match &self.cwd {
-            Some(c) => p.strip_prefix(c).unwrap_or(p).display().to_string(),
-            None => p.display().to_string(),
+            Some(c) => match p.strip_prefix(c) {
+                Ok(rel) => rel.display().to_string(),
+                Err(_) => display_path(p),
+            },
+            None => display_path(p),
         }
     }
 
@@ -393,9 +444,20 @@ impl Loader {
         if self.by_path.contains_key(&canon) {
             return Ok(());
         }
-        let src = std::fs::read_to_string(file).map_err(|e| self.fail(format!("cannot read {}: {e}", self.display(file))))?;
+        if canon != "main" && file == self.root_file {
+            return Err(self.fail(format!(
+                "`use {canon}` names {}, which is the entry file of this run, and no other module can use that. Run the package's src/main.tau instead.",
+                self.display(file)
+            )));
+        }
+        let src = match self.overrides.iter().find(|(p, _)| p == file) {
+            Some((_, text)) => text.clone(),
+            None => std::fs::read_to_string(file).map_err(|e| self.fail(format!("cannot read {}: {e}", self.display(file))))?,
+        };
         let name = self.display(file);
         let base = self.map.add(name, src.clone());
+        let file_idx = self.map.files.len() - 1;
+        self.map.files[file_idx].path = Some(file.to_path_buf());
         let module = match crate::parser::parse_module_at(&src, base) {
             Ok(m) => m,
             Err(d) => {
@@ -408,7 +470,7 @@ impl Loader {
             self.queue.push((p, pkg));
         }
         self.by_path.insert(canon.clone(), self.mods.len());
-        self.mods.push(ModuleSrc { path: canon, module, builtin: false, package: self.pkgs[pkg].prefix.clone() });
+        self.mods.push(ModuleSrc { path: canon, module, builtin: false, package: self.pkgs[pkg].prefix.clone(), file: Some(file_idx) });
         Ok(())
     }
 
@@ -479,6 +541,16 @@ impl Loader {
         Ok(i)
     }
 
+    /// Register every dependency of package `pkg`, and theirs (so that all of them are fetched).
+    fn ensure_all(&mut self, pkg: usize) -> Result<(), LoadError> {
+        let deps = self.pkgs[pkg].deps.clone();
+        for (name, dir) in deps {
+            let i = self.ensure_package(&name, &dir)?;
+            self.ensure_all(i)?;
+        }
+        Ok(())
+    }
+
     /// The folder of each dependency in a manifest.
     fn resolve_deps(&mut self, m: &Manifest) -> Result<Vec<(String, PathBuf)>, String> {
         let mut out = Vec::new();
@@ -488,7 +560,7 @@ impl Loader {
                     let dir = m.dir.join(p);
                     dir.canonicalize().map_err(|e| format!("the dependency `{}` of `{}`: cannot find {} ({e})", d.name, m.name, dir.display()))?
                 }
-                DepSpec::Git { .. } => crate::gitdeps::checkout(&m.dir, d).map_err(|e| format!("the dependency `{}` of `{}`: {e}", d.name, m.name))?,
+                DepSpec::Git { .. } => crate::gitdeps::checkout(&mut self.lock, &self.home, d).map_err(|e| format!("the dependency `{}` of `{}`: {e}", d.name, m.name))?,
             };
             out.push((d.name.clone(), dir));
         }

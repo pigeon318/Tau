@@ -1,0 +1,17 @@
+// The root module of the package `kepler`: what `use kepler` gives.
+
+use orbit
+
+pub const G: f64 = 6.674e-11
+
+// Orbital period in seconds around a mass, for a circular orbit of radius `r` metres.
+pub fn period(mass: f64, r: f64) -> f64 {
+    orbit.two_pi() * sqrt(r ^ 3 / (G * mass))
+}
+
+#[test]
+fn a_low_earth_orbit_takes_about_an_hour_and_a_half() {
+    let minutes = period(5.972e24, 6.771e6) / 60.0
+    assert(minutes > 90.0)
+    assert(minutes < 93.0)
+}

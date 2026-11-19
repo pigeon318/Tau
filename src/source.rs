@@ -12,6 +12,8 @@ pub struct SourceFile {
     pub src: String,
     /// The offset of the first byte of this file in the shared offset space.
     pub base: usize,
+    /// The file on disk (an absolute path), when there is one.
+    pub path: Option<std::path::PathBuf>,
 }
 
 #[derive(Default, Debug)]
@@ -30,7 +32,7 @@ impl SourceMap {
         let base = self.next;
         // one extra offset, so a span at the very end of a file still belongs to it
         self.next = base + src.len() + 1;
-        self.files.push(SourceFile { name: name.into(), src, base });
+        self.files.push(SourceFile { name: name.into(), src, base, path: None });
         base
     }
 

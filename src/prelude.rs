@@ -15,6 +15,9 @@ pub struct ModuleSrc {
     /// or empty for the program's own package and for built-in modules. A `use` inside the module
     /// is looked up under this prefix first.
     pub package: String,
+    /// Which file of the program's `SourceMap` this module was read from (`None` when the module was not
+    /// registered in a map).
+    pub file: Option<usize>,
 }
 
 impl ModuleSrc {
@@ -39,7 +42,7 @@ pub fn load() -> Vec<ModuleSrc> {
     SOURCES
         .iter()
         .map(|(path, src)| match parse_module(src) {
-            Ok(module) => ModuleSrc { path: path.to_string(), module, builtin: true, package: String::new() },
+            Ok(module) => ModuleSrc { path: path.to_string(), module, builtin: true, package: String::new(), file: None },
             Err(d) => panic!("built-in module `{path}` failed to parse:\n{}", d.render(src, path)),
         })
         .collect()
@@ -52,8 +55,9 @@ pub fn load_into(map: &mut crate::source::SourceMap) -> Vec<ModuleSrc> {
         .iter()
         .map(|(path, src)| {
             let base = map.add(format!("<{path}>"), src.to_string());
+            let file = Some(map.files.len() - 1);
             match crate::parser::parse_module_at(src, base) {
-                Ok(module) => ModuleSrc { path: path.to_string(), module, builtin: true, package: String::new() },
+                Ok(module) => ModuleSrc { path: path.to_string(), module, builtin: true, package: String::new(), file },
                 Err(d) => panic!("built-in module `{path}` failed to parse:\n{}", map.render(&d)),
             }
         })

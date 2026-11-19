@@ -178,7 +178,7 @@ fn tests_in_other_modules_are_found_when_asked_for() {
         ("src/util.tau", "pub fn double(x: i64) -> i64 { x * 2 }\n\n#[test]\nfn doubles() {\n    assert_eq(double(4), 8)\n}\n\n#[test]\nfn broken() {\n    assert_eq(double(1), 3)\n}\n"),
         ("src/orphan.tau", "#[test]\nfn lonely() {\n    assert(true)\n}\n"),
     ]);
-    let ws = project::load(&t.0, LoadOptions { all_modules: true }).unwrap_or_else(|e| panic!("{}", e.render()));
+    let ws = project::load(&t.0, LoadOptions { all_modules: true, ..Default::default() }).unwrap_or_else(|e| panic!("{}", e.render()));
     let r = tau::test_workspace(&ws, None, u64::MAX);
     assert!(r.diagnostics.is_empty());
     let mut names: Vec<(String, bool)> = r.results.iter().map(|t| (t.name.clone(), t.passed)).collect();
@@ -428,7 +428,7 @@ fn new_creates_a_package_that_runs_and_a_library_that_tests() {
     let dir = project::new_package(&t.0, "hello", false).unwrap();
     assert_eq!(run_both(&dir), "hello, world\n");
     let lib = project::new_package(&t.0, "mylib", true).unwrap();
-    let ws = project::load(&lib, LoadOptions { all_modules: true }).unwrap_or_else(|e| panic!("{}", e.render()));
+    let ws = project::load(&lib, LoadOptions { all_modules: true, ..Default::default() }).unwrap_or_else(|e| panic!("{}", e.render()));
     let r = tau::test_workspace(&ws, None, u64::MAX);
     assert!(r.diagnostics.is_empty() && r.results.len() == 1 && r.results[0].passed, "{:?}", r.results);
     assert!(project::new_package(&t.0, "hello", false).unwrap_err().contains("already exists"));
@@ -520,4 +520,46 @@ fn programs_on_standard_input_still_work() {
     c.stdin.take().unwrap().write_all(b"fn main() { print(1 + 2) }\n").unwrap();
     let o = c.wait_with_output().unwrap();
     assert_eq!(String::from_utf8_lossy(&o.stdout), "3\n");
+}
+
+// ------------------------------------------------------------------ the example projects
+
+#[test]
+fn the_example_projects_run_and_their_tests_pass() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples").join("projects");
+    let mut programs = 0;
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let dir = entry.unwrap().path();
+        if !dir.join("tau.toml").is_file() {
+            continue;
+        }
+        if dir.join("src").join("main.tau").is_file() {
+            let want = std::fs::read_to_string(dir.join("expected.txt")).unwrap_or_else(|_| panic!("{} needs an expected.txt", dir.display()));
+            assert_eq!(run_both(&dir), want, "{}", dir.display());
+            programs += 1;
+        }
+        // every package's own tests pass
+        let ws = project::load(&dir, LoadOptions { all_modules: true, ..Default::default() }).unwrap_or_else(|e| panic!("{}", e.render()));
+        let r = tau::test_workspace(&ws, None, u64::MAX);
+        assert!(r.diagnostics.is_empty(), "{}", dir.display());
+        for t in &r.results {
+            assert!(t.passed, "{}: {} failed: {}", dir.display(), t.name, t.message);
+        }
+    }
+    assert!(programs >= 1, "no example program found in {}", root.display());
+}
+
+#[test]
+fn the_entry_file_cannot_be_imported_by_name() {
+    let t = Tmp::new(&[("tau.toml", "[package]\nname = \"p\"\n"), ("src/main.tau", "use util\nfn main() {}\n"), ("src/util.tau", "use main\npub fn f() {}\n")]);
+    // `use main` is the entry: refused by the checker as there is no such module
+    let e = rejected(&t.0);
+    assert!(e.contains("unresolved import `main`"), "{e}");
+    // a file that is run directly while another module imports it by name
+    let t = Tmp::new(&[("a.tau", "use b\nfn main() {}\n"), ("b.tau", "use a\npub fn f() {}\n")]);
+    let e = match project::load(&t.path("a.tau"), LoadOptions::default()) {
+        Ok(_) => panic!("should not load"),
+        Err(e) => e.render(),
+    };
+    assert!(e.contains("entry file") && e.contains("`use a`"), "{e}");
 }

@@ -1,0 +1,12 @@
+use bodies.{Body, EARTH, MOON}
+use kepler
+
+fn report(b: Body, r: f64) {
+    let minutes = kepler.period(b.mass, r) / 60.0
+    print("{b.name}: {round(minutes)} minutes at {round(r / 1000.0)} km")
+}
+
+fn main() {
+    report(EARTH, 6.771e6)
+    report(MOON, 1.838e6)
+}
