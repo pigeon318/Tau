@@ -41,7 +41,7 @@ fn lower_all<'r>(mods: &[ModRef], prog: &'r Program, results: &'r Results) -> lo
     let mut lw = lower::Lowerer::new(prog, results);
     for m in mods {
         // a library module's functions have no body unless the library is written in Tau
-        let mut lower_fn = |lw: &mut lower::Lowerer<'r>, f: &FnDecl| {
+        let lower_fn = |lw: &mut lower::Lowerer<'r>, f: &FnDecl| {
             if !m.builtin || f.body.is_some() {
                 lw.lower_fn_decl(f, false);
             }

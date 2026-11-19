@@ -190,6 +190,7 @@ pub(crate) enum AdtSrc<'a> {
 pub(crate) struct AliasEntry<'a> {
     pub decl: &'a TypeAliasDecl,
     pub module: usize,
+    pub public: bool,
     pub generics: Vec<(String, GenericId)>,
     pub ty: Option<Ty>,
     pub resolving: bool,
@@ -251,8 +252,6 @@ pub(crate) struct Checker<'a> {
     pub mod_builtin: Vec<bool>,
     /// Each module's package prefix, for looking up its `use` paths.
     pub mod_package: Vec<String>,
-    /// The entry module.
-    pub user: usize,
     pub prog: Program,
     pub infer: Infer,
     pub scopes: Vec<ModScope>,
@@ -279,7 +278,7 @@ impl<'a> Checker<'a> {
         let mods: Vec<(String, &'a Module)> = refs.iter().map(|m| (m.path.to_string(), m.module)).collect();
         let mod_builtin = refs.iter().map(|m| m.builtin).collect();
         let mod_package = refs.iter().map(|m| m.package.to_string()).collect();
-        let user_idx = root;
+        let _ = root; // the entry module is found by the later stages (it holds `main`)
         let mod_by_path = mods
             .iter()
             .enumerate()
@@ -290,7 +289,6 @@ impl<'a> Checker<'a> {
             mods,
             mod_builtin,
             mod_package,
-            user: user_idx,
             prog: Program::default(),
             infer: Infer::default(),
             scopes,

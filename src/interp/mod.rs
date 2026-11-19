@@ -454,7 +454,6 @@ impl<'a> Interp<'a> {
             Some(r) => r,
             None => (fid, subst),
         };
-        let def = self.prog.fn_(fid);
         let Some(decl) = self.fns[fid.idx()] else {
             return self.call_builtin_fn(fid, args, subst);
         };

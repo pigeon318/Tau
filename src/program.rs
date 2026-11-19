@@ -94,6 +94,7 @@ pub struct TraitDef {
     /// checker (`Num`, `Eq`, `Display`, ...), in addition to explicit impls.
     pub builtin_rule: bool,
     pub module: usize,
+    pub public: bool,
 }
 
 #[derive(Clone, Debug)]

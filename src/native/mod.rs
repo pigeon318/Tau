@@ -237,6 +237,11 @@ pub fn build_source(src: &str) -> Result<PathBuf, NativeError> {
     compile_c(&emit_c(src)?)
 }
 
+/// Check, translate and compile a whole program (all its modules); the path of the executable.
+pub fn build_workspace(ws: &crate::Workspace) -> Result<PathBuf, NativeError> {
+    compile_c(&emit_c_workspace(ws)?)
+}
+
 /// What a native program did.
 #[derive(Debug, PartialEq)]
 pub struct NativeOutput {
@@ -254,6 +259,17 @@ pub fn run_captured(src: &str) -> Result<NativeOutput, NativeError> {
 /// Like `run_captured`, with extra environment variables (e.g. `TAU_THREADS`).
 pub fn run_captured_env(src: &str, env: &[(&str, &str)]) -> Result<NativeOutput, NativeError> {
     let exe = build_source(src)?;
+    run_exe_captured(&exe, env)
+}
+
+/// Build a whole program (all its modules) and run it, capturing its output (used by tests).
+pub fn run_workspace_captured(ws: &crate::Workspace) -> Result<NativeOutput, NativeError> {
+    let exe = build_workspace(ws)?;
+    run_exe_captured(&exe, &[])
+}
+
+fn run_exe_captured(exe: &Path, env: &[(&str, &str)]) -> Result<NativeOutput, NativeError> {
+    let exe = exe.to_path_buf();
     // TAU_VALGRIND=1 runs the program under valgrind: an invalid access or double free gives exit
     // status 99, and a leak on a normal exit gives 98 (used by the test suite's memory run)
     let valgrind = std::env::var("TAU_VALGRIND").map(|v| !v.is_empty() && v != "0").unwrap_or(false);

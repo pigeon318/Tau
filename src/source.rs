@@ -5,6 +5,7 @@
 use crate::diag::{snippet, Diagnostic};
 use crate::span::Span;
 
+#[derive(Debug)]
 pub struct SourceFile {
     /// How the file is shown in messages: a path, or `<std.fs>` for a built-in module.
     pub name: String,
@@ -13,7 +14,7 @@ pub struct SourceFile {
     pub base: usize,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct SourceMap {
     pub files: Vec<SourceFile>,
     next: usize,
