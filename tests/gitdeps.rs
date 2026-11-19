@@ -39,7 +39,7 @@ fn have_git() -> bool {
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let o = Command::new("git")
-        .current_dir(dir)
+        .current_dir(tau::project::display_path(dir))
         .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
         .args(args)
         .output()
@@ -73,7 +73,7 @@ fn app(t: &Tmp, dep: &str) -> PathBuf {
 }
 
 fn quote_path(p: &Path) -> String {
-    format!("\"{}\"", p.display().to_string().replace('\\', "/"))
+    format!("\"{}\"", tau::project::display_path(p).replace('\\', "/"))
 }
 
 fn run(app: &Path, opts: LoadOptions) -> Result<String, String> {

@@ -118,6 +118,11 @@ pub fn home() -> PathBuf {
     PathBuf::from(base.unwrap_or_else(|_| ".".into())).join(".tau")
 }
 
+/// A path in the form git understands (on Windows without the `\\?\` prefix).
+fn plain(p: &Path) -> PathBuf {
+    PathBuf::from(crate::project::display_path(p))
+}
+
 fn short_hash(s: &str) -> String {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
@@ -138,7 +143,8 @@ fn git(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
     let mut c = Command::new("git");
     c.args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
     if let Some(d) = cwd {
-        c.current_dir(d);
+        // (git does not understand Windows' `\\?\C:\...` form of a path)
+        c.current_dir(plain(d));
     }
     let out = c.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -177,7 +183,7 @@ pub fn checkout(lock: &mut Lock, home: &Path, dep: &Dependency) -> Result<PathBu
             return Ok(());
         }
         std::fs::create_dir_all(db.parent().unwrap()).map_err(|e| format!("cannot create {}: {e}", db.display()))?;
-        let db_s = db.to_string_lossy().to_string();
+        let db_s = plain(&db).to_string_lossy().to_string();
         if have_db {
             git(&["--git-dir", &db_s, "fetch", "--quiet", "--force", "--tags", "--prune", "origin", "+refs/heads/*:refs/heads/*"], None)?;
         } else {
@@ -199,7 +205,7 @@ pub fn checkout(lock: &mut Lock, home: &Path, dep: &Dependency) -> Result<PathBu
 
     if rev.is_none() {
         ensure_db(&mut fetched)?;
-        let db_s = db.to_string_lossy().to_string();
+        let db_s = plain(&db).to_string_lossy().to_string();
         let spec = match reference {
             GitRef::Default => "HEAD".to_string(),
             GitRef::Tag(t) => format!("refs/tags/{t}^{{commit}}"),
@@ -218,10 +224,10 @@ pub fn checkout(lock: &mut Lock, home: &Path, dep: &Dependency) -> Result<PathBu
     let dest = dest_for(&rev);
     if !ready(&dest, &rev) {
         ensure_db(&mut fetched)?;
-        let db_s = db.to_string_lossy().to_string();
+        let db_s = plain(&db).to_string_lossy().to_string();
         let _ = std::fs::remove_dir_all(&dest);
         std::fs::create_dir_all(&dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
-        let dest_s = dest.to_string_lossy().to_string();
+        let dest_s = plain(&dest).to_string_lossy().to_string();
         let result = git(&["clone", "--quiet", "--no-checkout", "--", &db_s, &dest_s], None).and_then(|_| git(&["checkout", "--quiet", "--detach", &rev], Some(&dest)));
         if let Err(e) = result {
             let _ = std::fs::remove_dir_all(&dest);
