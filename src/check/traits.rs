@@ -100,11 +100,12 @@ impl<'a> Checker<'a> {
         }
         let mut found: Option<usize> = None;
         for i in 0..self.prog.impls.len() {
+            match &self.prog.impls[i].trait_ref {
+                Some(t) if t.trait_ == tr && t.args.len() == args.len() => {}
+                _ => continue,
+            }
             let imp = self.prog.impls[i].clone();
             let Some(tref) = &imp.trait_ref else { continue };
-            if tref.trait_ != tr || tref.args.len() != args.len() {
-                continue;
-            }
             let snap = self.infer.snapshot();
             let subst = self.fresh_subst(&imp.generics, Span::default());
             let ok = self.infer.unify(&imp.self_ty.subst(&subst), ty) && self.generic_bounds_hold(&imp.generics, &subst, 0);
@@ -185,11 +186,11 @@ impl<'a> Checker<'a> {
             return true;
         }
         for i in 0..self.prog.impls.len() {
-            let imp = self.prog.impls[i].clone();
-            let Some(tref) = &imp.trait_ref else { continue };
-            if tref.trait_ != tr {
+            if self.prog.impls[i].trait_ref.as_ref().map(|t| t.trait_) != Some(tr) {
                 continue;
             }
+            let imp = self.prog.impls[i].clone();
+            let Some(tref) = &imp.trait_ref else { continue };
             let snap = self.infer.snapshot();
             let subst = self.fresh_subst(&imp.generics, Span::default());
             let mut ok = self.infer.unify(&imp.self_ty.subst(&subst), &ty);
@@ -353,10 +354,20 @@ impl<'a> Checker<'a> {
             // inherent impls first, then trait impls
             for want_trait in [false, true] {
                 for i in 0..self.prog.impls.len() {
-                    let imp = self.prog.impls[i].clone();
-                    if imp.trait_ref.is_some() != want_trait {
-                        continue;
+                    {
+                        // cheap tests first: most impls have nothing to do with this call
+                        let imp = &self.prog.impls[i];
+                        if imp.trait_ref.is_some() != want_trait {
+                            continue;
+                        }
+                        if !imp.methods.iter().any(|(n, _)| n == name) {
+                            match &imp.trait_ref {
+                                Some(tref) if self.prog.trait_(tref.trait_).methods.iter().any(|(n, _)| n == name) => {}
+                                _ => continue,
+                            }
+                        }
                     }
+                    let imp = self.prog.impls[i].clone();
                     let (fid, is_default) = match imp.methods.iter().find(|(n, _)| n == name) {
                         Some((_, f)) => (*f, false),
                         None => {
