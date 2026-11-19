@@ -17,6 +17,8 @@ USAGE:
     tau build <file> --emit-c  print the generated C instead
     tau test <file> [filter]   run the #[test] functions (those whose name contains `filter`)
     tau check <file> --types   ... and list the inferred type of every binding
+    tau check <file> --json    ... and print diagnostics and hover types as JSON, for editors
+                               (`-` as the file reads the program from stdin)
     tau clean                  delete the cache of compiled programs
     tau --version              show the version and which C compiler the native backend would use
 
@@ -49,7 +51,13 @@ fn main() -> ExitCode {
     };
     let flags: Vec<&str> = args.iter().skip(2).map(String::as_str).collect();
 
-    let src = match std::fs::read_to_string(file) {
+    let read = if file == "-" {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).map(|_| buf)
+    } else {
+        std::fs::read_to_string(file)
+    };
+    let src = match read {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: cannot read {file}: {e}");
@@ -92,6 +100,11 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        "check" if flags.contains(&"--json") => {
+            // for editors: always exits 0 when the output was produced; errors are in the JSON
+            println!("{}", tau::editor::check_json(&src));
+            ExitCode::SUCCESS
+        }
         "check" => match tau::analyze_source(&src) {
             Err(d) => {
                 eprint!("{}", d.render(&src, file));
