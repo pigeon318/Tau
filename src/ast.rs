@@ -324,7 +324,8 @@ pub enum UnOp {
 #[derive(Clone, Debug, PartialEq)]
 pub enum StrPiece {
     Lit(String),
-    Interp(Box<Expr>),
+    /// `{expr}` or `{expr:spec}`.
+    Interp(Box<Expr>, Option<crate::fmtspec::Fmt>),
 }
 
 #[derive(Clone, Debug, PartialEq)]

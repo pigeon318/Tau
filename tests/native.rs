@@ -912,3 +912,88 @@ fn loops_over_array_literals_keep_the_array_alive() {
         assert!(c.contains("arr_tmp"), "the array in a `for` loop should have a variable of its own");
     }
 }
+
+// ------------------------------------------------------------------ format specs
+
+#[test]
+fn format_specs_print_the_same_text_on_both_backends() {
+    let out = body(
+        "let pi = 3.14159265\n let n = 42\n let neg = -42\n\
+         print(\"[{pi:.2}] [{pi:10.3}] [{pi:<10.1}] [{pi:^10.4}] [{pi:+.1}] [{pi:010.2}]\")\n\
+         print(\"[{n:6}] [{n:<6}] [{n:^6}] [{n:*^7}] [{n:06}] [{neg:06}] [{n:+}] [{neg:+6}]\")\n\
+         print(\"[{n:x}] [{n:#X}] [{n:b}] [{n:#010b}] [{n:o}] [{n:#o}] [{neg:x}]\")\n\
+         let small: i8 = -1\n let big: u128 = 340282366920938463463374607431768211455\n let low: i128 = -170141183460469231731687303715884105728\n\
+         print(\"[{small:x}] [{small:b}] [{big:x}] [{big:#b}] [{low:x}] [{low}]\")\n\
+         print(\"[{pi:e}] [{pi:.3E}] [{1500.0:e}] [{0.00015:e}] [{0.0:e}] [{1e21:e}] [{0.1f32:e}] [{0.1f32:.10}]\")\n\
+         let s = \"héllo\"\n let owned = \"wörld\".to_string()\n\
+         print(\"[{s:8}] [{s:>8}] [{s:.3}] [{s:-^9}] [{owned:^9.4}] [{s:2}]\")\n\
+         print(\"[{vec[1, 2, 3]:>12}] [{(1, 2.5):<14}] [{true:>6}] [{'x':^5}] [{'é':>3}]\")\n\
+         let z = 1.5 + 2.0i\n print(\"[{z:.2}] [{z:>14.1}] [{z:e}]\")\n\
+         print(\"[{2.5:.0}] [{3.5:.0}] [{0.125:.2}] [{0.375:.2}] [{1e21:.1}] [{-0.0:.1}] [{-0.0:6}] [{123456789.0:.3}]\")\n\
+         let nan = 0.0 / 0.0\n let inf = 1.0 / 0.0\n\
+         print(\"[{nan:6}] [{nan:+.2}] [{inf:+8}] [{inf:08}] [{-inf:08}] [{inf:e}]\")\n\
+         print(\"[{n:<<5}] [{n:0>5}] [{n:é^7}]\")",
+    );
+    assert!(out.starts_with("[3.14] [     3.142] [3.1       ] [  3.1416  ] [+3.1] [0000003.14]\n"), "{out}");
+    assert!(out.contains("[2a] [0X2A] [101010] [0b00101010] [52] [0o52] [ffffffffffffffd6]\n"), "{out}");
+    assert!(out.contains(&format!("[ff] [11111111] [{}] [0b{}] [80000000000000000000000000000000] [-170141183460469231731687303715884105728]\n", "f".repeat(32), "1".repeat(128))), "{out}");
+    assert!(out.contains("[3.14159265e0] [3.142E0] [1.5e3] [1.5e-4] [0e0] [1e21] [1e-1] [0.1000000015]\n"), "{out}");
+    assert!(out.contains("[2] [4] [0.12] [0.38] [1000000000000000000000.0] [-0.0] [  -0.0] [123456789.000]\n"), "{out}");
+    assert!(out.contains("[   NaN] [NaN] [    +inf] [     inf] [    -inf] [inf]\n"), "{out}");
+    assert!(out.ends_with("[42<<<] [00042] [éé42ééé]\n"), "{out}");
+}
+
+#[test]
+fn format_specs_agree_on_many_random_numbers() {
+    // random floats of every size (and ties like 0.125), formatted with a spread of specs
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+    let mut rng = Rng(0xF04A_7000_1234_5678);
+    let float_specs = [".0", ".1", ".3", ".10", ".17", ".30", "e", ".3e", ".0e", ".20E", "12.4", "<12.4", "^+14.3", "012.2", "+e", "20", ">+016.5e", "*>12.2"];
+    let int_specs = ["x", "#X", "b", "o", "#o", "08", "+", "<10", "#018b", "+012", "^9", "x"];
+    let mut src = String::from("fn main() {\n");
+    let mut values: Vec<f64> = vec![0.5, 1.5, 2.5, 0.125, 0.375, 1e15, 1e16, 1e22, 1e-7, 123456789.125, 5e-324, 1.7976931348623157e308, 0.30000000000000004];
+    for _ in 0..70 {
+        // a random bit pattern (finite), and numbers of moderate size
+        let bits = rng.next();
+        let f = f64::from_bits(bits);
+        if f.is_finite() {
+            values.push(f);
+        }
+        values.push((rng.next() % 2_000_000) as f64 / 1000.0 - 1000.0);
+        values.push((rng.next() % 1000) as f64 / 8.0);
+    }
+    for (i, v) in values.iter().enumerate() {
+        let lit = format!("{v:?}"); // shortest text that reads back exactly: `1e22`, `0.5`, `-3.0`
+        let lit = if lit.contains(['e', '.']) { lit } else { format!("{lit}.0") };
+        let spec = float_specs[i % float_specs.len()];
+        src.push_str(&format!(" print(\"{{{lit}:{spec}}}\")\n"));
+    }
+    let int_types = [("i8", 8, true), ("i16", 16, true), ("i32", 32, true), ("i64", 64, true), ("u8", 8, false), ("u16", 16, false), ("u32", 32, false), ("u64", 64, false)];
+    for i in 0..120 {
+        let (name, bits, signed) = int_types[i % int_types.len()];
+        let raw = rng.next();
+        let span = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let u = raw & span;
+        let lit = if signed {
+            // reinterpret the low `bits` bits as a signed number
+            let shift = 64 - bits;
+            ((u << shift) as i64 >> shift).to_string()
+        } else {
+            u.to_string()
+        };
+        let spec = int_specs[i % int_specs.len()];
+        // a negative literal is a negation of a positive one that has to fit: wrap it in a typed let
+        src.push_str(&format!(" let v{i}: {name} = {lit}\n print(\"{{v{i}:{spec}}}\")\n"));
+    }
+    src.push_str("}\n");
+    let out = same(&src);
+    assert!(out.lines().count() >= 300, "{}", out.lines().count());
+}

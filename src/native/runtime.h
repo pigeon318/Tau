@@ -493,6 +493,176 @@ static void tau_fmt_c64(tau_buf *b, tau_c64 z) {
     tau_buf_char(b, 'i');
 }
 
+/* ---------------------------------------------------------------- format specs ("{x:>8.3}")
+ *
+ * A port of src/fmtspec.rs: the interpreter and this code must produce the same text. `width` counts
+ * characters (UTF-8 code points). align: -1 not given, 0 left, 1 centre, 2 right. ty: 0 none, 1 x, 2 X,
+ * 3 b, 4 o, 5 e, 6 E. width 0 means no width and prec -1 no precision. */
+
+typedef struct { uint32_t fill; int8_t align; uint8_t plus, alt, zero; int32_t width, prec; int8_t ty; } tau_spec;
+
+static size_t tau_chars(const uint8_t *p, size_t n) {
+    size_t c = 0;
+    for (size_t i = 0; i < n; i++) if ((p[i] & 0xC0) != 0x80) c++;
+    return c;
+}
+
+static void tau_put_fill(tau_buf *b, uint32_t c, size_t times) {
+    uint8_t u[4];
+    size_t k;
+    if (c < 0x80) { u[0] = (uint8_t)c; k = 1; }
+    else if (c < 0x800) { u[0] = (uint8_t)(0xC0 | (c >> 6)); u[1] = (uint8_t)(0x80 | (c & 63)); k = 2; }
+    else if (c < 0x10000) { u[0] = (uint8_t)(0xE0 | (c >> 12)); u[1] = (uint8_t)(0x80 | ((c >> 6) & 63)); u[2] = (uint8_t)(0x80 | (c & 63)); k = 3; }
+    else { u[0] = (uint8_t)(0xF0 | (c >> 18)); u[1] = (uint8_t)(0x80 | ((c >> 12) & 63)); u[2] = (uint8_t)(0x80 | ((c >> 6) & 63)); u[3] = (uint8_t)(0x80 | (c & 63)); k = 4; }
+    for (size_t i = 0; i < times; i++) tau_buf_push(b, u, k);
+}
+
+/* `text` padded to the width; `def` is the alignment when none was given (0 left, 2 right) */
+static void tau_pad_into(tau_buf *b, const uint8_t *text, size_t n, tau_spec s, int def) {
+    size_t width = s.width > 0 ? (size_t)s.width : 0, len = tau_chars(text, n);
+    size_t gap = width > len ? width - len : 0, left, right;
+    int al = s.align < 0 ? def : s.align;
+    if (al == 0) { left = 0; right = gap; }
+    else if (al == 2) { left = gap; right = 0; }
+    else { left = gap / 2; right = gap - left; }
+    tau_put_fill(b, s.fill, left);
+    tau_buf_push(b, text, n);
+    tau_put_fill(b, s.fill, right);
+}
+
+/* a number: sign, prefix, digits; the `0` flag puts zeros between the prefix and the digits */
+static void tau_number_into(tau_buf *b, const char *sign, const char *prefix, const void *digits, size_t nd, tau_spec s) {
+    if (s.zero) {
+        size_t width = s.width > 0 ? (size_t)s.width : 0, used = strlen(sign) + strlen(prefix) + nd;
+        tau_buf_cstr(b, sign);
+        tau_buf_cstr(b, prefix);
+        for (size_t i = used; i < width; i++) tau_buf_char(b, '0');
+        tau_buf_push(b, digits, nd);
+        return;
+    }
+    tau_buf t = {0};
+    tau_buf_cstr(&t, sign);
+    tau_buf_cstr(&t, prefix);
+    tau_buf_push(&t, digits, nd);
+    tau_pad_into(b, t.ptr, t.len, s, 2);
+    free(t.ptr);
+}
+
+/* `pat` holds the bits of the value, sign-extended to 128 bits for signed types */
+static void tau_fmt_int_spec(tau_buf *b, unsigned __int128 pat, int is_signed, int bits, tau_spec s) {
+    char d[160];
+    if (s.ty == 0 || s.ty > 4) {
+        int neg = is_signed && (int)(pat >> 127);
+        unsigned __int128 mag = neg ? (unsigned __int128)0 - pat : pat;
+        size_t n = tau_u128_to_str(d, mag);
+        tau_number_into(b, neg ? "-" : (s.plus ? "+" : ""), "", d, n, s);
+        return;
+    }
+    unsigned __int128 mask = bits >= 128 ? ~(unsigned __int128)0 : (((unsigned __int128)1 << bits) - 1);
+    unsigned __int128 u = pat & mask;
+    unsigned radix = s.ty <= 2 ? 16 : s.ty == 3 ? 2 : 8;
+    const char *dig = s.ty == 2 ? "0123456789ABCDEF" : "0123456789abcdef";
+    char tmp[130];
+    size_t n = 0;
+    if (u == 0) tmp[n++] = '0';
+    while (u) { tmp[n++] = dig[(int)(u % radix)]; u /= radix; }
+    for (size_t i = 0; i < n; i++) d[i] = tmp[n - 1 - i];
+    const char *prefix = !s.alt ? "" : s.ty == 1 ? "0x" : s.ty == 2 ? "0X" : s.ty == 3 ? "0b" : "0o";
+    tau_number_into(b, s.plus ? "+" : "", prefix, d, n, s);
+}
+
+/* scientific notation as Rust writes it: 1.5e3, 1.50E-7 */
+static void tau_exp_text(tau_buf *t, double mag, int single, tau_spec s) {
+    const char *E = s.ty == 6 ? "E" : "e";
+    char xs[16];
+    if (s.prec >= 0) {
+        char m[1400];
+        snprintf(m, sizeof m, "%.*e", s.prec, mag);
+        char *e = strchr(m, 'e');
+        int ex = atoi(e + 1);
+        tau_buf_push(t, m, (size_t)(e - m));
+        tau_buf_cstr(t, E);
+        tau_buf_push(t, xs, (size_t)snprintf(xs, sizeof xs, "%d", ex));
+        return;
+    }
+    /* the shortest digits: those of the language's own float printing */
+    tau_buf p = {0};
+    tau_fmt_float(&p, mag, single);
+    char dg[400];
+    size_t nd = 0;
+    long ip = -1;
+    for (size_t i = 0; i < p.len; i++) {
+        if (p.ptr[i] == '.') ip = (long)nd;
+        else if (nd < sizeof dg) dg[nd++] = (char)p.ptr[i];
+    }
+    free(p.ptr);
+    if (ip < 0) ip = (long)nd;
+    size_t first = 0;
+    while (first < nd && dg[first] == '0') first++;
+    if (first == nd) { tau_buf_cstr(t, "0"); tau_buf_cstr(t, E); tau_buf_cstr(t, "0"); return; }
+    long ex = ip - (long)first - 1;
+    size_t last = nd;
+    while (last > first + 1 && dg[last - 1] == '0') last--;
+    tau_buf_char(t, dg[first]);
+    if (last - first > 1) { tau_buf_char(t, '.'); tau_buf_push(t, dg + first + 1, last - first - 1); }
+    tau_buf_cstr(t, E);
+    tau_buf_push(t, xs, (size_t)snprintf(xs, sizeof xs, "%ld", ex));
+}
+
+static void tau_fmt_float_spec(tau_buf *b, double x, int single, tau_spec s) {
+    int nan = isnan(x), inf = isinf(x), neg = signbit(x) && !nan;
+    double mag = fabs(x);
+    tau_buf t = {0};
+    if (nan) tau_buf_cstr(&t, "NaN");
+    else if (inf) tau_buf_cstr(&t, "inf");
+    else if (s.ty == 5 || s.ty == 6) tau_exp_text(&t, mag, single, s);
+    else if (s.prec >= 0) {
+        char tmp[1500];
+        int n = snprintf(tmp, sizeof tmp, "%.*f", s.prec, mag);
+        tau_buf_push(&t, tmp, (size_t)n);
+    } else tau_fmt_float(&t, mag, single);
+    const char *sign = neg ? "-" : (s.plus && !nan ? "+" : "");
+    if (nan || inf) {
+        tau_buf u = {0};
+        tau_buf_cstr(&u, sign);
+        tau_buf_push(&u, t.ptr, t.len);
+        tau_pad_into(b, u.ptr, u.len, s, 2);
+        free(u.ptr);
+    } else {
+        tau_number_into(b, sign, "", t.ptr, t.len, s);
+    }
+    free(t.ptr);
+}
+
+static void tau_fmt_text_spec(tau_buf *b, tau_str str, tau_spec s) {
+    size_t n = str.len;
+    if (s.prec >= 0) {
+        size_t chars = 0, i = 0;
+        while (i < n && chars < (size_t)s.prec) {
+            i++;
+            while (i < n && (str.ptr[i] & 0xC0) == 0x80) i++;
+            chars++;
+        }
+        n = i;
+    }
+    tau_pad_into(b, str.ptr, n, s, 0);
+}
+
+/* anything else that has text: only the width, fill and alignment apply */
+static void tau_fmt_other_spec(tau_buf *b, const tau_buf *t, tau_spec s) { tau_pad_into(b, t->ptr, t->len, s, 0); }
+
+static void tau_fmt_complex_spec(tau_buf *b, double re, double im, int single, tau_spec s) {
+    tau_spec part = s;
+    part.width = 0; part.align = -1; part.zero = 0; part.plus = 0;
+    tau_buf t = {0};
+    tau_fmt_float_spec(&t, re, single, part);
+    tau_buf_char(&t, (signbit(im) && !isnan(im)) ? '-' : '+');
+    tau_fmt_float_spec(&t, fabs(im), single, part);
+    tau_buf_char(&t, 'i');
+    tau_pad_into(b, t.ptr, t.len, s, 0);
+    free(t.ptr);
+}
+
 /* ---------------------------------------------------------------- tensors */
 
 /* Dense, column-major (the first index varies fastest). Elements are stored as doubles (pairs
