@@ -1,0 +1,189 @@
+{
+  "name": "tau-lang",
+  "displayName": "Tau",
+  "description": "Language support for Tau, a maths and science programming language: syntax highlighting, live diagnostics from the compiler, hover types, run and test commands.",
+  "version": "0.1.0",
+  "publisher": "tau-lang",
+  "private": true,
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Linters"
+  ],
+  "keywords": [
+    "tau",
+    "maths",
+    "science",
+    "tensor"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pigeon318/Tau.git",
+    "directory": "editors/vscode"
+  },
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "tau",
+        "aliases": [
+          "Tau",
+          "tau"
+        ],
+        "extensions": [
+          ".tau"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "tau",
+        "scopeName": "source.tau",
+        "path": "./syntaxes/tau.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "tau",
+        "path": "./snippets/tau.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "tau.run",
+        "title": "Tau: Run File",
+        "icon": "$(play)"
+      },
+      {
+        "command": "tau.runInterpreter",
+        "title": "Tau: Run File with the Interpreter"
+      },
+      {
+        "command": "tau.test",
+        "title": "Tau: Run Tests in File"
+      },
+      {
+        "command": "tau.check",
+        "title": "Tau: Check File"
+      },
+      {
+        "command": "tau.build",
+        "title": "Tau: Build Native Executable"
+      },
+      {
+        "command": "tau.emitC",
+        "title": "Tau: Show Generated C"
+      },
+      {
+        "command": "tau.clean",
+        "title": "Tau: Clear Compile Cache"
+      },
+      {
+        "command": "tau.version",
+        "title": "Tau: Show Compiler Version"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "tau.run",
+          "when": "resourceLangId == tau",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "tau.run",
+          "when": "editorLangId == tau"
+        },
+        {
+          "command": "tau.runInterpreter",
+          "when": "editorLangId == tau"
+        },
+        {
+          "command": "tau.test",
+          "when": "editorLangId == tau"
+        },
+        {
+          "command": "tau.check",
+          "when": "editorLangId == tau"
+        },
+        {
+          "command": "tau.build",
+          "when": "editorLangId == tau"
+        },
+        {
+          "command": "tau.emitC",
+          "when": "editorLangId == tau"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "tau.run",
+        "key": "ctrl+f5",
+        "mac": "cmd+f5",
+        "when": "editorLangId == tau"
+      }
+    ],
+    "configuration": {
+      "title": "Tau",
+      "properties": {
+        "tau.path": {
+          "type": "string",
+          "default": "tau",
+          "scope": "machine-overridable",
+          "description": "The tau executable. A bare name is looked up on PATH; use a full path if tau is not on PATH."
+        },
+        "tau.checkOnType": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check the file as you type (after a short pause) instead of only when it is saved."
+        },
+        "tau.checkDelayMs": {
+          "type": "number",
+          "default": 350,
+          "minimum": 0,
+          "description": "How long to wait after the last keystroke before checking."
+        },
+        "tau.codeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Run and Test links above main and #[test] functions."
+        },
+        "tau.hover": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the type of the name under the cursor."
+        },
+        "tau.runInTerminal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run programs in the integrated terminal (so they can read from the keyboard)."
+        },
+        "tau.threads": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "description": "Sets TAU_THREADS for programs run from the editor. Results never depend on it."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node test/grammar.test.js && node test/extension.test.js",
+    "package": "vsce package --no-dependencies --skip-license"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.0.0",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.0.0"
+  }
+}

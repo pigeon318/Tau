@@ -1,0 +1,244 @@
+{
+  "main": {
+    "prefix": "main",
+    "body": [
+      "fn main() {",
+      "\t$0",
+      "}"
+    ],
+    "description": "The entry point"
+  },
+  "fn": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2}) ${3:-> ${4:i64} }{",
+      "\t$0",
+      "}"
+    ],
+    "description": "A function"
+  },
+  "pub fn": {
+    "prefix": "pfn",
+    "body": [
+      "pub fn ${1:name}(${2}) ${3:-> ${4:i64} }{",
+      "\t$0",
+      "}"
+    ],
+    "description": "A public function"
+  },
+  "test": {
+    "prefix": "test",
+    "body": [
+      "#[test]",
+      "fn ${1:name}() {",
+      "\tassert_eq(${2:actual}, ${3:expected})$0",
+      "}"
+    ],
+    "description": "A test function"
+  },
+  "struct": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name} { ${2:x}: ${3:f64} }"
+    ],
+    "description": "A struct"
+  },
+  "enum": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name} {",
+      "\t${2:Variant}(${3:f64})",
+      "\t${4:Empty}",
+      "}"
+    ],
+    "description": "An enum"
+  },
+  "impl": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Type} {",
+      "\tfn ${2:name}(self) ${3:-> ${4:f64} }{",
+      "\t\t$0",
+      "\t}",
+      "}"
+    ],
+    "description": "An impl block"
+  },
+  "impl trait": {
+    "prefix": "implt",
+    "body": [
+      "impl ${1:Add} for ${2:Type} {",
+      "\tfn ${3:add}(self, o: ${2}) -> ${2} {",
+      "\t\t$0",
+      "\t}",
+      "}"
+    ],
+    "description": "A trait impl (operator overloading uses Add, Sub, Mul, ...)"
+  },
+  "trait": {
+    "prefix": "trait",
+    "body": [
+      "trait ${1:Name} {",
+      "\tfn ${2:zero}() -> Self",
+      "}"
+    ],
+    "description": "A trait"
+  },
+  "let": {
+    "prefix": "let",
+    "body": [
+      "let ${1:x} = $0"
+    ],
+    "description": "A binding"
+  },
+  "letm": {
+    "prefix": "letm",
+    "body": [
+      "let mut ${1:x} = $0"
+    ],
+    "description": "A mutable binding"
+  },
+  "for": {
+    "prefix": "for",
+    "body": [
+      "for ${1:i} in ${2:0..n} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "A loop over a range or collection"
+  },
+  "for mut": {
+    "prefix": "formut",
+    "body": [
+      "for ${1:x} in mut ${2:v} {",
+      "\t${1} = $0",
+      "}"
+    ],
+    "description": "A loop that changes each element in place"
+  },
+  "par for": {
+    "prefix": "parfor",
+    "body": [
+      "par for ${1:i} in ${2:0..n} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "A parallel loop (iterations must be independent)"
+  },
+  "par sum": {
+    "prefix": "parsum",
+    "body": [
+      "par sum(${1:i} in ${2:0..n}) ${3:a[i] * b[i]}"
+    ],
+    "description": "A parallel reduction (deterministic, whatever the thread count)"
+  },
+  "while": {
+    "prefix": "while",
+    "body": [
+      "while ${1:cond} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "A while loop"
+  },
+  "loop": {
+    "prefix": "loop",
+    "body": [
+      "loop {",
+      "\t$0",
+      "\tif ${1:done} { break }",
+      "}"
+    ],
+    "description": "An infinite loop"
+  },
+  "if": {
+    "prefix": "if",
+    "body": [
+      "if ${1:cond} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "A conditional"
+  },
+  "ife": {
+    "prefix": "ife",
+    "body": [
+      "if ${1:cond} {",
+      "\t$2",
+      "} else {",
+      "\t$0",
+      "}"
+    ],
+    "description": "A conditional with an else branch"
+  },
+  "match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "\t${2:Some(x)} => $3",
+      "\t${4:None} => $0",
+      "}"
+    ],
+    "description": "A match expression"
+  },
+  "spawn": {
+    "prefix": "spawn",
+    "body": [
+      "let ${1:task} = spawn {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Start a task; join it with .join()"
+  },
+  "assert_eq": {
+    "prefix": "aeq",
+    "body": [
+      "assert_eq(${1:actual}, ${2:expected})"
+    ],
+    "description": "Assert two values are equal"
+  },
+  "print": {
+    "prefix": "p",
+    "body": [
+      "print(\"$1\")"
+    ],
+    "description": "Print a line (\"{x}\" interpolates)"
+  },
+  "use": {
+    "prefix": "use",
+    "body": [
+      "use ${1:math.fft}.{${2:fft, ifft}}"
+    ],
+    "description": "Import names"
+  },
+  "unsafe": {
+    "prefix": "unsafe",
+    "body": [
+      "unsafe {",
+      "\t$0",
+      "}"
+    ],
+    "description": "An unsafe block (raw pointers)"
+  },
+  "tensor": {
+    "prefix": "tensor",
+    "body": [
+      "let ${1:m} = Tensor<${2:f64}, [_, _]>.${3|zeros,ones,random|}(${4:rows}, ${5:cols})"
+    ],
+    "description": "A two-dimensional tensor"
+  },
+  "const": {
+    "prefix": "const",
+    "body": [
+      "const ${1:NAME}: ${2:f64} = $0"
+    ],
+    "description": "A constant"
+  },
+  "vec": {
+    "prefix": "vec",
+    "body": [
+      "let mut ${1:v} = vec[$0]"
+    ],
+    "description": "A growable vector"
+  }
+}

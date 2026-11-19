@@ -81,6 +81,12 @@ program with the usual panic instead of being reported by `join`; and maths func
 floats) come from the system's C library, so their last digits can differ from Linux's. The interpreter and
 the native backend still agree with each other on the same machine.
 
+## Editor support
+
+`editors/vscode/` is a VS Code extension: highlighting, snippets, live errors from the compiler, types on hover, and Run / Run test links.
+Build it with `npm install && npm run package` in that folder and install the `.vsix` (`code --install-extension`), or download `tau-vscode-extension` from the CI run.
+It needs `tau` on the PATH (or the `tau.path` setting).
+
 ## Layout
 
 | Path | Contents |
@@ -96,6 +102,8 @@ the native backend still agree with each other on the same machine.
 | `src/interp/` | The interpreter: `eval` (expressions, patterns), `builtins`, `tensor` (matrices, linear algebra, FFT), `value` |
 | `src/native/` | The native backend: `cg` (checked AST to C), `runtime.h` (the C runtime), and the driver that compiles, caches and runs |
 | `src/borrowck/` | The borrow checker: `lower` (AST to an event CFG), `analysis` (liveness and dataflow, the checks), `mir` |
+| `src/editor.rs` | What editors need: `tau check --json` (diagnostics and hover types, LSP-style positions) |
+| `editors/vscode/` | The VS Code extension (grammar, snippets, live diagnostics, hovers, run/test links); see its README |
 | `src/prelude/*.tau` | The built-in library's signatures, written in Tau |
 | `examples/` | Programs from the spec; every one must parse |
 | `examples/checked/` | Realistic programs that must type-check and borrow-check with no errors |
