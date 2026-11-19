@@ -99,6 +99,10 @@ pub struct Results {
     pub const_decl: NodeMap<ConstId>,
     /// Every binding (parameters, `let`s, pattern variables) in the user's module.
     pub bindings: Vec<Binding>,
+    /// For an expression of type `Box<T>` that is used as a `T` (a field access, a method call or `match`
+    /// on a box; an argument passed to a borrowed parameter of type `T`): how many `Box` layers to look
+    /// through. The interpreter does not need it (a box is the value it holds); native code does.
+    pub derefs: NodeMap<u32>,
 }
 
 pub struct CheckResult {

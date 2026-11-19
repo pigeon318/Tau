@@ -8,6 +8,8 @@ pub(crate) struct Picked {
     pub fn_id: FnId,
     /// Substitution for the generics of the enclosing impl/trait.
     pub subst: Vec<(GenericId, Ty)>,
+    /// How many `Box` layers of the receiver were looked through to find it.
+    pub boxes: u32,
 }
 
 /// A function signature with generics replaced by inference variables.
@@ -164,6 +166,8 @@ impl<'a> Checker<'a> {
                         true
                     } else if let Some(e) = self.is_vec(ty) {
                         all(self, &[e], name)
+                    } else if let Some(e) = self.box_inner(ty) {
+                        all(self, &[e], name)
                     } else {
                         false
                     }
@@ -181,6 +185,8 @@ impl<'a> Checker<'a> {
                         true
                     } else if let Some(e) = self.is_vec(ty) {
                         all(self, &[e], "Display")
+                    } else if let Some(e) = self.box_inner(ty) {
+                        all(self, &[e], "Display")
                     } else {
                         false
                     }
@@ -195,15 +201,23 @@ impl<'a> Checker<'a> {
 
     /// The receiver types to try, in order: the type itself, then what it
     /// coerces to (arrays and vectors view as slices, `String` as `str`).
-    pub(crate) fn deref_chain(&self, ty: &Ty) -> Vec<Ty> {
-        let mut out = vec![ty.clone()];
-        match ty {
-            Ty::Array(t, _) => out.push(Ty::Slice(t.clone())),
+    pub(crate) fn deref_chain(&self, ty: &Ty) -> Vec<(Ty, u32)> {
+        let mut out = vec![(ty.clone(), 0)];
+        let mut cur = ty.clone();
+        let mut boxes = 0;
+        // a box is looked through to what it holds
+        while let Some(inner) = self.box_inner(&cur) {
+            boxes += 1;
+            out.push((inner.clone(), boxes));
+            cur = inner;
+        }
+        match &cur {
+            Ty::Array(t, _) => out.push((Ty::Slice(t.clone()), boxes)),
             Ty::Adt(..) => {
-                if let Some(e) = self.is_vec(ty) {
-                    out.push(Ty::Slice(Box::new(e)));
-                } else if self.is_string(ty) {
-                    out.push(Ty::Str);
+                if let Some(e) = self.is_vec(&cur) {
+                    out.push((Ty::Slice(Box::new(e)), boxes));
+                } else if self.is_string(&cur) {
+                    out.push((Ty::Str, boxes));
                 }
             }
             _ => {}
@@ -211,11 +225,19 @@ impl<'a> Checker<'a> {
         out
     }
 
+    /// `T` if `ty` is `Box<T>`.
+    pub(crate) fn box_inner(&self, ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::Adt(id, args) if args.len() == 1 && self.prog.adt(*id).name == "Box" && self.prog.adt(*id).module == 0 => Some(args[0].clone()),
+            _ => None,
+        }
+    }
+
     /// Find a method named `name` on `recv`. With `want_self` the method must take
     /// `self` (`value.method()`); otherwise it must not (`Type.function()`).
     pub(crate) fn lookup_method(&mut self, recv: &Ty, name: &str, want_self: bool, span: Span) -> Option<Picked> {
         let recv = self.infer.shallow(recv);
-        for cand in self.deref_chain(&recv) {
+        for (cand, boxes) in self.deref_chain(&recv) {
             let cand = self.infer.shallow(&cand);
             if let Ty::Param(g) = &cand {
                 for b in self.prog.generic(*g).bounds.clone() {
@@ -228,7 +250,7 @@ impl<'a> Checker<'a> {
                         for (tg, a) in tdef.generics.iter().zip(&b.args) {
                             subst.push((*tg, a.clone()));
                         }
-                        return Some(Picked { fn_id: *fid, subst });
+                        return Some(Picked { fn_id: *fid, subst, boxes });
                     }
                 }
                 continue;
@@ -268,7 +290,7 @@ impl<'a> Checker<'a> {
                                 subst.push((*tg, a.subst(&subst)));
                             }
                         }
-                        return Some(Picked { fn_id: fid, subst });
+                        return Some(Picked { fn_id: fid, subst, boxes });
                     }
                     self.infer.rollback(snap);
                 }
