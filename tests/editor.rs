@@ -116,7 +116,7 @@ mod files {
         let j = check(&main, "use util\nfn main() {\n    let x: str = util.double(1)\n}\n");
         let found = files_of(&j);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(Path::new(&found[0].0), main.as_path());
+        assert_eq!(found[0].0, tau::project::display_path(&main));
         assert!(found[0].1.contains("mismatched types"));
         // the file on disk has an error, and another file is the one being edited
         let util = t.path("src/util.tau");
@@ -124,7 +124,7 @@ mod files {
         let j = check(&main, &std::fs::read_to_string(&main).unwrap());
         let found = files_of(&j);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(Path::new(&found[0].0), util.as_path());
+        assert_eq!(found[0].0, tau::project::display_path(&util));
     }
 
     #[test]
@@ -135,7 +135,7 @@ mod files {
         let j = check(&util, "pub fn twice(x: i64) -> i64 { x * 2 }\n");
         let found = files_of(&j);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(Path::new(&found[0].0), t.path("src/main.tau").as_path());
+        assert_eq!(found[0].0, tau::project::display_path(&t.path("src/main.tau")));
         assert!(found[0].1.contains("has no function `double`"), "{found:?}");
     }
 
@@ -146,7 +146,7 @@ mod files {
         let j = check(&orphan, "pub fn alone() -> i64 { \"x\" }\n");
         let found = files_of(&j);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(Path::new(&found[0].0), orphan.as_path());
+        assert_eq!(found[0].0, tau::project::display_path(&orphan));
         // its hovers are reported too
         let j = check(&orphan, "pub fn alone(a: i64) -> i64 { a }\n");
         let hovers = j.get("hovers").and_then(Json::as_arr).unwrap();
@@ -160,12 +160,12 @@ mod files {
         let j = check(&main, "use util\nfn main( {\n");
         let found = files_of(&j);
         assert_eq!(found.len(), 1);
-        assert_eq!(Path::new(&found[0].0), main.as_path());
+        assert_eq!(found[0].0, tau::project::display_path(&main));
         std::fs::write(t.path("src/util.tau"), "pub fn f( {\n").unwrap();
         let j = check(&main, &std::fs::read_to_string(&main).unwrap());
         let found = files_of(&j);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(Path::new(&found[0].0), t.path("src/util.tau").as_path());
+        assert_eq!(found[0].0, tau::project::display_path(&t.path("src/util.tau")));
     }
 
     #[test]
@@ -188,7 +188,7 @@ mod files {
         let found = files_of(&j);
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].1.contains("tau.toml"), "{found:?}");
-        assert_eq!(Path::new(&found[0].0), main.as_path());
+        assert_eq!(found[0].0, tau::project::display_path(&main));
     }
 
     #[test]
