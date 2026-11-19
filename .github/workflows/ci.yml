@@ -16,6 +16,28 @@ jobs:
       - name: Test (interpreter and native backend)
         run: cargo test --release
 
+  vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the compiler
+        run: cargo build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Test the extension (grammar and extension against the real compiler)
+        working-directory: editors/vscode
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+      - name: Package the extension
+        working-directory: editors/vscode
+        run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tau-vscode-extension
+          path: editors/vscode/*.vsix
+
   windows:
     runs-on: windows-latest
     steps:
