@@ -20,6 +20,7 @@ pub mod sexp;
 pub mod span;
 pub mod token;
 pub mod types;
+pub mod update;
 
 pub use check::{check, check_source, CheckResult};
 pub use diag::Diagnostic;

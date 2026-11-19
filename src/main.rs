@@ -20,17 +20,38 @@ USAGE:
     tau check <file> --json    ... and print diagnostics and hover types as JSON, for editors
                                (`-` as the file reads the program from stdin)
     tau clean                  delete the cache of compiled programs
+    tau update                 replace this tau with the newest release (needs curl and a GitHub token for now)
+    tau update --check         only say whether a newer release exists
     tau --version              show the version and which C compiler the native backend would use
 
 ENVIRONMENT:
     TAU_THREADS=n   threads for parallel code (default: all cores; results never depend on it)
     TAU_CC=cc       the C compiler to use (default: clang, gcc, cc)
     TAU_CACHE=dir   where compiled programs are cached (default: ~/.cache/tau)
+    GITHUB_TOKEN    a token that can read the Tau repository, for `tau update` (or log in with `gh auth login`)
 ";
 
 fn main() -> ExitCode {
+    tau::update::cleanup();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("update") => {
+            let flags: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            if let Some(bad) = flags.iter().find(|f| !matches!(**f, "--check" | "--force")) {
+                eprintln!("error: unknown option `{bad}` (use `tau update`, `tau update --check` or `tau update --force`)");
+                return ExitCode::from(2);
+            }
+            return match tau::update::run(&tau::update::Options { check_only: flags.contains(&"--check"), force: flags.contains(&"--force") }) {
+                Ok(msg) => {
+                    println!("{msg}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(1)
+                }
+            };
+        }
         Some("clean") => {
             println!("removed {} cached program(s)", tau::native::clean_cache());
             return ExitCode::SUCCESS;
