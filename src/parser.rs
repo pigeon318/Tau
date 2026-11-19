@@ -1039,14 +1039,16 @@ impl Parser {
 
     fn unary(&mut self) -> PResult<Expr> {
         let start = self.span().start;
+        // `Some(op)` for an operator, `None` for the markers `mut` and `own`
         let op = match self.kind() {
             K::Minus => Some(Some(UnOp::Neg)),
             K::Bang => Some(Some(UnOp::Not)),
             K::Tilde => Some(Some(UnOp::BitNot)),
-            K::Mut => Some(None),
+            K::Mut | K::Own => Some(None),
             _ => None,
         };
         if let Some(op) = op {
+            let is_own = matches!(self.kind(), K::Own);
             self.bump();
             let operand = self.unary()?;
             let span = Span::new(start, operand.span.end);
@@ -1057,6 +1059,7 @@ impl Parser {
                         op,
                         expr: Box::new(operand),
                     },
+                    None if is_own => ExprKind::Own(Box::new(operand)),
                     None => ExprKind::MutBorrow(Box::new(operand)),
                 },
             });

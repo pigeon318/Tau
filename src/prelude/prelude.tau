@@ -7,6 +7,7 @@ pub struct Vec<T> { pub len: usize }
 pub struct String { pub len: usize }
 pub struct Range<T> { pub start: T, pub end: T }
 pub struct Ptr<T> {}
+pub struct Box<T> {}
 pub struct Task<T> {}
 pub struct Cluster {}
 pub struct IoError { pub message: String }
@@ -91,6 +92,11 @@ impl<T> Vec<T> {
     pub fn push(mut self, x: T)
     pub fn pop(mut self) -> Option<T>
     pub unsafe fn from_raw(p: Ptr<T>, n: usize) -> Vec<T>
+}
+
+impl<T> Box<T> {
+    pub fn new(own x: T) -> Box<T>
+    pub fn take(own self) -> T
 }
 
 impl<T> [T] {

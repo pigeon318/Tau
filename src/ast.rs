@@ -403,6 +403,9 @@ pub enum ExprKind {
 
     /// Call-site mutable borrow: `scale(mut data, 2.0)`, `for x in mut v`.
     MutBorrow(Box<Expr>),
+    /// `own x`: the value of `x`, moved out of it: `match own tree { Node(l, r) => ... }` takes the parts
+    /// of an owned value apart (without it, matching a variable only borrows views of its parts).
+    Own(Box<Expr>),
     /// `par sum(i in 0..n) a[i] * b[i]`
     ParReduce {
         op: Ident,

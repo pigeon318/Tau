@@ -50,6 +50,8 @@ pub enum Value<'a> {
     Range(i128, i128),
     /// A raw pointer (an allocation).
     Ptr(Slot<'a>),
+    /// A `Box<T>`: one slot holding the value. A box is moved, never copied (like a vector).
+    Box(Slot<'a>),
     /// A reference to a place (arguments for `mut` parameters, `mut` loop elements).
     Ref(RefTarget<'a>),
 }
@@ -262,6 +264,7 @@ impl<'a> Value<'a> {
             Value::Map(_) => "Map",
             Value::Closure(_) | Value::Func(..) | Value::Ctor(..) => "function",
             Value::Task(_) => "Task",
+            Value::Box(_) => "Box",
             Value::Range(..) => "range",
             Value::Ptr(_) => "pointer",
             Value::Ref(_) => "reference",

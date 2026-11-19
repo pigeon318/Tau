@@ -146,6 +146,7 @@ pub fn expr(e: &Expr) -> String {
         ExprKind::Break(v) => opt("break", v),
         ExprKind::Continue => "(continue)".to_string(),
         ExprKind::MutBorrow(x) => format!("(mut {})", expr(x)),
+        ExprKind::Own(x) => format!("(own {})", expr(x)),
         ExprKind::ParReduce {
             op,
             pat: p,

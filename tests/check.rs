@@ -678,3 +678,46 @@ fn recursion_through_generic_wrappers_is_found() {
     err("struct W<T> { inner: T }\nstruct Bad { w: W<Bad> }", "contains itself");
     ok("struct W<T> { inner: T }\nstruct Fine { w: W<i64> }");
 }
+
+// ------------------------------------------------------------------ Box<T>
+
+mod boxes {
+    use super::{err, ok};
+
+    #[test]
+    fn a_box_holds_a_value_and_gives_it_back() {
+        let r = ok("fn main() {\n let b = Box.new(5)\n let n = b.take()\n let f = Box.new(2.5)\n}\n");
+        assert_eq!(r.binding_ty("n").as_deref(), Some("i64"));
+        assert_eq!(r.binding_ty("b").as_deref(), Some("Box<i64>"));
+    }
+
+    #[test]
+    fn a_box_converts_only_where_a_borrow_is_wanted() {
+        // a borrowed parameter takes the box as the value it holds
+        ok("fn f(x: i64) -> i64 { x }\nfn main() {\n let b = Box.new(5)\n print(f(b))\n}\n");
+        ok("fn f(x: Box<i64>) -> i64 { 1 }\nfn main() {\n let b = Box.new(5)\n print(f(b))\n}\n");
+        // an owning parameter does not
+        err("fn f(own x: i64) -> i64 { x }\nfn main() {\n let b = Box.new(5)\n print(f(b))\n}\n", "mismatched types");
+        // nor does a `let` with a type
+        err("fn main() {\n let b = Box.new(5)\n let x: i64 = b\n}\n", "mismatched types");
+    }
+
+    #[test]
+    fn recursive_types_need_a_box_or_a_vector() {
+        err("enum L {\n Nil\n Cons(i64, L)\n}\nfn main() {}\n", "contains itself");
+        ok("enum L {\n Nil\n Cons(i64, Box<L>)\n}\nfn main() {}\n");
+        ok("struct T { kids: Vec<T> }\nfn main() {}\n");
+    }
+
+    #[test]
+    fn boxes_compare_and_print_like_what_they_hold() {
+        ok("fn main() {\n let a = Box.new(1)\n let b = Box.new(2)\n print(a)\n assert(a < b)\n assert_eq(a, a)\n}\n");
+        err("struct P { x: i64 }\nfn main() {\n let a = Box.new(P(1))\n print(a)\n}\n", "Display");
+    }
+
+    #[test]
+    fn a_missing_field_or_method_through_a_box_is_reported() {
+        err("struct P { x: i64 }\nfn main() {\n let b = Box.new(P(1))\n print(b.y)\n}\n", "no field `y`");
+        err("struct P { x: i64 }\nfn main() {\n let b = Box.new(P(1))\n b.nothing()\n}\n", "no method named `nothing`");
+    }
+}

@@ -912,3 +912,106 @@ fn loops_over_array_literals_keep_the_array_alive() {
         assert!(c.contains("arr_tmp"), "the array in a `for` loop should have a variable of its own");
     }
 }
+
+// ------------------------------------------------------------------ Box<T> and recursive types
+
+#[test]
+fn boxes_make_lists_and_expression_trees() {
+    let out = same(
+        "enum List {\n Nil\n Cons(i64, Box<List>)\n}\n\
+         fn sum(l: List) -> i64 {\n match l {\n  Nil => 0\n  Cons(x, rest) => x + sum(rest)\n }\n}\n\
+         enum Expr {\n Num(f64)\n Add(Box<Expr>, Box<Expr>)\n Mul(Box<Expr>, Box<Expr>)\n Neg(Box<Expr>)\n}\n\
+         fn eval(e: Expr) -> f64 {\n match e {\n  Num(x) => x\n  Add(a, b) => eval(a) + eval(b)\n  Mul(a, b) => eval(a) * eval(b)\n  Neg(a) => 0.0 - eval(a)\n }\n}\n\
+         fn main() {\n\
+          let mut l = Nil\n\
+          for i in 1..=100 {\n  l = Cons(i, Box.new(l))\n }\n\
+          print(sum(l))\n\
+          let e = Add(Box.new(Num(2.0)), Box.new(Mul(Box.new(Num(3.0)), Box.new(Neg(Box.new(Num(4.0)))))))\n\
+          print(eval(e))\n\
+         }",
+    );
+    assert_eq!(out, "5050\n-10.0\n");
+}
+
+#[test]
+fn a_binary_search_tree_built_by_moving_boxes() {
+    let out = same(
+        "enum Tree {\n Leaf\n Node(Box<Tree>, i64, Box<Tree>)\n}\n\
+         fn insert(own t: Tree, v: i64) -> Tree {\n match own t {\n  Leaf => Node(Box.new(Leaf), v, Box.new(Leaf))\n  Node(l, x, r) => {\n   if v < x {\n    Node(Box.new(insert(l.take(), v)), x, r)\n   } else {\n    Node(l, x, Box.new(insert(r.take(), v)))\n   }\n  }\n }\n}\n\
+         fn contains(t: Tree, v: i64) -> bool {\n match t {\n  Leaf => false\n  Node(l, x, r) => {\n   if v == x { true } else if v < x { contains(l, v) } else { contains(r, v) }\n  }\n }\n}\n\
+         fn depth(t: Tree) -> i64 {\n match t {\n  Leaf => 0\n  Node(l, _, r) => 1 + max(depth(l), depth(r))\n }\n}\n\
+         fn collect(t: Tree, out: mut Vec<i64>) {\n match t {\n  Leaf => {}\n  Node(l, x, r) => {\n   collect(l, mut out)\n   out.push(x)\n   collect(r, mut out)\n  }\n }\n}\n\
+         fn main() {\n\
+          let mut t = Leaf\n\
+          let mut x = 17\n\
+          for i in 0..200 {\n  x = (x * 31 + 7) % 1009\n  t = insert(t, x)\n }\n\
+          print(contains(t, 17))\n print(contains(t, 1008))\n print(depth(t))\n\
+          let mut out = vec[0]\n out.pop()\n collect(t, mut out)\n print(out.len)\n print(out[0])\n print(out[out.len - 1])\n\
+         }",
+    );
+    assert!(out.starts_with("true\n") || out.starts_with("false\n"), "{out}");
+}
+
+#[test]
+fn boxes_of_every_kind_clone_compare_and_print() {
+    let out = same(
+        "struct Node { value: i64, next: Option<Box<Node>> }\n\
+         fn total(n: Node) -> i64 {\n match n.next {\n  Some(rest) => n.value + total(rest)\n  None => n.value\n }\n}\n\
+         fn main() {\n\
+          let a = Box.new(5)\n let b = Box.new(2.5)\n let s = Box.new(\"hi\".to_string())\n let v = Box.new(vec[1, 2, 3])\n\
+          print(a)\n print(b)\n print(s)\n print(v)\n print(s.len)\n print(v.len)\n\
+          let c = Box.new(5)\n print(c)\n assert_eq(a, c)\n assert(a == c)\n assert(a < Box.new(6i64))\n\
+          let mut w = Box.new(vec[1])\n w.push(2)\n w.push(3)\n print(w)\n\
+          let n = Node(1, Some(Box.new(Node(2, Some(Box.new(Node(3, None)))))))\n\
+          print(total(n))\n\
+          let tup = (Box.new(1), Box.new(\"x\".to_string()))\n print(tup)\n\
+          let items = vec[Box.new(1), Box.new(2)]\n print(items)\n\
+          let t = Box.new(Node(9, None))\n print(t.value)\n\
+          let inner = Box.new(Box.new(7))\n print(inner)\n\
+          print(a.take() + 1)\n\
+         }",
+    );
+    assert!(out.starts_with("5\n2.5\nhi\n[1, 2, 3]\n2\n3\n5\n"), "{out}");
+}
+
+#[test]
+fn mutating_through_a_box() {
+    let out = same(
+        "struct Counter { n: i64, names: Vec<str> }\n\
+         fn bump(c: mut Counter) {\n c.n += 1\n}\n\
+         fn main() {\n\
+          let mut b = Box.new(Counter(0, vec[\"a\"]))\n\
+          b.n = 10\n b.n += 5\n bump(mut b)\n bump(mut b)\n b.names.push(\"b\")\n\
+          print(b.n)\n print(b.names)\n\
+          let mut x = Box.new(41)\n let y = x.take()\n print(y + 1)\n\
+         }",
+    );
+    assert_eq!(out, "17\n[a, b]\n42\n");
+}
+
+#[test]
+fn types_that_contain_themselves_through_boxes_and_vectors() {
+    let out = same(
+        "struct A { b: Option<Box<B>>, tag: i64 }\n\
+         struct B { a: Option<Box<A>>, tag: i64 }\n\
+         struct Dir { name: str, kids: Vec<Dir> }\n\
+         fn count(d: Dir) -> i64 {\n let mut n = 1\n for k in d.kids { n += count(k) }\n n\n}\n\
+         fn chain(a: A) -> i64 {\n match a.b {\n  Some(b) => a.tag + match b.a {\n   Some(inner) => b.tag + chain(inner)\n   None => b.tag\n  }\n  None => a.tag\n }\n}\n\
+         fn main() {\n\
+          let a = A(Some(Box.new(B(Some(Box.new(A(None, 1))), 10))), 100)\n print(chain(a))\n\
+          let d = Dir(\"root\", vec[Dir(\"a\", vec[Dir(\"x\", Vec.new())]), Dir(\"b\", Vec.new())])\n\
+          print(count(d))\n\
+         }",
+    );
+    assert!(out.starts_with("111\n"), "{out}");
+}
+
+#[test]
+fn a_long_list_is_dropped_without_trouble() {
+    let out = same(
+        "enum List {\n Nil\n Cons(i64, Box<List>)\n}\n\
+         fn sum(l: List) -> i64 {\n match l {\n  Nil => 0\n  Cons(x, rest) => x + sum(rest)\n }\n}\n\
+         fn main() {\n let mut l = Nil\n for i in 0..20000 {\n  l = Cons(i, Box.new(l))\n }\n print(sum(l))\n}",
+    );
+    assert_eq!(out, "199990000\n");
+}
