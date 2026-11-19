@@ -238,6 +238,8 @@ pub(crate) struct Body {
     pub obligations: Vec<Obligation>,
     pub touched: Vec<NodeKey>,
     pub touched_pats: Vec<NodeKey>,
+    /// The type of every interpolation that has a format spec, checked against it once types are known.
+    pub fmt_checks: Vec<(Ty, crate::fmtspec::Fmt)>,
     /// Integer literals (node, value, span, directly negated?), checked against their final
     /// type once inference is done.
     pub int_lits: Vec<(NodeKey, u128, Span, bool)>,
@@ -531,6 +533,23 @@ impl<'a> Checker<'a> {
     /// types back into the results.
     fn finish_body(&mut self) {
         self.infer.apply_defaults();
+        let fmt_checks = std::mem::take(&mut self.body.fmt_checks);
+        for (ty, fmt) in fmt_checks {
+            let ty = self.infer.resolve(&ty);
+            let kind = match &ty {
+                Ty::Int(_) => crate::fmtspec::Kind::Int,
+                Ty::Float(_) => crate::fmtspec::Kind::Float,
+                Ty::Complex(_) => crate::fmtspec::Kind::Complex,
+                Ty::Str => crate::fmtspec::Kind::Text,
+                Ty::Char | Ty::Bool => crate::fmtspec::Kind::Word,
+                Ty::Adt(a, _) if self.prog.adt(*a).name == "String" => crate::fmtspec::Kind::Text,
+                Ty::Var(_) | Ty::Error => continue,
+                _ => crate::fmtspec::Kind::Other,
+            };
+            if let Err(why) = crate::fmtspec::check(kind, &fmt.spec) {
+                self.err_hint(fmt.span, format!("this format does not fit the value: {why}"), "see the format list in SPEC.md, section 8d");
+            }
+        }
         let obligations = std::mem::take(&mut self.body.obligations);
         for ob in obligations {
             let ty = self.infer.resolve(&ob.ty);

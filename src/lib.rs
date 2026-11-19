@@ -8,6 +8,7 @@ pub mod ast;
 pub mod borrowck;
 pub mod check;
 pub mod diag;
+pub mod fmtspec;
 pub mod gitdeps;
 pub mod editor;
 pub mod infer;

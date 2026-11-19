@@ -246,8 +246,11 @@ impl<'a> Checker<'a> {
             ExprKind::Str(pieces) => {
                 let display = self.prog.find_trait("Display");
                 for p in pieces {
-                    if let StrPiece::Interp(inner) = p {
+                    if let StrPiece::Interp(inner, fmt) = p {
                         let t = self.expr(inner, None);
+                        if let Some(f) = fmt {
+                            self.body.fmt_checks.push((t.clone(), f.clone()));
+                        }
                         if let Some(tr) = display {
                             self.body.obligations.push(Obligation {
                                 ty: t,

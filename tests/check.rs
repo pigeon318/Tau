@@ -678,3 +678,50 @@ fn recursion_through_generic_wrappers_is_found() {
     err("struct W<T> { inner: T }\nstruct Bad { w: W<Bad> }", "contains itself");
     ok("struct W<T> { inner: T }\nstruct Fine { w: W<i64> }");
 }
+
+// ------------------------------------------------------------------ format specs
+
+mod format_specs {
+    fn errors(src: &str) -> String {
+        let r = tau::analyze_source(src).unwrap_or_else(|d| panic!("{}", d.render(src, "t.tau")));
+        r.diagnostics.iter().map(|d| d.render(src, "t.tau")).collect::<Vec<_>>().join("\n")
+    }
+
+    fn main_with(body: &str) -> String {
+        format!("fn main() {{\n{body}\n}}")
+    }
+
+    #[test]
+    fn specs_must_fit_the_value() {
+        let bad = [
+            ("let n = 5\n print(\"{n:.2}\")", "a precision (`.N`) cannot be used on an integer"),
+            ("let n = 5\n print(\"{n:e}\")", "`e` (scientific notation) cannot be used on an integer"),
+            ("let x = 2.5\n print(\"{x:x}\")", "cannot be used on a float"),
+            ("let x = 2.5\n print(\"{x:#}\")", "`#` cannot be used on a float"),
+            ("let s = \"a\"\n print(\"{s:08}\")", "cannot be used on text"),
+            ("let s = \"a\"\n print(\"{s:+}\")", "cannot be used on text"),
+            ("let c = 'a'\n print(\"{c:.2}\")", "cannot be used on a character or bool"),
+            ("let v = vec[1]\n print(\"{v:x}\")", "cannot be used on this type"),
+            ("let z = 1.0 + 2.0i\n print(\"{z:+}\")", "cannot be used on a complex number"),
+        ];
+        for (body, want) in bad {
+            let e = errors(&main_with(body));
+            assert!(e.contains("this format does not fit the value"), "{body}: {e}");
+            assert!(e.contains(want), "{body}: expected {want:?} in {e}");
+        }
+    }
+
+    #[test]
+    fn good_specs_are_accepted() {
+        let good = "let n = 5\n let x = 2.5\n let s = \"a\"\n let z = 1.0 + 2.0i\n let v = vec[1]\n let t = (1, 2)\n let c = 'a'\n let b = true\n print(\"{n:08x} {n:+} {n:#b} {x:+010.3e} {x:.0} {s:>6.2} {z:.1} {v:>12} {t:<9} {c:^3} {b:5}\")";
+        assert_eq!(errors(&main_with(good)), "");
+    }
+
+    #[test]
+    fn a_literal_that_is_not_yet_typed_is_checked_after_defaulting() {
+        // `5` becomes an i64, so a precision is wrong; `2.5` becomes an f64, so `x` is wrong
+        assert!(errors(&main_with("print(\"{5:.2}\")")).contains("an integer"));
+        assert!(errors(&main_with("print(\"{2.5:x}\")")).contains("a float"));
+        assert_eq!(errors(&main_with("print(\"{5:x} {2.5:.2}\")")), "");
+    }
+}
