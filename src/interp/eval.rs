@@ -725,7 +725,19 @@ impl<'a> Interp<'a> {
             }
             (UnOp::Neg, Value::Float(x)) => Ok(Value::Float(-x)),
             (UnOp::Neg, Value::Complex(a, b)) => Ok(Value::Complex(-a, -b)),
-            (UnOp::Neg, Value::Tensor(t)) => self.tensor_binop(BinOp::Mul, Value::Tensor(t), Value::Float(-1.0)),
+            (UnOp::Neg, Value::Tensor(t)) => {
+                let is_int = matches!(t.borrow().data, TData::I(..));
+                if is_int {
+                    let g = t.borrow().clone();
+                    self.int_tensor_neg(&g)
+                } else {
+                    self.tensor_binop(BinOp::Mul, Value::Tensor(t), Value::Float(-1.0))
+                }
+            }
+            (UnOp::Not, Value::Tensor(t)) => {
+                let g = t.borrow().clone();
+                self.tensor_not(&g)
+            }
             (UnOp::BitNot, Value::Int(i)) => {
                 let it = int_ty_of(&ty);
                 Ok(Value::Int(wrap_int(it, !i)))
@@ -734,7 +746,7 @@ impl<'a> Interp<'a> {
         }
     }
 
-    fn fit(&self, it: IntTy, v: i128) -> R<'a, Value<'a>> {
+    pub(super) fn fit(&self, it: IntTy, v: i128) -> R<'a, Value<'a>> {
         let (lo, hi) = int_range(it);
         if v < lo || v > hi {
             return panic(format!("integer overflow: {v} does not fit in {}", it.name()));
@@ -777,6 +789,11 @@ impl<'a> Interp<'a> {
 
     pub fn bin_values(&mut self, op: BinOp, l: Value<'a>, r: Value<'a>, ty: &Ty) -> R<'a, Value<'a>> {
         use std::cmp::Ordering::*;
+        if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+            && (matches!(l, Value::Tensor(_)) || matches!(r, Value::Tensor(_)))
+        {
+            return self.tensor_compare(op, &l, &r);
+        }
         match op {
             BinOp::Eq => return Ok(Value::Bool(self.values_eq(&l, &r)?)),
             BinOp::Ne => return Ok(Value::Bool(!self.values_eq(&l, &r)?)),
@@ -828,7 +845,7 @@ impl<'a> Interp<'a> {
         }
     }
 
-    fn int_op(&self, op: BinOp, a: i128, b: i128, it: IntTy) -> R<'a, Value<'a>> {
+    pub(super) fn int_op(&self, op: BinOp, a: i128, b: i128, it: IntTy) -> R<'a, Value<'a>> {
         let overflow = || -> R<'a, Value<'a>> { panic(format!("integer overflow in `{}` on {}", op.symbol(), it.name())) };
         let r = match op {
             BinOp::Add => match a.checked_add(b) {

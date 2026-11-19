@@ -18,7 +18,7 @@ fn round(single: bool, x: f64) -> f64 {
 }
 
 /// `[2, 3]`
-fn shape_text(dims: &[usize]) -> String {
+pub(super) fn shape_text(dims: &[usize]) -> String {
     format!("[{}]", dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "))
 }
 
@@ -55,7 +55,7 @@ impl<'a> Interp<'a> {
         Value::Tensor(Rc::new(RefCell::new(Tensor { dims, data, single })))
     }
 
-    fn checked_len(&self, dims: &[usize]) -> R<'a, usize> {
+    pub(super) fn checked_len(&self, dims: &[usize]) -> R<'a, usize> {
         match dims.iter().try_fold(1usize, |a, &d| a.checked_mul(d)) {
             Some(n) if n <= crate::types::MAX_TENSOR_ELEMS => Ok(n),
             _ => panic(format!("a tensor can have at most {} elements", crate::types::MAX_TENSOR_ELEMS)),
@@ -127,10 +127,7 @@ impl<'a> Interp<'a> {
     pub fn tensor_slice(&mut self, t: &Tensor, specs: &[(bool, i128, i128)]) -> R<'a, Value<'a>> {
         let plan = self.slice_plan(t, specs)?;
         let (pos, dims) = Self::slice_positions(t, specs, &plan);
-        let data = match &t.data {
-            TData::F(d) => TData::F(pos.iter().map(|&p| d[p]).collect()),
-            TData::C(d) => TData::C(pos.iter().map(|&p| d[p]).collect()),
-        };
+        let data = Self::gather(&t.data, &pos);
         Ok(Self::make_tensor(dims, data, t.single))
     }
 
@@ -162,6 +159,16 @@ impl<'a> Interp<'a> {
                             d[p] = x[k];
                         }
                     }
+                    (TData::I(a, d), TData::I(b, x)) if a == b => {
+                        for (k, &p) in pos.iter().enumerate() {
+                            d[p] = x[k];
+                        }
+                    }
+                    (TData::B(d), TData::B(x)) => {
+                        for (k, &p) in pos.iter().enumerate() {
+                            d[p] = x[k];
+                        }
+                    }
                     _ => return panic("cannot assign tensors of different element types"),
                 }
             }
@@ -181,6 +188,16 @@ impl<'a> Interp<'a> {
                         d[p] = round(single, i as f64);
                     }
                 }
+                (TData::I(_, d), Value::Int(i)) => {
+                    for &p in &pos {
+                        d[p] = i;
+                    }
+                }
+                (TData::B(d), Value::Bool(b)) => {
+                    for &p in &pos {
+                        d[p] = b;
+                    }
+                }
                 (_, other) => return panic(format!("cannot assign a {} to part of a tensor", other.type_name())),
             },
         }
@@ -195,6 +212,9 @@ impl<'a> Interp<'a> {
         let mut vals = Vec::new();
         for a in args {
             vals.push(self.eval(a, f)?);
+        }
+        if let Some(ek) = Self::elem_kind(&elem) {
+            return self.int_ctor2(kind, vals, ek);
         }
         let usize_of = |v: &Value<'a>| -> R<'a, usize> {
             match v {
@@ -288,7 +308,7 @@ impl<'a> Interp<'a> {
         }
     }
 
-    fn clone_deref(&self, v: &Value<'a>) -> Value<'a> {
+    pub(super) fn clone_deref(&self, v: &Value<'a>) -> Value<'a> {
         let mut cur = v.clone();
         while let Value::Ref(t) = &cur {
             match self.load(t) {
@@ -303,12 +323,10 @@ impl<'a> Interp<'a> {
     fn tensor_method(&mut self, kind: &str, t: &Tensor, args: &'a [Expr], f: &Frame<'a>) -> R<'a, Value<'a>> {
         let single = t.single;
         let len = t.len();
-        let elem_value = |data: &TData, i: usize| -> Value<'a> {
-            match data {
-                TData::F(d) => Value::Float(d[i]),
-                TData::C(d) => Value::Complex(d[i].0, d[i].1),
-            }
-        };
+        if let Some(v) = self.int_method(kind, t, args, f)? {
+            return Ok(v);
+        }
+        let elem_value = |data: &TData, i: usize| -> Value<'a> { Self::tensor_elem(data, i) };
         match kind {
             "tensor.sum" | "tensor.mean" => {
                 let mean = kind == "tensor.mean";
@@ -335,6 +353,7 @@ impl<'a> Interp<'a> {
                         }
                         Ok(Value::Complex(round(single, re), round(single, im)))
                     }
+                    _ => panic("`sum` needs a tensor of numbers"),
                 }
             }
             "tensor.min" | "tensor.max" => {
@@ -400,6 +419,24 @@ impl<'a> Interp<'a> {
                         }
                         TData::C(o)
                     }
+                    TData::I(it, d) => {
+                        let mut o = vec![0i128; len];
+                        for i in 0..r {
+                            for j in 0..c {
+                                o[i * c + j] = d[j * r + i];
+                            }
+                        }
+                        TData::I(*it, o)
+                    }
+                    TData::B(d) => {
+                        let mut o = vec![false; len];
+                        for i in 0..r {
+                            for j in 0..c {
+                                o[i * c + j] = d[j * r + i];
+                            }
+                        }
+                        TData::B(o)
+                    }
                 };
                 Ok(Self::make_tensor(vec![c, r], data, single))
             }
@@ -434,6 +471,9 @@ impl<'a> Interp<'a> {
             Some(n) if n <= crate::types::MAX_TENSOR_ELEMS => n,
             _ => return panic(format!("a tensor can have at most {} elements", crate::types::MAX_TENSOR_ELEMS)),
         };
+        if let Some(ek) = Self::elem_kind(&elem) {
+            return Ok(Self::new_tensor(sizes, Self::int_fill(kind, n, ek), false));
+        }
         let single = matches!(*elem, Ty::Float(FloatTy::F32) | Ty::Complex(FloatTy::F32));
         let complex = matches!(*elem, Ty::Complex(_));
         let next = |this: &mut Self| match kind {
@@ -463,6 +503,8 @@ impl<'a> Interp<'a> {
                         format!("{}+{}i", self.float_text(a), self.float_text(b))
                     }
                 }
+                TData::I(_, d) => d[i].to_string(),
+                TData::B(d) => d[i].to_string(),
             }
         };
         match t.dims.len() {
@@ -489,12 +531,27 @@ impl<'a> Interp<'a> {
         Ok(match &t.data {
             TData::F(d) => Value::Float((0..k).map(|i| d[i + i * m]).sum()),
             TData::C(d) => Value::Complex((0..k).map(|i| d[i + i * m].0).sum(), (0..k).map(|i| d[i + i * m].1).sum()),
+            TData::I(it, d) => {
+                let mut acc = 0i128;
+                for i in 0..k {
+                    match self.int_op(BinOp::Add, acc, d[i + i * m], *it)? {
+                        Value::Int(v) => acc = v,
+                        _ => unreachable!(),
+                    }
+                }
+                Value::Int(acc)
+            }
+            TData::B(_) => return panic("trace needs a tensor of numbers"),
         })
     }
 
     pub fn tensor_binop(&mut self, op: BinOp, l: Value<'a>, r: Value<'a>) -> R<'a, Value<'a>> {
         if op == BinOp::MatMul {
             return self.matmul(&l, &r);
+        }
+        let integral = |v: &Value<'a>| matches!(v, Value::Tensor(t) if matches!(t.borrow().data, TData::I(..) | TData::B(_)));
+        if integral(&l) || integral(&r) {
+            return self.int_tensor_binop(op, &l, &r);
         }
         let apply = |x: f64, y: f64| -> R<'a, f64> {
             Ok(match op {
@@ -561,6 +618,9 @@ impl<'a> Interp<'a> {
             return panic("`@` needs two tensors");
         };
         let (a, b) = (a.borrow(), b.borrow());
+        if matches!(a.data, TData::I(..)) {
+            return self.int_matmul(&a, &b);
+        }
         let (TData::F(x), TData::F(y)) = (&a.data, &b.data) else {
             return panic("`@` on complex tensors is not supported");
         };

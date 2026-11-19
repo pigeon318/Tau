@@ -255,6 +255,14 @@ impl<'a> Checker<'a> {
             TyHead::Tensor => {
                 if given.len() == 2 {
                     let elem = self.lower_ty(&given[0], cx);
+                    if !matches!(elem, Ty::Float(_) | Ty::Complex(_) | Ty::Bool | Ty::Param(_) | Ty::Error | Ty::Var(_))
+                        && !matches!(elem, Ty::Int(i) if i.bits() <= 64)
+                    {
+                        let shown = self.show(&elem);
+                        let hint = if matches!(elem, Ty::Int(_)) { "tensors hold integers up to 64 bits" } else { "tensors hold numbers (integers, floats, complex numbers) and `bool`" };
+                        self.err_hint(given[0].span, format!("`{shown}` cannot be the element type of a tensor"), hint);
+                        return Ty::Error;
+                    }
                     match self.lower_dims(&given[1]) {
                         Some(dims) => Ty::Tensor(Box::new(elem), dims),
                         None => {
