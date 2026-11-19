@@ -74,6 +74,8 @@ pub fn round<T: Float>(x: T) -> T
 pub fn abs<T: Num>(x: T) -> T
 pub fn min<T: Ord>(a: T, b: T) -> T
 pub fn max<T: Ord>(a: T, b: T) -> T
+pub fn zero<T: Num>() -> T
+pub fn one<T: Num>() -> T
 pub fn sum<T: Num>(xs: [T]) -> T
 pub fn trace<T: Num>(a: Tensor<T, [_, _]>) -> T
 
@@ -133,4 +135,382 @@ impl str {
     pub fn split_whitespace(self) -> Vec<str>
     pub fn lowercase(self) -> String
     pub fn uppercase(self) -> String
+}
+
+// ---- iterators ---------------------------------------------------------------
+//
+// An iterator is anything with a `next` method: each call gives the next item, or `None` when
+// there are no more. The adapters below are ordinary Tau structs, so a chain such as
+// `v.iter().filter(|x| x > 0).map(|x| x * x).sum()` makes no vectors and no copies of `v`:
+// each item travels through the whole chain before the next one starts.
+
+pub trait Iterator<T> {
+    fn next(mut self) -> Option<T>
+
+    fn map<U>(own self, own f: fn(T) -> U) -> MapIter<Self, T, U> { MapIter(self, f) }
+    fn filter(own self, own f: fn(T) -> bool) -> FilterIter<Self, T> { FilterIter(self, f) }
+    fn enumerate(own self) -> EnumerateIter<Self, T> { EnumerateIter(self, 0) }
+    fn zip<U, J: Iterator<U>>(own self, own other: J) -> ZipIter<Self, J, T, U> { ZipIter(self, other) }
+    fn take(own self, n: usize) -> TakeIter<Self, T> { TakeIter(self, n) }
+    fn skip(own self, n: usize) -> SkipIter<Self, T> { SkipIter(self, n) }
+    fn step_by(own self, n: usize) -> StepIter<Self, T> {
+        if n == 0 { panic("step_by: the step must not be 0") }
+        StepIter(self, n, false)
+    }
+    fn chain<J: Iterator<T>>(own self, own other: J) -> ChainIter<Self, J, T> { ChainIter(self, other, false) }
+    fn take_while(own self, own f: fn(T) -> bool) -> TakeWhileIter<Self, T> { TakeWhileIter(self, f, false) }
+    fn skip_while(own self, own f: fn(T) -> bool) -> SkipWhileIter<Self, T> { SkipWhileIter(self, f, false) }
+
+    fn collect(own self) -> Vec<T> {
+        let mut it = self
+        let mut v = Vec.new()
+        loop {
+            match it.next() {
+                Some(x) => v.push(x)
+                None => break
+            }
+        }
+        v
+    }
+    fn count(own self) -> usize {
+        let mut it = self
+        let mut n = 0
+        loop {
+            match it.next() {
+                Some(_) => n += 1
+                None => break
+            }
+        }
+        n
+    }
+    fn fold<A>(own self, own init: A, f: fn(A, T) -> A) -> A {
+        let mut it = self
+        let mut acc = init
+        loop {
+            match it.next() {
+                Some(x) => acc = f(acc, x)
+                None => break
+            }
+        }
+        acc
+    }
+    fn for_each(own self, f: fn(T)) {
+        let mut it = self
+        loop {
+            match it.next() {
+                Some(x) => f(x)
+                None => break
+            }
+        }
+    }
+    fn any(own self, f: fn(T) -> bool) -> bool {
+        let mut it = self
+        loop {
+            match it.next() {
+                Some(x) => { if f(x) { return true } }
+                None => return false
+            }
+        }
+    }
+    fn all(own self, f: fn(T) -> bool) -> bool {
+        let mut it = self
+        loop {
+            match it.next() {
+                Some(x) => { if !f(x) { return false } }
+                None => return true
+            }
+        }
+    }
+    fn find(own self, f: fn(T) -> bool) -> Option<T> {
+        let mut it = self
+        loop {
+            match it.next() {
+                Some(x) => { if f(x) { return Some(x) } }
+                None => return None
+            }
+        }
+    }
+    fn position(own self, f: fn(T) -> bool) -> Option<usize> {
+        let mut it = self
+        let mut i = 0
+        loop {
+            match it.next() {
+                Some(x) => {
+                    if f(x) { return Some(i) }
+                    i += 1
+                }
+                None => return None
+            }
+        }
+    }
+    fn last(own self) -> Option<T> {
+        let mut it = self
+        let mut r = None
+        loop {
+            match it.next() {
+                Some(x) => r = Some(x)
+                None => break
+            }
+        }
+        r
+    }
+    fn nth(own self, n: usize) -> Option<T> {
+        let mut it = self
+        let mut i = 0
+        loop {
+            match it.next() {
+                Some(x) => {
+                    if i == n { return Some(x) }
+                    i += 1
+                }
+                None => return None
+            }
+        }
+    }
+}
+
+// `sum`, `product`, `min` and `max` need the items to be numbers (or ordered).
+pub trait IterNum<T: Num> {
+    fn sum(own self) -> T
+    fn product(own self) -> T
+}
+impl<I: Iterator<T>, T: Num> IterNum<T> for I {
+    fn sum(own self) -> T {
+        let mut it = self
+        let mut acc: T = zero()
+        loop {
+            match it.next() {
+                Some(x) => acc = acc + x
+                None => break
+            }
+        }
+        acc
+    }
+    fn product(own self) -> T {
+        let mut it = self
+        let mut acc: T = one()
+        loop {
+            match it.next() {
+                Some(x) => acc = acc * x
+                None => break
+            }
+        }
+        acc
+    }
+}
+pub trait IterOrd<T: Ord> {
+    fn min(own self) -> Option<T>
+    fn max(own self) -> Option<T>
+}
+impl<I: Iterator<T>, T: Ord> IterOrd<T> for I {
+    fn min(own self) -> Option<T> {
+        let mut it = self
+        let mut best = it.next()
+        loop {
+            match it.next() {
+                Some(x) => {
+                    match best {
+                        Some(b) => { if x < b { best = Some(x) } }
+                        None => {}
+                    }
+                }
+                None => break
+            }
+        }
+        best
+    }
+    fn max(own self) -> Option<T> {
+        let mut it = self
+        let mut best = it.next()
+        loop {
+            match it.next() {
+                Some(x) => {
+                    match best {
+                        Some(b) => { if !(x < b) { best = Some(x) } }
+                        None => {}
+                    }
+                }
+                None => break
+            }
+        }
+        best
+    }
+}
+
+// ---- adapters
+
+pub struct MapIter<I, T, U> { inner: I, f: fn(T) -> U }
+impl<I: Iterator<T>, T, U> Iterator<U> for MapIter<I, T, U> {
+    fn next(mut self) -> Option<U> {
+        match self.inner.next() {
+            Some(x) => Some((self.f)(x))
+            None => None
+        }
+    }
+}
+
+pub struct FilterIter<I, T> { inner: I, f: fn(T) -> bool }
+impl<I: Iterator<T>, T> Iterator<T> for FilterIter<I, T> {
+    fn next(mut self) -> Option<T> {
+        loop {
+            match self.inner.next() {
+                Some(x) => { if (self.f)(x) { return Some(x) } }
+                None => return None
+            }
+        }
+    }
+}
+
+pub struct EnumerateIter<I, T> { inner: I, i: usize }
+impl<I: Iterator<T>, T> Iterator<(usize, T)> for EnumerateIter<I, T> {
+    fn next(mut self) -> Option<(usize, T)> {
+        match self.inner.next() {
+            Some(x) => {
+                let i = self.i
+                self.i += 1
+                Some((i, x))
+            }
+            None => None
+        }
+    }
+}
+
+pub struct ZipIter<A, B, T, U> { a: A, b: B }
+impl<A: Iterator<T>, B: Iterator<U>, T, U> Iterator<(T, U)> for ZipIter<A, B, T, U> {
+    fn next(mut self) -> Option<(T, U)> {
+        match self.a.next() {
+            Some(x) => {
+                match self.b.next() {
+                    Some(y) => Some((x, y))
+                    None => None
+                }
+            }
+            None => None
+        }
+    }
+}
+
+pub struct TakeIter<I, T> { inner: I, left: usize }
+impl<I: Iterator<T>, T> Iterator<T> for TakeIter<I, T> {
+    fn next(mut self) -> Option<T> {
+        if self.left == 0 { return None }
+        self.left -= 1
+        self.inner.next()
+    }
+}
+
+pub struct SkipIter<I, T> { inner: I, n: usize }
+impl<I: Iterator<T>, T> Iterator<T> for SkipIter<I, T> {
+    fn next(mut self) -> Option<T> {
+        while self.n > 0 {
+            self.n -= 1
+            match self.inner.next() {
+                Some(_) => {}
+                None => return None
+            }
+        }
+        self.inner.next()
+    }
+}
+
+pub struct StepIter<I, T> { inner: I, step: usize, started: bool }
+impl<I: Iterator<T>, T> Iterator<T> for StepIter<I, T> {
+    fn next(mut self) -> Option<T> {
+        if !self.started {
+            self.started = true
+            return self.inner.next()
+        }
+        let mut k = self.step - 1
+        while k > 0 {
+            k -= 1
+            match self.inner.next() {
+                Some(_) => {}
+                None => return None
+            }
+        }
+        self.inner.next()
+    }
+}
+
+pub struct ChainIter<A, B, T> { a: A, b: B, first_done: bool }
+impl<A: Iterator<T>, B: Iterator<T>, T> Iterator<T> for ChainIter<A, B, T> {
+    fn next(mut self) -> Option<T> {
+        if !self.first_done {
+            match self.a.next() {
+                Some(x) => return Some(x)
+                None => self.first_done = true
+            }
+        }
+        self.b.next()
+    }
+}
+
+pub struct TakeWhileIter<I, T> { inner: I, f: fn(T) -> bool, done: bool }
+impl<I: Iterator<T>, T> Iterator<T> for TakeWhileIter<I, T> {
+    fn next(mut self) -> Option<T> {
+        if self.done { return None }
+        match self.inner.next() {
+            Some(x) => {
+                if (self.f)(x) { return Some(x) }
+                self.done = true
+                None
+            }
+            None => None
+        }
+    }
+}
+
+pub struct SkipWhileIter<I, T> { inner: I, f: fn(T) -> bool, started: bool }
+impl<I: Iterator<T>, T> Iterator<T> for SkipWhileIter<I, T> {
+    fn next(mut self) -> Option<T> {
+        if self.started { return self.inner.next() }
+        loop {
+            match self.inner.next() {
+                Some(x) => {
+                    if !(self.f)(x) {
+                        self.started = true
+                        return Some(x)
+                    }
+                }
+                None => return None
+            }
+        }
+    }
+}
+
+// ---- sources
+
+// The items of an array, a vector or a slice, copied out one at a time (`for x in v` borrows
+// them instead).
+pub struct SliceIter<T> { xs: [T], i: usize }
+impl<T: Clone> Iterator<T> for SliceIter<T> {
+    fn next(mut self) -> Option<T> {
+        if self.i < self.xs.len {
+            let x = self.xs[self.i].clone()
+            self.i += 1
+            Some(x)
+        } else {
+            None
+        }
+    }
+}
+
+// The numbers of a range: `(0..n).iter()`. (`for i in 0..n` does not need this.)
+pub struct RangeIter<T> { cur: T, end: T }
+impl<T: Int + Ord + Num + Copy> Iterator<T> for RangeIter<T> {
+    fn next(mut self) -> Option<T> {
+        if self.cur < self.end {
+            let x = self.cur
+            self.cur = self.cur + one()
+            Some(x)
+        } else {
+            None
+        }
+    }
+}
+impl<T: Int + Ord + Num + Copy> Range<T> {
+    pub fn iter(self) -> RangeIter<T> { RangeIter(self.start, self.end) }
+}
+impl<T> [T] {
+    pub fn iter(self) -> SliceIter<T> { SliceIter(self, 0) }
 }

@@ -279,6 +279,36 @@ No garbage collector. No hidden allocations: anything that allocates says so (`V
 
 ---
 
+### Iterators
+
+An iterator is a value with a `next` method: each call gives `Some(item)`, then `None` when there are no more. The trait is in the prelude:
+
+```
+trait Iterator<T> {
+    fn next(mut self) -> Option<T>
+    // ... and the methods below, which have bodies
+}
+
+struct Countdown { n: i64 }
+impl Iterator<i64> for Countdown {
+    fn next(mut self) -> Option<i64> {
+        if self.n == 0 { return None }
+        self.n -= 1
+        Some(self.n + 1)
+    }
+}
+```
+
+- **`for` loops.** `for x in it` works for any value that has an `impl Iterator<T>` (the items are `T`). The loop uses the iterator up; `for x in mut it` only borrows it, so a `break` leaves it where it stopped. Ranges, arrays, vectors and slices are looped over directly, as before.
+- **Where iterators come from.** `v.iter()` for an array, a vector or a slice, and `(a..b).iter()` for a range of integers. `v.iter()` gives the items **by value** (a copy for numbers, a `clone` for strings and other owned things), so the items never keep `v` borrowed; the iterator itself holds `v` borrowed for as long as it is used. `for x in v` is still the way to look at the items without copying them.
+- **Adapters** turn an iterator into another one and do no work by themselves: `map(f)`, `filter(f)`, `enumerate()` (items are `(usize, T)`), `zip(other)` (items are pairs; ends with the shorter), `take(n)`, `skip(n)`, `step_by(n)` (`n` must not be 0), `chain(other)`, `take_while(f)`, `skip_while(f)`.
+- **Consumers** use the iterator up: `collect()` (a `Vec<T>`), `count()`, `sum()` and `product()` (numbers; an empty iterator gives 0 and 1), `min()` and `max()` (an `Option`; the items must be ordered; of equal items the first is kept for `min` and the last for `max`), `fold(init, f)`, `for_each(f)`, `any(f)`, `all(f)`, `find(f)`, `position(f)`, `last()`, `nth(n)`.
+- **Laziness.** Each item goes through the whole chain before the next one is asked for, so `v.iter().filter(..).map(..).sum()` makes no vectors in between, and the compiler turns it into a plain loop (as fast as writing the loop by hand). The closures given to an adapter see their argument by borrow, like every closure; a closure that must hand its argument on writes `x.clone()` or builds a new value.
+- **Iterators are ordinary values.** The adapters are structs (`MapIter`, `FilterIter`, ...) with `impl Iterator`, so a function can take `own it: I` with `I: Iterator<T>`: a bound like that tells the compiler what `T` is, as long as exactly one `impl` fits `I`. An iterator that holds closures or slices is a view: it cannot outlive what it was made from.
+- **Not yet:** `rev()` and other double-ended steps, `peekable`, `flat_map`, `windows`/`chunks`, and `(a..b).map(..)` without `.iter()` (write `(a..b).iter().map(..)`).
+
+Two helpers for generic code: `zero<T: Num>() -> T` and `one<T: Num>() -> T` (an integer literal is not a `T`). `x.clone()` works on any type (it copies vectors, strings, boxes and maps too), and `Option` and `Result` print as `Some(3)`, `None`, `Ok(..)` and `Err(..)` when their contents can be printed. A range is a value: `let r = 2..5` has `r.start` and `r.end` (the end is always the exclusive one, so `1..=4` has `end` 5).
+
 ## 8. Errors
 
 ```

@@ -66,6 +66,88 @@ impl<'a> Checker<'a> {
         }
     }
 
+    // ------------------------------------------------------------ bounds that tell a type
+
+    /// A bound such as `I: Iterator<T>` says what `T` is once `I` is known: when exactly one impl
+    /// of the trait fits `I`, the trait's arguments are taken from it. (Tau has no associated
+    /// types; this is what lets `total(counter)` know its item type.)
+    pub(crate) fn solve_bound_args(&mut self) {
+        for _ in 0..4 {
+            let mut progress = false;
+            for ob in self.body.obligations.clone() {
+                if ob.args.is_empty() {
+                    continue;
+                }
+                let ty = self.infer.resolve(&ob.ty);
+                let args: Vec<Ty> = ob.args.iter().map(|a| self.infer.resolve(a)).collect();
+                if !args.iter().any(has_var) {
+                    continue;
+                }
+                if self.infer_from_impl(&ty, ob.trait_, &args, 0) {
+                    progress = true;
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+    }
+
+    /// Did unifying with the only matching impl teach us something?
+    fn infer_from_impl(&mut self, ty: &Ty, tr: TraitId, args: &[Ty], depth: u32) -> bool {
+        if depth > 4 || matches!(ty, Ty::Var(_) | Ty::Error | Ty::Param(_)) {
+            return false;
+        }
+        let mut found: Option<usize> = None;
+        for i in 0..self.prog.impls.len() {
+            let imp = self.prog.impls[i].clone();
+            let Some(tref) = &imp.trait_ref else { continue };
+            if tref.trait_ != tr || tref.args.len() != args.len() {
+                continue;
+            }
+            let snap = self.infer.snapshot();
+            let subst = self.fresh_subst(&imp.generics, Span::default());
+            let ok = self.infer.unify(&imp.self_ty.subst(&subst), ty) && self.generic_bounds_hold(&imp.generics, &subst, 0);
+            self.infer.rollback(snap);
+            if ok {
+                if found.is_some() {
+                    return false;
+                }
+                found = Some(i);
+            }
+        }
+        let Some(i) = found else { return false };
+        let imp = self.prog.impls[i].clone();
+        let tref = imp.trait_ref.clone().unwrap();
+        let subst = self.fresh_subst(&imp.generics, Span::default());
+        if !self.infer.unify(&imp.self_ty.subst(&subst), ty) {
+            return false;
+        }
+        let mut learned = false;
+        for (a, b) in tref.args.iter().zip(args) {
+            let a = a.subst(&subst);
+            let before = self.infer.resolve(b);
+            if self.infer.unify(&a, b) && has_var(&before) {
+                learned = true;
+            }
+        }
+        // the impl's own bounds can tell more (`impl<I: Iterator<T>, T> Sum<T> for I`)
+        for g in &imp.generics {
+            let Some((_, t)) = subst.iter().find(|(k, _)| k == g) else { continue };
+            let t = self.infer.resolve(t);
+            for b in self.prog.generic(*g).bounds.clone() {
+                if b.args.is_empty() {
+                    continue;
+                }
+                let bargs: Vec<Ty> = b.args.iter().map(|a| self.infer.resolve(&a.subst(&subst))).collect();
+                if bargs.iter().any(has_var) && self.infer_from_impl(&t, b.trait_, &bargs, depth + 1) {
+                    learned = true;
+                }
+            }
+        }
+        learned
+    }
+
     // ------------------------------------------------------------ implements
 
     pub(crate) fn implements(&mut self, ty: &Ty, tr: TraitId, args: &[Ty]) -> bool {
@@ -139,6 +221,17 @@ impl<'a> Checker<'a> {
         true
     }
 
+    /// The type arguments of the prelude's `Option` or `Result` (they print as `Some(3)`, `None`, `Ok(..)`, `Err(..)`).
+    fn option_or_result_args(&self, ty: &Ty) -> Option<Vec<Ty>> {
+        let Ty::Adt(id, args) = ty else { return None };
+        let d = self.prog.adt(*id);
+        if d.module == 0 && matches!(d.name.as_str(), "Option" | "Result") {
+            Some(args.clone())
+        } else {
+            None
+        }
+    }
+
     fn builtin_satisfies(&mut self, name: &str, ty: &Ty, depth: u32) -> bool {
         let all = |this: &mut Self, ts: &[Ty], tn: &str| -> bool {
             let Some(tr) = this.prog.find_trait(tn) else { return false };
@@ -187,6 +280,8 @@ impl<'a> Checker<'a> {
                         all(self, &[e], "Display")
                     } else if let Some(e) = self.box_inner(ty) {
                         all(self, &[e], "Display")
+                    } else if let Some(parts) = self.option_or_result_args(ty) {
+                        all(self, &parts, "Display")
                     } else {
                         false
                     }
@@ -282,6 +377,7 @@ impl<'a> Checker<'a> {
                     let ok = self.infer.unify(&imp.self_ty.subst(&subst), &cand)
                         && self.generic_bounds_hold(&imp.generics, &subst, 0);
                     if ok {
+                        self.add_bound_obligations(&imp.generics, &subst, span);
                         if is_default {
                             let tref = imp.trait_ref.clone().unwrap();
                             let tdef = self.prog.trait_(tref.trait_).clone();
@@ -394,5 +490,16 @@ impl<'a> Checker<'a> {
             ret: sig.ret.subst(&subst),
             subst,
         }
+    }
+}
+
+/// Does the type still mention an inference variable?
+pub(crate) fn has_var(t: &Ty) -> bool {
+    match t {
+        Ty::Var(_) => true,
+        Ty::Tuple(ts) | Ty::Adt(_, ts) => ts.iter().any(has_var),
+        Ty::Array(t, _) | Ty::Slice(t) | Ty::Tensor(t, _) => has_var(t),
+        Ty::Fn(ps, r) => ps.iter().any(has_var) || has_var(r),
+        _ => false,
     }
 }

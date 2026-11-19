@@ -201,6 +201,9 @@ impl<'a> Checker<'a> {
 
     pub(super) fn expr(&mut self, e: &'a Expr, exp: Option<&Ty>) -> Ty {
         let t = self.expr_inner(e, exp);
+        if matches!(e.kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. }) {
+            self.solve_bound_args();
+        }
         self.record(e, &t);
         if let ExprKind::Int { value, .. } = &e.kind {
             self.body.int_lits.push((NodeKey::of(e), *value, e.span, false));
@@ -1575,7 +1578,8 @@ impl<'a> Checker<'a> {
                 Some(t) => t,
                 None => {
                     let s = self.show(&st);
-                    self.err_ty(span, format!("`{s}` is not iterable"))
+                    self.err_hint(span, format!("`{s}` is not iterable"), "a type can be looped over when it has `impl Iterator<T> for ...` with a `next` method, or call `.iter()` on a collection");
+                    Ty::Error
                 }
             },
             Ty::Error => Ty::Error,
@@ -1587,6 +1591,33 @@ impl<'a> Checker<'a> {
                 self.err_ty(span, format!("`{s}` is not iterable"))
             }
         }
+    }
+
+    /// A value with a `next` method from an `impl Iterator<T>` can be looped over: the items are `T`.
+    /// Records which `next` to call.
+    fn iterator_item(&mut self, st: &Ty, key: &'a Expr) -> Option<Ty> {
+        let Ty::Adt(id, _) = st else { return None };
+        if Some(*id) == self.adt_named("Range") || self.is_vec(st).is_some() {
+            return None;
+        }
+        let tr = self.prog.find_trait("Iterator")?;
+        let pick = self.lookup_method(st, "next", true, key.span)?;
+        let is_iterator = match self.prog.fn_(pick.fn_id).parent {
+            Parent::Impl(i) => self.prog.impl_(i).trait_ref.as_ref().map(|t| t.trait_) == Some(tr),
+            Parent::Trait(t) => t == tr,
+            Parent::Free => false,
+        };
+        if !is_iterator {
+            return None;
+        }
+        let inst = self.instantiate(pick.fn_id, &pick.subst, None, key.span);
+        let Ty::Adt(oid, oargs) = self.infer.shallow(&inst.ret) else { return None };
+        if Some(oid) != self.adt_named("Option") || oargs.len() != 1 {
+            return None;
+        }
+        self.results.for_next.insert(NodeKey::of(key), (pick.fn_id, inst.subst.clone()));
+        self.body.touched_nexts.push(NodeKey::of(key));
+        Some(oargs[0].clone())
     }
 
     fn for_loop(&mut self, pat: &'a Pattern, iter: &'a Expr, guard: Option<&'a Expr>, body: &'a Block) {
@@ -1602,7 +1633,11 @@ impl<'a> Checker<'a> {
         // `par_chunks` hands out disjoint mutable slices
         let yields_mut = matches!(&iter_expr.kind, ExprKind::Call { callee, .. }
             if matches!(&callee.kind, ExprKind::Ident(n) if n == "par_chunks"));
-        let elem = self.iter_elem(&it, iter.span);
+        let st = self.infer.shallow(&it);
+        let elem = match self.iterator_item(&st, iter) {
+            Some(t) => t,
+            None => self.iter_elem(&it, iter.span),
+        };
         self.push_scope();
         self.pattern(pat, &elem, mut_iter || yields_mut);
         if let Some(g) = guard {

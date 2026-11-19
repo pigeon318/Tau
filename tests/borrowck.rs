@@ -604,3 +604,28 @@ fn own_copies_a_copy_value_and_moves_anything_else() {
     err_m("let v = vec[1]\n let w = own v\n print(v.len)", "use of moved value");
     ok_m("let v = vec[1]\n let w = own v\n print(w.len)");
 }
+
+// ------------------------------------------------------------------ iterators
+
+#[test]
+fn an_iterator_borrows_what_it_walks_over() {
+    err_m("let mut v = vec[1, 2, 3]\n let it = v.iter()\n v.push(4)\n print(it.count())", "also borrowed");
+    ok_m("let mut v = vec[1, 2, 3]\n let n = v.iter().count()\n v.push(n as i64)\n print(v.len)");
+    // a chain holds what its closures capture
+    err_m("let mut k = 1\n let v = vec[1, 2]\n let it = v.iter().map(|x| x + k)\n k = 5\n print(it.count())", "borrowed");
+    ok_m("let k = 1\n let v = vec[1, 2]\n let it = v.iter().map(|x| x + k)\n print(k)\n print(it.count())");
+}
+
+#[test]
+fn a_for_loop_uses_up_an_iterator_unless_it_is_borrowed_mut() {
+    err_m("let v = vec[1, 2, 3]\n let it = v.iter()\n for x in it { print(x) }\n for x in it { print(x) }", "use of moved value");
+    ok_m("let v = vec[1, 2, 3]\n let mut it = v.iter()\n for x in mut it { if x == 2 { break } }\n print(it.next())");
+    // the items are owned: they do not keep the vector borrowed
+    ok_m("let mut v = vec[1, 2, 3]\n let mut firsts = Vec.new()\n for x in v.iter() { firsts.push(x) }\n v.push(9)\n print(firsts)");
+}
+
+#[test]
+fn an_iterator_cannot_outlive_what_it_walks_over() {
+    err_m("let it = {\n let v = vec[1, 2, 3]\n v.iter()\n}\n print(it.count())", "does not live long enough");
+    ok_m("let n = {\n let v = vec[1, 2, 3]\n v.iter().count()\n}\n print(n)");
+}
