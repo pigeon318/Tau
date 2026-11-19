@@ -110,6 +110,13 @@ impl<'a> Interp<'a> {
                 Value::Complex(p, q) => Value::Complex(p.hypot(*q), 0.0),
                 other => return panic(format!("cannot take abs of a {}", other.type_name())),
             }),
+            "zero" => self.default_value(ret),
+            "clone" => Ok(clone_value(&a[0])),
+            "one" => Ok(match ret {
+                Ty::Float(_) => Value::Float(1.0),
+                Ty::Complex(..) => Value::Complex(1.0, 0.0),
+                _ => Value::Int(1),
+            }),
             "min" | "max" => {
                 let c = self.values_cmp(&a[0], &a[1])?;
                 let first_smaller = matches!(c, Some(std::cmp::Ordering::Less));
@@ -402,5 +409,29 @@ impl<'a> Interp<'a> {
                 panic(format!("the built-in `{other}` is not implemented yet"))
             }
         }
+    }
+}
+
+/// A copy that shares nothing with the original (`Clone`): vectors, strings, maps, tensors and boxes
+/// are duplicated too.
+pub(super) fn clone_value<'a>(v: &Value<'a>) -> Value<'a> {
+    let all = |s: &Slot<'a>| -> Vec<Value<'a>> { s.borrow().iter().map(clone_value).collect() };
+    match v {
+        Value::Tuple(s) => Value::Tuple(Value::slot(all(s))),
+        Value::Array(s) => Value::Array(Value::slot(all(s))),
+        Value::Vec(s) => Value::Vec(Value::slot(all(s))),
+        Value::Box(s) => Value::Box(Value::slot(all(s))),
+        Value::Struct(a, s) => Value::Struct(*a, Value::slot(all(s))),
+        Value::Variant(a, i, s) => Value::Variant(*a, *i, Value::slot(all(s))),
+        Value::String(s) => Value::String(Rc::new(RefCell::new(s.borrow().clone()))),
+        Value::Tensor(t) => Value::Tensor(Rc::new(RefCell::new(t.borrow().clone()))),
+        Value::Map(m) => {
+            let m = m.borrow();
+            Value::Map(Rc::new(RefCell::new(MapVal {
+                index: m.index.clone(),
+                entries: m.entries.iter().map(|(k, x)| (clone_value(k), clone_value(x))).collect(),
+            })))
+        }
+        other => other.clone(),
     }
 }

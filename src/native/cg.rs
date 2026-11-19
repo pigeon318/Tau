@@ -384,7 +384,7 @@ impl<'a> Cg<'a> {
                         "Vec" => return Ok(format!("Vec_{}", self.mangle(&args[0])?)),
                         "Task" => return Ok(format!("Task_{}", self.mangle(&args[0])?)),
                         "Box" => return Ok(format!("Box_{}", self.mangle(&args[0])?)),
-                        "Range" | "Ptr" | "Cluster" => {
+                        "Ptr" | "Cluster" => {
                             return unsupported(self.describe(ty));
                         }
                         _ => {}
@@ -589,6 +589,12 @@ impl<'a> Cg<'a> {
             }
             other => return unsupported(self.describe(other)),
         })
+    }
+
+    /// A struct whose fields are real fields (the prelude's iterator types are; `Vec` and friends are not).
+    fn plain_struct(&self, id: AdtId) -> bool {
+        let d = self.prog.adt(id);
+        d.module != 0 || !matches!(d.name.as_str(), "String" | "Vec" | "Task" | "Box" | "Ptr" | "Cluster" | "IoError" | "TaskPanicked")
     }
 
     fn is_builtin_adt(&self, id: AdtId, name: &str) -> bool {
@@ -1221,7 +1227,7 @@ impl<'a> Cg<'a> {
                         Ok(i) if i < ts.len() => Ok((format!("{b}.f{i}"), ts[i].clone())),
                         _ => unsupported("assigning to this field"),
                     },
-                    Ty::Adt(id, args) if !self.is_enum(*id) && self.prog.adt(*id).module != 0 => {
+                    Ty::Adt(id, args) if !self.is_enum(*id) && self.plain_struct(*id) => {
                         let def = self.prog.adt(*id);
                         let AdtKind::Struct(fs) = &def.kind else { return unsupported("this field") };
                         let Some(i) = fs.iter().position(|f| f.name == name.name) else {
@@ -1529,6 +1535,14 @@ impl<'a> Cg<'a> {
                     "tau_buf_char(b, '[');\nfor (size_t i = 0; i < {len}; i++) {{ if (i > 0) tau_buf_cstr(b, \", \"); {ect} x_ = {ptr}[i]; {f} }}\ntau_buf_char(b, ']');\n"
                 ));
             }
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Option") => {
+                let f = self.fmt_stmt("b", "v.u.v0.f0", &args[0])?;
+                body.push_str(&format!("if (v.tag == 0) {{ tau_buf_cstr(b, \"Some(\"); {f} tau_buf_char(b, ')'); }} else tau_buf_cstr(b, \"None\");\n"));
+            }
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Result") => {
+                let (fo, fe) = (self.fmt_stmt("b", "v.u.v0.f0", &args[0])?, self.fmt_stmt("b", "v.u.v1.f0", &args[1])?);
+                body.push_str(&format!("if (v.tag == 0) {{ tau_buf_cstr(b, \"Ok(\"); {fo} tau_buf_char(b, ')'); }} else {{ tau_buf_cstr(b, \"Err(\"); {fe} tau_buf_char(b, ')'); }}\n"));
+            }
             Ty::Adt(id, _) if self.is_builtin_adt(*id, "TaskPanicked") => {
                 body.push_str("tau_buf_cstr(b, \"task panicked\");\n");
             }
@@ -1808,7 +1822,16 @@ impl<'a> Cg<'a> {
             ExprKind::ArrayRepeat { value, .. } => self.array_repeat(&ty, value),
             ExprKind::Index { base, indices } => self.index_expr(e, &ty, base, indices),
             ExprKind::Closure { params, body, .. } => self.closure_expr(e, params, body, &ty),
-            ExprKind::Range { .. } => unsupported("ranges outside a `for` loop or an index"),
+            ExprKind::Range { start: Some(start), end: Some(end), inclusive } => {
+                let Ty::Adt(_, targs) = &ty else { return unsupported("this range") };
+                let t = targs[0].clone();
+                let ct = self.cty(&ty)?;
+                let (decls, n) = self.ordered(&[start, end])?;
+                let hi = if *inclusive { self.arith(BinOp::Add, "e_", "1", &t)? } else { "e_".to_string() };
+                let et = self.cty(&t)?;
+                Ok(Self::wrap(decls, format!("({{ {et} e_ = {}; ({ct}){{ {}, {hi} }}; }})", n[1], n[0])))
+            }
+            ExprKind::Range { .. } => unsupported("a range with no start or end, outside an index"),
             ExprKind::ParReduce { op, pat, iter, body } => self.par_reduce(&ty, &op.name, pat, iter, body),
             ExprKind::Spawn(b) => self.spawn_expr(e, b, &ty),
             ExprKind::On { .. } => unsupported("`on` blocks (clusters are post-v1)"),
@@ -2602,6 +2625,33 @@ impl<'a> Cg<'a> {
                         format!("({{ {ct} a_ = {x}; a_ < 0 ? tau_neg_{n}(a_) : a_; }})")
                     }
                     _ => return unsupported("`abs` on this type"),
+                })
+            }
+            "clone" => {
+                let Some(t) = targ else { return unsupported("`clone` of this type") };
+                let ct = self.cty(&t)?;
+                let v = self.borrowed_as(args[0], &t)?;
+                Ok(match self.clone_fn(&t)? {
+                    Some(f) => format!("({{ {ct} c_ = {v}; {f}(&c_); }})"),
+                    None => v,
+                })
+            }
+            "zero" => {
+                let Some(t) = targ else { return unsupported("`zero` of this type") };
+                let ct = self.cty(&t)?;
+                Ok(match &t {
+                    Ty::Float(_) => format!("(({ct})0.0)"),
+                    Ty::Complex(_) => format!("(({ct}){{ 0.0, 0.0 }})"),
+                    _ => format!("(({ct})0)"),
+                })
+            }
+            "one" => {
+                let Some(t) = targ else { return unsupported("`one` of this type") };
+                let ct = self.cty(&t)?;
+                Ok(match &t {
+                    Ty::Float(_) => format!("(({ct})1.0)"),
+                    Ty::Complex(_) => format!("(({ct}){{ 1.0, 0.0 }})"),
+                    _ => format!("(({ct})1)"),
                 })
             }
             "min" | "max" => {
@@ -4158,6 +4208,9 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         if let ExprKind::Range { start: Some(start), end: Some(end), inclusive } = &inner.kind {
             return self.for_range(pat, start, end, *inclusive, guard, body);
         }
+        if let Some((nfid, nsub)) = self.res.for_next.get(&NodeKey::of(iter)).cloned() {
+            return self.for_iterator(pat, iter, inner, mut_iter, nfid, &nsub, guard, body);
+        }
         let it_ty = self.ty_of(inner);
         let Some(elem) = self.seq_elem(&it_ty) else {
             return unsupported(format!("`for` over {}", self.describe(&it_ty)));
@@ -4204,6 +4257,78 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         let (g, b) = (g?, b?);
         Ok(format!(
             "({{ {pre}{st} {s} = {view}; for (size_t {i} = 0; {i} < {s}.len; {i}++) {{ {bind}{g}(void)({b}); {cont}: ; }} {brk}: ; ((tau_unit)0); }})"
+        ))
+    }
+
+    /// `for x in it` where `it` has a `next` method: call it until it says `None`. The loop owns the
+    /// iterator (it is dropped afterwards) unless it is `mut it`, which only borrows it.
+    fn for_iterator(
+        &mut self,
+        pat: &'a Pattern,
+        iter: &'a Expr,
+        inner: &'a Expr,
+        mut_iter: bool,
+        nfid: FnId,
+        nsub: &[(GenericId, Ty)],
+        guard: Option<&'a Expr>,
+        body: &'a Block,
+    ) -> CgResult<String> {
+        let _ = iter;
+        let nsub = self.apply_sub(nsub);
+        let it_ty = self.ty_of(inner);
+        let ict = self.cty(&it_ty)?;
+        let item_ty = {
+            // the item type is the payload of the `Option` that `next` returns
+            let ret = self.prog.fn_(nfid).sig.ret.subst(&nsub);
+            match ret {
+                Ty::Adt(_, a) if a.len() == 1 => a[0].clone(),
+                _ => return unsupported("this iterator"),
+            }
+        };
+        let opt_ty = Ty::Adt(self.prog.find_adt("Option").unwrap(), vec![item_ty.clone()]);
+        let oct = self.cty(&opt_ty)?;
+        let (it, o) = (self.fresh("it"), self.fresh("nx"));
+        let (brk, cont) = (self.fresh("brk"), self.fresh("cont"));
+        // the iterator: a hidden owning local (dropped by `return`), or a pointer to the place
+        let (setup, itval) = if mut_iter {
+            let (pl, _) = self.place(inner)?;
+            (format!("{ict} *{it}p = &({pl}); "), format!("(*{it}p)"))
+        } else {
+            let v = self.owned(inner)?;
+            (format!("{ict} {it} = {v}; "), it.clone())
+        };
+        let scope_start = self.scopes.len();
+        if !mut_iter {
+            self.scopes.push(vec![Local { name: format!("<{it}>"), cname: it.clone(), ty: it_ty.clone(), by_ptr: false, owns: true }]);
+        }
+        let depth = self.scopes.len();
+        self.scopes.push(Vec::new());
+        let call = self.call_with_values(nfid, &nsub, &[(itval, it_ty.clone())])?;
+        let mut bind = String::new();
+        let item = format!("{o}.u.v0.f0");
+        let mut item_drop = String::new();
+        match &pat.kind {
+            PatKind::Wild => {
+                item_drop = self.drop_stmt(&item, &item_ty)?;
+            }
+            _ => self.pat_bind(pat, &item, &item_ty, &mut bind, true)?,
+        }
+        let per_iter = self.scope_drops(depth)?;
+        self.loops.push(LoopCtx { brk: brk.clone(), cont: cont.clone(), depth, result: None });
+        let g = match guard {
+            Some(g) => self.cond_expr(g).map(|c| format!("if (!({c})) {{ {per_iter}goto {cont}; }} ")),
+            None => Ok(String::new()),
+        };
+        let b = self.block_value(body);
+        self.loops.pop();
+        self.scopes.truncate(depth);
+        let (g, b) = (g?, b?);
+        let end = if mut_iter { String::new() } else { self.drop_stmt(&it, &it_ty)? };
+        if !mut_iter {
+            self.scopes.truncate(scope_start);
+        }
+        Ok(format!(
+            "({{ {setup}for (;;) {{ {oct} {o} = {call}; if ({o}.tag == 1) break; {item_drop}{bind}{g}(void)({b}); {per_iter}{cont}: ; }} {brk}: ; {end}((tau_unit)0); }})"
         ))
     }
 

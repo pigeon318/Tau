@@ -1222,3 +1222,141 @@ fn what_the_body_of_a_parallel_reduction_creates_is_freed() {
     let out = same("fn main() {\n let n = par sum(i in 0..300) vec[i, i + 1].len + \"ab\".to_string().len\n print(n)\n let m = Tensor<f64, [_]>.arange(12).reshape(3, 4)\n print(par sum(j in 0..4) m[.., j].sum())\n}");
     assert_eq!(out, "1200\n66.0\n");
 }
+
+// ------------------------------------------------------------------ iterators
+
+#[test]
+fn iterator_chains_run_the_same_natively() {
+    let out = same(
+        "fn main() {\n\
+          let v: Vec<i64> = vec[3, 1, 4, 1, 5, 9, 2, 6]\n\
+          print(v.iter().map(|x| x * 2).collect())\n\
+          print(v.iter().filter(|x| x > 2).count())\n\
+          print(v.iter().sum())\n\
+          print(v.iter().product())\n\
+          print(v.iter().enumerate().map(|p| p.0 as i64 * p.1).sum())\n\
+          print(v.iter().zip(v.iter().skip(1)).map(|p| p.1 - p.0).collect())\n\
+          print(v.iter().take(3).chain(v.iter().skip(6)).collect())\n\
+          print(v.iter().step_by(3).collect())\n\
+          print(v.iter().take_while(|x| x < 5).collect())\n\
+          print(v.iter().skip_while(|x| x < 5).collect())\n\
+          print(v.iter().max())\n\
+          print(v.iter().min())\n\
+          print(v.iter().fold(0, |a, x| a + x))\n\
+          print(v.iter().any(|x| x == 9))\n\
+          print(v.iter().all(|x| x > 1))\n\
+          print(v.iter().find(|x| x > 4))\n\
+          print(v.iter().position(|x| x == 4))\n\
+          print(v.iter().last())\n\
+          print(v.iter().nth(2))\n\
+         }",
+    );
+    let want = "[6, 2, 8, 2, 10, 18, 4, 12]\n5\n31\n6480\n131\n[-2, 3, -3, 4, 4, -7, 4]\n[3, 1, 4, 2, 6]\n[3, 1, 2]\n[3, 1, 4, 1]\n[5, 9, 2, 6]\nSome(9)\nSome(1)\n31\ntrue\nfalse\nSome(5)\nSome(2)\nSome(6)\nSome(4)\n";
+    assert_eq!(out, want);
+}
+
+#[test]
+fn iterators_over_ranges_floats_strings_and_nothing() {
+    let out = same(
+        "fn main() {\n\
+          print((1..=10).iter().map(|x| x * x).sum())\n\
+          print((0..5).iter().filter(|x| x % 2 == 0).collect())\n\
+          print((1..11).iter().product())\n\
+          print(vec[1.5, 2.5].iter().map(|x| x * 2.0).fold(0.0, |a, x| a + x))\n\
+          print(vec[1.5, 2.5].iter().sum())\n\
+          let names = vec[String.from(\"ann\"), String.from(\"bo\")]\n\
+          print(names.iter().map(|s| s.len).sum())\n\
+          print(names.iter().collect())\n\
+          let none: Vec<i64> = Vec.new()\n\
+          print(none.iter().sum())\n\
+          print(none.iter().max())\n\
+          print(none.iter().map(|x| x + 1).collect())\n\
+          let offset = 100\n\
+          print(vec[1, 2, 3].iter().map(|x| x + offset).collect())\n\
+         }",
+    );
+    assert_eq!(out, "385\n[0, 2, 4]\n3628800\n8.0\n4.0\n5\n[ann, bo]\n0\nNone\n[]\n[101, 102, 103]\n");
+}
+
+#[test]
+fn for_loops_over_iterators() {
+    let out = same(
+        "struct Fib { a: u64, b: u64 }\n\
+         impl Iterator<u64> for Fib {\n\
+          fn next(mut self) -> Option<u64> {\n let r = self.a\n self.a = self.b\n self.b = r + self.b\n Some(r)\n }\n\
+         }\n\
+         struct Counter { n: i64, end: i64 }\n\
+         impl Iterator<i64> for Counter {\n\
+          fn next(mut self) -> Option<i64> {\n if self.n < self.end {\n let x = self.n\n self.n += 1\n Some(x)\n } else { None }\n }\n\
+         }\n\
+         fn main() {\n\
+          let mut t = 0\n for x in Counter(0, 5) { t += x }\n print(t)\n\
+          let mut c = Counter(0, 10)\n for x in mut c { if x == 3 { break } }\n print(c.next())\n\
+          for x in Fib(0, 1).take(10).skip(2) where x % 2 == 0 { print(x) }\n\
+          for (i, s) in vec[\"a\", \"b\"].iter().enumerate() { print(\"{i}{s}\") }\n\
+          for (a, b) in vec[1, 2, 3].iter().zip(vec[10, 20, 30].iter()) {\n if a == 2 { continue }\n print(a + b)\n }\n\
+          let words = vec[String.from(\"x\"), String.from(\"yy\")]\n\
+          for w in words.iter() { print(w.len) }\n\
+          for _ in words.iter() { print(\"w\") }\n\
+          print(Fib(0, 1).take_while(|x| x < 100).filter(|x| x % 2 == 0).sum())\n\
+         }",
+    );
+    assert_eq!(out, "10\nSome(4)\n2\n8\n34\n0a\n1b\n11\n33\n1\n2\nw\nw\n44\n");
+}
+
+#[test]
+fn option_and_result_print() {
+    let out = same(
+        "fn half(n: i64) -> Result<i64, String> {\n if n % 2 == 0 { Ok(n / 2) } else { Err(\"odd\".to_string()) }\n}\n\
+         fn main() {\n\
+          print(Some(3))\n let n: Option<f64> = None\n print(n)\n print(Some(\"x\"))\n print(half(8))\n print(half(7))\n print(Some((1, 2)))\n\
+          print(\"{vec[Some(1), None]}\")\n\
+         }",
+    );
+    assert_eq!(out, "Some(3)\nNone\nSome(x)\nOk(4)\nErr(odd)\nSome((1, 2))\n[Some(1), None]\n");
+}
+
+#[test]
+fn clone_zero_one_and_a_first_class_range() {
+    let out = same(
+        "fn twice<T: Clone>(x: T) -> (T, T) { (x.clone(), x.clone()) }\n\
+         fn total<T: Num>(xs: [T]) -> T {\n let mut a: T = zero()\n for x in xs { a = a + x }\n a\n}\n\
+         fn scale<T: Num>(x: T, n: i64) -> T {\n let mut a: T = one()\n for i in 0..n { a = a * x }\n a\n}\n\
+         fn main() {\n\
+          print(twice(String.from(\"ab\")))\n print(twice(vec[1, 2]))\n print(total(vec[1.5, 2.5]))\n print(total(vec[1, 2, 3]))\n print(scale(2, 10))\n print(scale(1.5, 2))\n\
+          let r = 3..7\n print(r.start + r.end)\n let q = 1..=4\n print(q.end)\n\
+         }",
+    );
+    assert_eq!(out, "(ab, ab)\n([1, 2], [1, 2])\n4.0\n6\n1024\n2.25\n10\n5\n");
+}
+
+#[test]
+fn iterators_free_what_they_own() {
+    // `TAU_VALGRIND=1` reports leaks: strings cloned by `iter`, an early `break`, and a closure capturing a vector
+    let out = same(
+        "fn main() {\n\
+          let words = vec[String.from(\"alpha\"), String.from(\"be\"), String.from(\"gam\")]\n\
+          let extra = vec[1, 2, 3]\n\
+          let n = words.iter().map(|w| w.len + extra.len).sum()\n print(n)\n\
+          for w in words.iter() { if w.len == 2 { break } }\n\
+          let all = words.iter().filter(|w| w.len > 2).collect()\n print(all)\n\
+          for w in words.iter().skip(1) { print(w) }\n\
+         }",
+    );
+    assert_eq!(out, "19\n[alpha, gam]\nbe\ngam\n");
+}
+
+#[test]
+fn a_return_inside_a_loop_over_an_iterator_frees_it() {
+    let out = same(
+        "fn first_long(words: [String]) -> Option<String> {\n for w in words.iter() {\n if w.len > 3 { return Some(w) }\n }\n None\n}\n\
+         fn main() {\n let ws = vec[String.from(\"ab\"), String.from(\"abcd\"), String.from(\"xyz12\")]\n print(first_long(ws))\n print(first_long(vec[String.from(\"a\")]))\n}",
+    );
+    assert_eq!(out, "Some(abcd)\nNone\n");
+}
+
+#[test]
+fn of_equal_items_min_keeps_the_first_and_max_the_last() {
+    let out = same("fn main() {\n let v = vec[(1, \"a\"), (3, \"b\"), (3, \"c\"), (1, \"d\")]\n print(v.iter().max())\n print(v.iter().min())\n}");
+    assert_eq!(out, "Some((3, c))\nSome((1, a))\n");
+}

@@ -829,3 +829,57 @@ mod tensor_slices {
         err("fn main() {\n let m = Tensor<f64, [_, _]>.zeros(3, 3)\n let a = m[1.5, ..]\n}\n", "mismatched types");
     }
 }
+
+mod iterators {
+    use super::*;
+
+    const COUNTER: &str = "struct Counter { n: i64, end: i64 }\nimpl Iterator<i64> for Counter {\n fn next(mut self) -> Option<i64> {\n  if self.n < self.end {\n   self.n += 1\n   Some(self.n)\n  } else { None }\n }\n}\n";
+
+    #[test]
+    fn chains_have_the_types_of_their_items() {
+        assert_eq!(m("let v: Vec<f64> = vec[1.0, 2.0]\n let s = v.iter().map(|x| x * 2.0).sum()", "s"), "f64");
+        assert_eq!(m("let v = vec[1, 2]\n let c = v.iter().enumerate().collect()", "c"), "Vec<(usize, i64)>");
+        assert_eq!(m("let v = vec[1, 2]\n let c = v.iter().zip((0..2).iter()).count()", "c"), "usize");
+        assert_eq!(m("let v: Vec<i32> = vec[1, 2]\n let c = v.iter().max()", "c"), "Option<i32>");
+        assert_eq!(m("let v = vec[1, 2]\n let c = v.iter().map(|x| x > 1).all(|b| b)", "c"), "bool");
+    }
+
+    #[test]
+    fn the_item_type_comes_from_the_impl() {
+        // `total` learns `T` from `I: Iterator<T>`
+        ok("fn total<T: Num, I: Iterator<T>>(own it: I) -> T {\n let mut s = it\n let mut a: T = zero()\n loop {\n  match s.next() {\n   Some(x) => a = a + x\n   None => break\n  }\n }\n a\n}\nfn main() {\n let c = Counter(0, 3)\n print(total(c))\n}\nstruct Counter { n: i64, end: i64 }\nimpl Iterator<i64> for Counter {\n fn next(mut self) -> Option<i64> { None }\n}\n");
+    }
+
+    #[test]
+    fn a_type_with_next_can_be_looped_over() {
+        ok(&format!("{COUNTER}fn main() {{\n for x in Counter(0, 3) {{ print(x + 1) }}\n let mut c = Counter(0, 3)\n for x in mut c {{ print(x) }}\n print(c.next())\n}}\n"));
+        assert_eq!(ty(&format!("{COUNTER}fn main() {{\n for x in Counter(0, 3) {{ let y = x }}\n}}\n"), "y"), "i64");
+    }
+
+    #[test]
+    fn only_an_iterator_impl_makes_a_type_iterable() {
+        let r = err("struct S { n: i64 }\nimpl S { fn next(mut self) -> Option<i64> { None } }\nfn main() {\n for x in S(1) { print(x) }\n}\n", "is not iterable");
+        assert!(r.diagnostics[0].hint.as_deref().unwrap_or("").contains("impl Iterator"), "{:?}", r.diagnostics[0].hint);
+        err("fn main() {\n for x in 5 { print(x) }\n}\n", "is not iterable");
+    }
+
+    #[test]
+    fn adapters_check_their_closures() {
+        err("fn main() {\n let v = vec[1, 2]\n let n = v.iter().filter(|x| x + 1).count()\n}\n", "mismatched types");
+        err("fn main() {\n let v = vec[1, 2]\n let n: i64 = v.iter().map(|x| x > 1).sum()\n}\n", "mismatched types");
+        err("fn main() {\n let v = vec[\"a\"]\n print(v.iter().sum())\n}\n", "`Num` is not implemented for `str`");
+        err("fn main() {\n let v = vec[1]\n let s = v.iter().step_by(1, 2)\n}\n", "argument");
+    }
+
+    #[test]
+    fn option_and_result_have_display_when_their_contents_do() {
+        ok("fn main() {\n print(Some(1))\n let r: Result<i64, String> = Ok(1)\n print(r)\n print(\"{Some(2.5)}\")\n}\n");
+        err("struct P { x: i64 }\nfn main() {\n print(Some(P(1)))\n}\n", "`Display` is not implemented");
+    }
+
+    #[test]
+    fn zero_one_and_clone_work_in_generic_code() {
+        ok("fn f<T: Num>(x: T) -> T { let a: T = zero()\n let b: T = one()\n a + b + x }\nfn g<T: Clone>(x: T) -> T { x.clone() }\nfn main() { print(f(2)) \n print(g(vec[1])) }\n");
+        err("fn f<T>() -> T { zero() }\nfn main() {}\n", "Num");
+    }
+}
