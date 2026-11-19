@@ -883,3 +883,32 @@ fn body_ok(src: &str) {
     let out = same(src);
     assert_eq!(out, "1709164800\n951782400\n");
 }
+
+// ------------------------------------------------------------------ loops over array values
+
+#[test]
+fn loops_over_array_literals_keep_the_array_alive() {
+    // `for x in [..]` views an array that is not in a variable. The generated C used to point into a
+    // temporary that was already gone, which only showed up on some compilers.
+    let src = "fn churn(n: i64) -> i64 {\n let mut a = [0; 64]\n let mut i = 0\n while i < 64 {\n a[i] = n + i as i64\n i += 1\n }\n a[63] - a[0]\n}\n\
+               fn main() {\n\
+                let mut total = 0\n\
+                for x in [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200] {\n\
+                 total += x + churn(x)\n\
+                 print(x)\n\
+                }\n\
+                print(total)\n\
+                for (a, b) in [(1, 2.5), (3, 4.5), (5, 6.5)] { print(\"{a} {b}\") }\n\
+                let s = par sum(x in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) x * x\n\
+                print(s)\n\
+                let mut sum = 0\n\
+                for x in [-9223372036854775807 - 1, 0, 9223372036854775807] { sum += x / 2 }\n\
+                print(sum)\n\
+               }";
+    let out = same(src);
+    assert!(out.ends_with("385\n-1\n"), "{out}");
+    if have_cc() {
+        let c = native::emit_c(src).unwrap();
+        assert!(c.contains("arr_tmp"), "the array in a `for` loop should have a variable of its own");
+    }
+}

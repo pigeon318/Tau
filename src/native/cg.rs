@@ -3254,11 +3254,25 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         let Some(elem) = self.seq_elem(&it_ty) else {
             return unsupported(format!("a parallel loop over {}", self.describe(&it_ty)));
         };
-        let place = if self.is_place(inner) { self.place(inner)?.0 } else { self.borrow(inner)? };
+        // An array that is not in a variable (`for x in [1, 2, 3]`) is a C value, and the loop's view
+        // points into it, so it gets a variable of its own that lives as long as the loop. (Taking
+        // `.v` of the value of a statement expression would point at a temporary that is already gone.)
+        let mut pre = String::new();
+        let place = if self.is_place(inner) {
+            self.place(inner)?.0
+        } else if matches!(it_ty, Ty::Array(..)) && !self.needs_drop(&it_ty) {
+            let t = self.fresh("arr_tmp");
+            let ct = self.cty(&it_ty)?;
+            let v = self.expr(inner)?;
+            pre = format!("{ct} {t} = {v}; ");
+            t
+        } else {
+            self.borrow(inner)?
+        };
         let view = self.view(&place, &it_ty)?;
         let st = self.cty(&Ty::Slice(Box::new(elem.clone())))?;
         Ok((
-            format!("{st} s_ = {view}; "),
+            format!("{pre}{st} s_ = {view}; "),
             "s_.len".to_string(),
             format!("{st} s;"),
             "s_".to_string(),
@@ -3809,7 +3823,19 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         let Some(elem) = self.seq_elem(&it_ty) else {
             return unsupported(format!("`for` over {}", self.describe(&it_ty)));
         };
-        let place = if self.is_place(inner) { self.place(inner)?.0 } else { self.borrow(inner)? };
+        // (see `region_items`: an array value needs a variable of its own to be viewed)
+        let mut pre = String::new();
+        let place = if self.is_place(inner) {
+            self.place(inner)?.0
+        } else if matches!(it_ty, Ty::Array(..)) && !self.needs_drop(&it_ty) {
+            let t = self.fresh("arr_tmp");
+            let ct = self.cty(&it_ty)?;
+            let v = self.expr(inner)?;
+            pre = format!("{ct} {t} = {v}; ");
+            t
+        } else {
+            self.borrow(inner)?
+        };
         let view = self.view(&place, &it_ty)?;
         let st = self.cty(&Ty::Slice(Box::new(elem.clone())))?;
         let ect = self.cty(&elem)?;
@@ -3838,7 +3864,7 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         self.scopes.pop();
         let (g, b) = (g?, b?);
         Ok(format!(
-            "({{ {st} {s} = {view}; for (size_t {i} = 0; {i} < {s}.len; {i}++) {{ {bind}{g}(void)({b}); {cont}: ; }} {brk}: ; ((tau_unit)0); }})"
+            "({{ {pre}{st} {s} = {view}; for (size_t {i} = 0; {i} < {s}.len; {i}++) {{ {bind}{g}(void)({b}); {cont}: ; }} {brk}: ; ((tau_unit)0); }})"
         ))
     }
 
