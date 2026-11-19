@@ -180,7 +180,7 @@ impl<'a> Checker<'a> {
                     self.resolve_use(m, t, &full);
                 }
             }
-            UseKind::Glob => match self.mod_by_path.get(&joined).copied() {
+            UseKind::Glob => match self.find_module(m, &joined) {
                 Some(src) => {
                     let types: Vec<_> = self.scopes[src].types.iter().map(|(k, v)| (k.clone(), *v)).collect();
                     let values: Vec<_> = self.scopes[src].values.iter().map(|(k, v)| (k.clone(), *v)).collect();
@@ -197,13 +197,13 @@ impl<'a> Checker<'a> {
                 let last = full.last().unwrap().clone();
                 let local = alias.as_ref().map(|a| a.name.clone()).unwrap_or(last.clone());
                 // a whole module
-                if let Some(src) = self.mod_by_path.get(&joined).copied() {
+                if let Some(src) = self.find_module(m, &joined) {
                     self.scopes[m].modules.insert(local, src);
                     return;
                 }
                 // an item inside a module
                 let parent = full[..full.len() - 1].join(".");
-                if let Some(src) = self.mod_by_path.get(&parent).copied() {
+                if let Some(src) = self.find_module(m, &parent) {
                     let mut found = false;
                     if let Some(t) = self.scopes[src].types.get(&last).copied() {
                         self.scopes[m].types.entry(local.clone()).or_insert(t);
@@ -220,6 +220,18 @@ impl<'a> Checker<'a> {
                 self.unresolved_import(tree.span, &joined);
             }
         }
+    }
+
+    /// The module a dotted path names, as seen from module `from`: first inside its own package
+    /// (`util` in the package `fastmath` is `fastmath.util`), then by its full path.
+    pub(crate) fn find_module(&self, from: usize, dotted: &str) -> Option<usize> {
+        let pkg = &self.mod_package[from];
+        if !pkg.is_empty() {
+            if let Some(&i) = self.mod_by_path.get(&format!("{pkg}{dotted}")) {
+                return Some(i);
+            }
+        }
+        self.mod_by_path.get(dotted).copied()
     }
 
     fn unresolved_import(&mut self, span: Span, path: &str) {

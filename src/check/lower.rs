@@ -53,7 +53,7 @@ impl<'a> Checker<'a> {
         if segs.is_empty() {
             return None;
         }
-        if let Some(&m) = self.mod_by_path.get(&segs.join(".")) {
+        if let Some(m) = self.find_module(module, &segs.join(".")) {
             return Some(m);
         }
         let first = self.scopes[module].modules.get(segs[0]).copied()?;

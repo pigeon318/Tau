@@ -17,6 +17,7 @@ use std::rc::Rc;
 use crate::ast::*;
 use crate::check::{CheckResult, NodeKey, Res, Results};
 use crate::program::*;
+use crate::unit::ModRef;
 use crate::types::*;
 use crate::types::Dim;
 use value::*;
@@ -84,16 +85,14 @@ pub struct Interp<'a> {
 
 
 fn make_interp<'a>(
-    user: &'a Module,
+    mods: &[ModRef<'a>],
     check: &'a CheckResult,
-    lib_paths: Vec<String>,
     out: Box<dyn Write>,
     stack_base: usize,
     stack_bytes: usize,
     max_steps: u64,
 ) -> Interp<'a> {
-    let mut mod_paths = lib_paths;
-    mod_paths.push("main".to_string());
+    let mod_paths: Vec<String> = mods.iter().map(|m| m.path.to_string()).collect();
     let prog = &check.program;
     let res = &check.results;
     let mut it = Interp {
@@ -115,17 +114,19 @@ fn make_interp<'a>(
         range_adt: prog.find_adt("Range"),
         tasks: Vec::new(),
     };
-    it.collect(&user.items);
+    for m in mods {
+        it.collect(&m.module.items, !m.builtin);
+    }
     it
 }
 
-/// Run `main` in the user's module. The program must have passed the type checker and
+/// Run `main` in the entry module `mods[root]`. The program must have passed the type checker and
 /// the borrow checker.
-pub fn run_main(user: &Module, check: &CheckResult, lib_paths: Vec<String>, out: Box<dyn Write>, stack_bytes: usize, max_steps: u64) -> Outcome {
+pub fn run_main(mods: &[ModRef], root: usize, check: &CheckResult, out: Box<dyn Write>, stack_bytes: usize, max_steps: u64) -> Outcome {
     let marker = 0u8;
-    let mut it = make_interp(user, check, lib_paths, out, &marker as *const u8 as usize, stack_bytes, max_steps);
+    let mut it = make_interp(mods, check, out, &marker as *const u8 as usize, stack_bytes, max_steps);
     let res = &check.results;
-    let main = user.items.iter().find_map(|i| match &i.kind {
+    let main = mods[root].module.items.iter().find_map(|i| match &i.kind {
         ItemKind::Fn(f) if f.name.name == "main" => res.fn_decl.get(&NodeKey::of(f)).copied(),
         _ => None,
     });
@@ -196,28 +197,34 @@ fn attr_text(a: &Attribute) -> Option<String> {
     }
 }
 
-/// Run every `#[test]` function in the user's module whose name contains `filter`.
+/// Run every `#[test]` function in the program's modules whose name contains `filter`.
 /// Each test runs in a fresh scope; a panic (or an `Err` result) fails it. A test marked
 /// `#[should_panic]` passes only if it panics, and `#[should_panic("text")]` also needs
 /// the message to contain `text`.
 pub fn run_tests(
-    user: &Module,
+    mods: &[ModRef],
+    root: usize,
     check: &CheckResult,
-    lib_paths: Vec<String>,
     stack_bytes: usize,
     max_steps: u64,
     filter: Option<&str>,
 ) -> Vec<TestResult> {
     let marker = 0u8;
-    let mut it = make_interp(user, check, lib_paths, Box::new(std::io::sink()), &marker as *const u8 as usize, stack_bytes, max_steps);
+    let mut it = make_interp(mods, check, Box::new(std::io::sink()), &marker as *const u8 as usize, stack_bytes, max_steps);
     let mut results = Vec::new();
-    for item in &user.items {
+    for (mi, m) in mods.iter().enumerate() {
+      if m.builtin {
+        continue;
+      }
+      for item in &m.module.items {
         let ItemKind::Fn(f) = &item.kind else { continue };
         if !item.attrs.iter().any(|a| a.name.name == "test") {
             continue;
         }
+        // a test in another module is named `module::test`
+        let full = if mi == root { f.name.name.clone() } else { format!("{}::{}", m.path, f.name.name) };
         if let Some(pat) = filter {
-            if !f.name.name.contains(pat) {
+            if !full.contains(pat) {
                 continue;
             }
         }
@@ -245,7 +252,8 @@ pub fn run_tests(
             },
             (Err(_), _) => (true, String::new()),
         };
-        results.push(TestResult { name: f.name.name.clone(), passed, message, output });
+        results.push(TestResult { name: full, passed, message, output });
+      }
     }
     results
 }
@@ -253,7 +261,9 @@ pub fn run_tests(
 impl<'a> Interp<'a> {
     // ------------------------------------------------------------ setup
 
-    fn collect(&mut self, items: &'a [Item]) {
+    /// Find the functions (and, for the program's own modules, constants) of one module.
+    /// Functions without a body are the runtime's built-ins.
+    fn collect(&mut self, items: &'a [Item], consts: bool) {
         for item in items {
             match &item.kind {
                 ItemKind::Fn(f) => self.register_fn(f),
@@ -271,7 +281,7 @@ impl<'a> Interp<'a> {
                         }
                     }
                 }
-                ItemKind::Const(c) => {
+                ItemKind::Const(c) if consts => {
                     if let Some(id) = self.res.const_decl.get(&NodeKey::of(c)) {
                         self.consts.insert(*id, c);
                     }

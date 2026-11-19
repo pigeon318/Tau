@@ -36,6 +36,12 @@ pub fn parse_module(src: &str) -> PResult<Module> {
     Parser::new(toks).module()
 }
 
+/// Parse a source file whose first byte has the offset `base` (see `SourceMap`).
+pub fn parse_module_at(src: &str, base: usize) -> PResult<Module> {
+    let toks = crate::lexer::lex_at(src, base)?;
+    Parser::new(toks).module()
+}
+
 /// Parse a single expression (handy for tests and tooling).
 pub fn parse_expr(src: &str) -> PResult<Expr> {
     let toks = lex(src)?;

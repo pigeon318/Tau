@@ -42,16 +42,20 @@ impl NativeError {
 
 /// Check `src` and translate it to C.
 pub fn emit_c(src: &str) -> Result<String, NativeError> {
-    let user = crate::parse_module(src).map_err(NativeError::Parse)?;
-    let lib = crate::prelude::load();
-    let result = crate::analyze(&lib, &user);
+    let ws = crate::Workspace::single("<main>", src).map_err(NativeError::Parse)?;
+    emit_c_workspace(&ws)
+}
+
+/// Check a whole program (all its modules) and translate it to C.
+pub fn emit_c_workspace(ws: &crate::Workspace) -> Result<String, NativeError> {
+    let result = ws.analyze();
     if !result.diagnostics.is_empty() {
         return Err(NativeError::Rejected(result.diagnostics));
     }
-    // The checker's side tables are keyed by node address, so `user` must stay put.
-    let paths = lib.iter().map(|m| m.path.clone()).collect();
-    let captures = crate::borrowck::capture_modes(&user, &result.program, &result.results);
-    cg::translate(&user, &result, paths, captures)
+    // The checker's side tables are keyed by node address, so the modules must stay put.
+    let refs = ws.refs();
+    let captures = crate::borrowck::capture_modes(&refs, &result.program, &result.results);
+    cg::translate(&refs, ws.root, &result, captures)
 }
 
 /// The C compiler to use: `$TAU_CC`, else the first of clang, gcc, cc that exists (on Windows:

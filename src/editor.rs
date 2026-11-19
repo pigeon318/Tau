@@ -293,21 +293,20 @@ impl<'a> Collector<'a> {
 pub fn check_json(src: &str) -> String {
     let mut diags: Vec<String> = Vec::new();
     let mut hovers: Vec<String> = Vec::new();
-    let user = match crate::parse_module(src) {
-        Ok(m) => Some(m),
+    let ws = match crate::Workspace::single("<main>", src) {
+        Ok(w) => Some(w),
         Err(d) => {
             diags.push(diagnostic_json(src, &d));
             None
         }
     };
-    if let Some(user) = &user {
-        let lib = crate::prelude::load();
-        let result = crate::analyze(&lib, user);
+    if let Some(ws) = &ws {
+        let result = ws.analyze();
         for d in &result.diagnostics {
             diags.push(diagnostic_json(src, d));
         }
         let mut c = Collector { res: &result, hovers: Vec::new() };
-        c.items(&user.items);
+        c.items(&ws.mods[ws.root].module.items);
         c.hovers.sort_by_key(|h| (h.span.start, h.span.end));
         c.hovers.dedup_by(|a, b| a.span == b.span);
         for h in &c.hovers {
