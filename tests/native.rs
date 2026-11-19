@@ -1100,3 +1100,125 @@ fn format_specs_agree_on_many_random_numbers() {
     let out = same(&src);
     assert!(out.lines().count() >= 300, "{}", out.lines().count());
 }
+
+// ------------------------------------------------------------------ tensor constructors and methods
+
+#[test]
+fn tensors_are_built_from_data_and_summarised() {
+    let out = body(
+        "let a = Tensor<f64, [_]>.from([1.0, 2.0, 3.0, 4.0])\n let v = vec[0.5, 1.5]\n let b = Tensor<f64, [_]>.from(v)\n\
+         print(a)\n print(b)\n print(a.sum())\n print(a.mean())\n print(a.min())\n print(a.max())\n print(a.shape())\n\
+         let m = Tensor<f64, [_, _]>.from_rows(vec[vec[1.0, 2.0, 3.0], vec[4.0, 5.0, 6.0]])\n\
+         print(m)\n print(m.shape())\n print(m.transpose())\n print(m.reshape(3, 2))\n print(m.reshape(6))\n print(m.to_vec())\n print(m.sum())\n print(m[1, 2])\n\
+         print(Tensor<f64, [_, _]>.eye(3))\n print(Tensor<f64, [_, _]>.full(7.5, 2, 2))\n print(Tensor<f64, [_, _, _]>.full(1.0, 2, 1, 2))\n\
+         print(Tensor<f64, [_]>.linspace(0.0, 1.0, 5))\n print(Tensor<f64, [_]>.linspace(2.0, 2.0, 3))\n print(Tensor<f64, [_]>.linspace(1.0, 9.0, 1))\n print(Tensor<f64, [_]>.arange(4))\n\
+         print(Tensor<f64, [_]>.arange(0))\n print(a.map(|x| x * x + 0.5))\n\
+         let k = 3.0\n print(a.map(|x| x * k))\n\
+         print(m @ m.transpose())\n print(a + a)\n",
+    );
+    assert!(out.starts_with("[1.0, 2.0, 3.0, 4.0]\n[0.5, 1.5]\n10.0\n2.5\n1.0\n4.0\n[4]\n"), "{out}");
+    assert!(out.contains("[[1.0, 5.0], [4.0, 3.0], [2.0, 6.0]]\n[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]\n[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]\n21.0\n6.0\n"), "{out}");
+}
+
+#[test]
+fn tensors_of_single_precision_and_complex_numbers() {
+    let out = body(
+        "let s = Tensor<f32, [_]>.linspace(0.0, 1.0, 4)\n print(s)\n print(s.sum())\n print(s.mean())\n print(s.map(|x| x / 3.0))\n\
+         let f = Tensor<f32, [_]>.from([0.1, 0.2, 0.3])\n print(f.sum())\n print(f.max())\n\
+         let z = Tensor<c128, [_]>.from([1.0 + 2.0i, 3.0 - 1.0i])\n print(z)\n print(z.sum())\n print(z.mean())\n print(z.map(|w| w * w))\n print(z.to_vec())\n\
+         let w = Tensor<c64, [_, _]>.eye(2)\n print(w)\n print(w.sum())\n print(w.transpose())\n\
+         let q = Tensor<c128, [_, _]>.from_rows(vec[vec[1.0 + 0.0i, 2.0i], vec[3.0, 4.0]])\n print(q)\n print(q.transpose())\n print(Tensor<c128, [_, _]>.eye(2))\n",
+    );
+    assert!(out.starts_with("[0.0, 0.33333334, 0.6666667, 1.0]\n2.0\n0.5\n"), "{out}");
+}
+
+#[test]
+fn tensor_constructors_and_methods_panic_the_same_way() {
+    for (stmts, msg) in [
+        ("let t = Tensor<f64, [_]>.from(Vec<f64>.new())\n print(t.min())", "min of an empty tensor"),
+        ("let t = Tensor<f64, [_]>.arange(0)\n print(t.max())", "max of an empty tensor"),
+        ("let t = Tensor<f64, [_, _]>.from_rows(vec[vec[1.0, 2.0], vec[3.0]])\n print(t)", "`from_rows` needs rows of the same length"),
+        ("let t = Tensor<f64, [_]>.arange(6)\n print(t.reshape(4, 2))", "cannot reshape 6 elements into [4, 2]"),
+        ("let t = Tensor<f64, [_]>.arange(6)\n print(t.reshape(7))", "cannot reshape 6 elements into [7]"),
+        ("let n = 100000\n print(Tensor<f64, [_, _]>.eye(n))", "a tensor can have at most"),
+        ("let n = 1000000000\n print(Tensor<f64, [_]>.arange(n))", "a tensor can have at most"),
+        ("let n = 100000\n print(Tensor<f64, [_, _]>.full(1.0, n, n))", "a tensor can have at most"),
+    ] {
+        let src = format!("fn main() {{\n {stmts}\n}}");
+        let (_, p) = interpret(&src);
+        assert_eq!(p.as_deref().map(|m| m.contains(msg)), Some(true), "{stmts}: {p:?}");
+        same(&src);
+    }
+}
+
+#[test]
+fn tensor_methods_work_inside_parallel_code() {
+    let out = body(
+        "let a = Tensor<f64, [_]>.linspace(0.0, 1.0, 1000)\n let t = a.sum()\n\
+         let s = par sum(i in 0..50) a.sum() + a.max() + i as f64\n print(t)\n print(s)\n\
+         par for i in 0..4 {\n let w = Tensor<f64, [_]>.arange(5)\n let m = w.mean()\n }\n",
+    );
+    assert_eq!(out.lines().count(), 2, "{out}");
+}
+
+// ------------------------------------------------------------------ tensor slices
+
+#[test]
+fn parts_of_tensors_are_copies_and_can_be_assigned() {
+    let out = body(
+        "let m = Tensor<f64, [_, _]>.from_rows(vec[vec[1.0, 2.0, 3.0], vec[4.0, 5.0, 6.0], vec[7.0, 8.0, 9.0]])\n\
+         print(m[1, ..])\n print(m[.., 1])\n print(m[0..2, 1..3])\n print(m[1.., ..2])\n print(m[..=1, 2])\n print(m[.., ..])\n print(m[2, 0..0])\n print(m[0..=2, 0..=0])\n\
+         let v = Tensor<f64, [_]>.arange(6)\n print(v[2..4])\n print(v[..3].sum())\n print(v[4..].shape())\n print(v[1..5].map(|x| x * 2.0))\n\
+         let mut w = Tensor<f64, [_, _]>.zeros(3, 3)\n\
+         w[0..2, 1] = Tensor<f64, [_]>.from([5.0, 6.0])\n w[.., 2] = 1.5\n w[2, ..] = m[0, ..]\n print(w)\n\
+         w[0..2, 0..2] = w[1..3, 1..3]\n print(w)\n\
+         let mut part = w[0..2, ..]\n part[0, 0] = 99.0\n print(w[0, 0])\n print(part[0, 0])\n\
+         let c = Tensor<f64, [_]>.arange(24).reshape(2, 3, 4)\n print(c[1, .., 2])\n print(c[0..2, 1, 3])\n print(c[.., .., 3].shape())\n print(c[1, 2, 3])\n\
+         let mut z = Tensor<c128, [_, _]>.eye(2)\n z[0, ..] = 2.0 + 1.0i\n print(z)\n print(z[.., 1])\n\
+         let mut s = Tensor<f32, [_]>.arange(4)\n s[1..3] = 0.1\n print(s)\n print(s[..2])\n\
+         let mut a = Tensor<f64, [_]>.arange(5)\n let k = 2\n a[k - 1..k + 2] = 7.0\n print(a)\n a[..] = Tensor<f64, [_]>.full(1.0, 5)\n print(a)\n",
+    );
+    assert!(out.starts_with("[4.0, 5.0, 6.0]\n[2.0, 5.0, 8.0]\n[[2.0, 3.0], [5.0, 6.0]]\n"), "{out}");
+}
+
+#[test]
+fn slices_panic_the_same_way() {
+    for (stmts, msg) in [
+        ("let t = Tensor<f64, [_, _]>.zeros(2, 3)\n print(t[2, ..])", "tensor index 2 is out of bounds for axis 0 of length 2"),
+        ("let t = Tensor<f64, [_, _]>.zeros(2, 3)\n print(t[.., 3])", "tensor index 3 is out of bounds for axis 1 of length 3"),
+        ("let t = Tensor<f64, [_]>.zeros(4)\n print(t[1..9])", "slice 1..9 is out of range for axis 0 of length 4"),
+        ("let t = Tensor<f64, [_]>.zeros(4)\n print(t[..=4])", "slice 0..5 is out of range for axis 0 of length 4"),
+        ("let t = Tensor<f64, [_]>.zeros(4)\n let a = 3\n let b = 1\n print(t[a..b])", "slice 3..1 is out of range for axis 0 of length 4"),
+        ("let t = Tensor<f64, [_]>.zeros(4)\n print(t[5..])", "slice 5..4 is out of range for axis 0 of length 4"),
+        ("let mut t = Tensor<f64, [_, _]>.zeros(3, 3)\n t[0..2, 0] = Tensor<f64, [_]>.zeros(3)", "shape mismatch: cannot assign a tensor of shape [3] to a part of shape [2]"),
+        ("let mut t = Tensor<f64, [_, _]>.zeros(3, 3)\n t[0..2, 0..2] = Tensor<f64, [_, _]>.zeros(2, 3)", "shape mismatch: cannot assign a tensor of shape [2, 3] to a part of shape [2, 2]"),
+        ("let mut t = Tensor<f64, [_, _]>.zeros(3, 3)\n t[0..9, 0] = 1.0", "slice 0..9 is out of range for axis 0 of length 3"),
+    ] {
+        let src = format!("fn main() {{\n {stmts}\n}}");
+        let (_, p) = interpret(&src);
+        assert_eq!(p.as_deref().map(|m| m.contains(msg)), Some(true), "{stmts}: {p:?}");
+        same(&src);
+    }
+}
+
+#[test]
+fn slices_work_in_parallel_code_and_in_functions() {
+    let out = same(
+        "fn row_sum(m: Tensor<f64, [_, _]>, i: usize) -> f64 { m[i, ..].sum() }\n\
+         fn fill(m: mut Tensor<f64, [_, _]>, k: f64) {\n m[.., ..] = k\n}\n\
+         fn main() {\n\
+          let m = Tensor<f64, [_]>.arange(12).reshape(3, 4)\n\
+          let total = par sum(i in 0..3) row_sum(m, i)\n print(total)\n\
+          let cols = par sum(j in 0..4) m[.., j].sum() * (j as f64 + 1.0)\n print(cols)\n\
+          let mut t = Tensor<f64, [_, _]>.zeros(2, 2)\n fill(mut t, 4.5)\n print(t)\n\
+         }",
+    );
+    assert!(out.starts_with("66.0\n"), "{out}");
+}
+
+#[test]
+fn what_the_body_of_a_parallel_reduction_creates_is_freed() {
+    // a vector and a string made in each iteration (`TAU_VALGRIND=1` would report a leak)
+    let out = same("fn main() {\n let n = par sum(i in 0..300) vec[i, i + 1].len + \"ab\".to_string().len\n print(n)\n let m = Tensor<f64, [_]>.arange(12).reshape(3, 4)\n print(par sum(j in 0..4) m[.., j].sum())\n}");
+    assert_eq!(out, "1200\n66.0\n");
+}

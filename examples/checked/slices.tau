@@ -1,0 +1,45 @@
+// Parts of tensors: rows, columns and blocks (`t[1, ..]`, `t[.., 2]`, `t[0..2, 1..]`), used to solve
+// a linear system by Gaussian elimination and to take differences along a grid.
+
+// Solve a x = b (no pivoting: fine for a diagonally dominant matrix). The arguments are not changed.
+fn solve(a0: Tensor<f64, [_, _]>, b0: Tensor<f64, [_]>) -> Tensor<f64, [_]> {
+    let mut a = a0.map(|v| v)        // working copies
+    let mut b = b0.map(|v| v)
+    let n = b.shape()[0]
+    for k in 0..n {
+        for i in k + 1..n {
+            let factor = a[i, k] / a[k, k]
+            a[i, k..] = a[i, k..] - a[k, k..] * factor      // row i -= factor * row k
+            b[i] = b[i] - factor * b[k]
+        }
+    }
+    let mut x = Tensor<f64, [_]>.zeros(n)
+    let mut i = n
+    while i > 0 {
+        i -= 1
+        let rest = (a[i, i + 1..] * x[i + 1..]).sum()      // the already known unknowns
+        x[i] = (b[i] - rest) / a[i, i]
+    }
+    x
+}
+
+fn main() {
+    let a = Tensor<f64, [_, _]>.from_rows(vec[vec[4.0, 1.0, 0.0], vec[1.0, 5.0, 2.0], vec[0.0, 2.0, 6.0]])
+    let b = Tensor<f64, [_]>.from([6.0, 13.0, 20.0])
+    let x = solve(a, b)
+    print("x = {x}")
+    print("a x = {a @ x}  (b = {b})")
+
+    // differences along a grid
+    let n = 6
+    let t = Tensor<f64, [_]>.linspace(0.0, 1.0, n)
+    let f = t.map(|v| v * v)
+    let df = (f[1..] - f[..n - 1]) / (t[1..] - t[..n - 1])
+    print("slopes of x^2 = {df}")
+
+    // a block of a matrix, changed in place
+    let mut m = Tensor<f64, [_]>.arange(16).reshape(4, 4)
+    m[1..3, 1..3] = 0.0
+    m[.., 0] = Tensor<f64, [_]>.full(-1.0, 4)
+    print(m)
+}

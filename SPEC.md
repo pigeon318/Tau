@@ -96,6 +96,41 @@ let b = Tensor<f64, [_, _]>.random(100, 50)   // dynamic dimensions
 - One `Tensor` type. Each dimension is a fixed number or `_` (dynamic).
 - Column-major storage. Dense only in v1.
 - `a @ b` is matrix multiplication (BLAS-backed) and `a * b`, `a + b` and so on are elementwise.
+Building and summarising tensors (all deterministic, and identical on both backends):
+
+```
+let a = Tensor<f64, [_]>.from([1.0, 2.0, 3.0, 4.0])           // from an array, slice or Vec
+let m = Tensor<f64, [_, _]>.from_rows(vec[vec[1.0, 2.0], vec[3.0, 4.0]])
+let i = Tensor<f64, [_, _]>.eye(3)                              // identity
+let f = Tensor<f64, [_, _, _]>.full(7.5, 2, 3, 4)               // every element 7.5
+let x = Tensor<f64, [_]>.linspace(0.0, 1.0, 11)                 // n evenly spaced points, ends included
+let n = Tensor<f64, [_]>.arange(5)                              // 0.0, 1.0, 2.0, 3.0, 4.0
+
+a.sum()  a.mean()  a.min()  a.max()                             // reductions (min/max: floats only)
+a.shape()          // Vec<usize>, e.g. [2, 3]
+a.to_vec()         // Vec of the elements, in storage order
+a.map(|x| x * x)   // a new tensor
+m.reshape(4)       // a copy with another shape (the same number of elements)
+m.transpose()      // rank 2
+```
+
+- Elements are stored **column-major** (the first index varies fastest), so `to_vec` and `reshape` follow that order: reshaping `[[1, 2, 3], [4, 5, 6]]` to `(3, 2)` gives `[[1, 5], [4, 3], [2, 6]]`, as in Fortran and Julia.
+- `sum` adds in storage order starting from `0.0`, and `mean` is that sum divided by the number of elements (NaN for none). `min` and `max` panic on an empty tensor. `linspace(a, b, n)` is `a + (b - a) * i / (n - 1)`, with exactly `a` and `b` at the ends. For `f32` tensors every result is rounded to single precision.
+Parts of a tensor:
+
+```
+m[1, 2]            // one element
+m[1, ..]           // row 1, a tensor of rank 1;      m[.., 2]  column 2
+m[0..2, 1..]       // a block (rank 2);   ranges: a..b  a..=b  ..b  ..=b  a..  ..
+m[1, 0..3] = 0.0              // every element of the part
+m[.., 0] = Tensor<f64, [_]>.arange(4)       // a tensor of that shape (`a[..] = b` copies b into a)
+```
+
+- A part is a **copy**, not a view: changing the copy does not change the tensor, and the copy is yours (a `let mut row = m[0, ..]`). Each position (`i`) removes its axis and each range keeps it, so `m[1, 0..3]` has rank 1 and `m[0..2, 1..3]` rank 2. Writing to a part needs `let mut`.
+- Assigning copies the elements: the value on the right (a tensor of exactly the shape of the part, or one number for every element) is only read, so it can be used afterwards. `+=` and the other operators are not available for a part; write `t[..] = t[..] + x`.
+- Out-of-range positions and ranges, and a shape that does not fit, are panics with the axis and the sizes: `slice 1..9 is out of range for axis 0 of length 4`. A range end beyond the length is an error (it is not cut), and `a..` ends at the length.
+- Views that alias the tensor (so that writing to a part changes the whole without copying) are planned for later.
+- The constructors need the rank to match (`from`, `linspace`, `arange` make rank 1; `from_rows` and `eye` rank 2; `full` any rank).
 - **v1:** shape mismatches are runtime panics with a clear message. **[post-v1]:** symbolic dimensions (`N`, `M`) and compile-time shape checking.
 
 ### Units [post-v1]
