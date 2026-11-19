@@ -8,6 +8,7 @@ pub mod ast;
 pub mod borrowck;
 pub mod check;
 pub mod diag;
+pub mod editor;
 pub mod infer;
 pub mod interp;
 pub mod lexer;
