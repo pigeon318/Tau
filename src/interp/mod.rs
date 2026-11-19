@@ -629,6 +629,32 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// Display a value with a format spec (`{x:>8.3}`); see `fmtspec` for the rules.
+    pub fn display_spec(&mut self, v: &Value<'a>, ty: &Ty, spec: &crate::fmtspec::FmtSpec) -> R<'a, String> {
+        use crate::fmtspec as fs;
+        let v = self.deref(v.clone())?;
+        Ok(match (&v, ty) {
+            (Value::Int(i), Ty::Int(it)) => fs::format_int(*i, it.bits(), it.is_signed(), spec),
+            (Value::Float(x), Ty::Float(ft)) => {
+                let single = *ft == FloatTy::F32;
+                let plain = if single { self.f32_text(*x as f32) } else { self.float_text(*x) };
+                fs::format_float(*x, single, &plain, spec)
+            }
+            (Value::Complex(a, b), Ty::Complex(ft)) => {
+                let single = *ft == FloatTy::F32;
+                let text = |this: &Self, x: f64| if single { this.f32_text(x as f32) } else { this.float_text(x) };
+                let (pa, pb) = (text(self, *a), text(self, *b));
+                fs::format_complex(*a, *b, single, &pa, &pb, spec)
+            }
+            (Value::Str(s), _) => fs::format_text(s, spec),
+            (Value::String(s), _) => fs::format_text(&s.borrow(), spec),
+            _ => {
+                let text = self.display_ty(&v, ty)?;
+                fs::format_other(&text, spec)
+            }
+        })
+    }
+
     pub fn display(&mut self, v: &Value<'a>) -> R<'a, String> {
         let v = self.deref(v.clone())?;
         Ok(match &v {

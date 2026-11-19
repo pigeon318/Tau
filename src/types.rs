@@ -45,6 +45,23 @@ pub enum IntTy {
 }
 
 impl IntTy {
+    /// Width in bits.
+    pub fn bits(self) -> u32 {
+        use IntTy::*;
+        match self {
+            I8 | U8 => 8,
+            I16 | U16 => 16,
+            I32 | U32 => 32,
+            I64 | U64 | Isize | Usize => 64,
+            I128 | U128 => 128,
+        }
+    }
+
+    pub fn is_signed(self) -> bool {
+        use IntTy::*;
+        matches!(self, I8 | I16 | I32 | I64 | I128 | Isize)
+    }
+
     pub const ALL: [IntTy; 12] = [
         IntTy::I8,
         IntTy::I16,

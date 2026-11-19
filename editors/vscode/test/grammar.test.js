@@ -89,6 +89,15 @@ test('strings with escapes and interpolation', async () => {
   assert.match(scopeOf(t, 'print'), /support\.function/);
 });
 
+test('format specs inside an interpolation', async () => {
+  const t = await tokenize('print("{x:>8.3} {n:#010b} {f(|a: i64| a)}")');
+  assert.match(scopeOf(t, '>8.3'), /format-spec/);
+  assert.match(scopeOf(t, '#010b'), /format-spec/);
+  // a colon in a closure's parameter list is not a format
+  const a = t.find(([x]) => x === 'a');
+  assert(a && !/format-spec/.test(a[1].join(' ')), JSON.stringify(t));
+});
+
 test('a string inside an interpolation', async () => {
   const t = await tokenize('"x {f("}")} y" let');
   assert.match(scopeOf(t, 'let'), /storage\.type\.let/);

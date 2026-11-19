@@ -36,6 +36,42 @@ pub fn parse_module(src: &str) -> PResult<Module> {
     Parser::new(toks).module()
 }
 
+/// The inside of a `{...}` in a string: an expression, and after a `:` an optional format spec.
+fn parse_interpolation(src: &str, offset: usize) -> PResult<(Expr, Option<crate::fmtspec::Fmt>)> {
+    use crate::fmtspec;
+    let expr_of = |text: &str| -> PResult<Expr> {
+        let toks = lex_at(text, offset)?;
+        let mut sub = Parser::new(toks);
+        sub.skip_newlines();
+        let e = sub.expr()?;
+        sub.skip_newlines();
+        if !sub.check(&K::Eof) {
+            return Err(sub.err_expected("the end of the `{...}` expression"));
+        }
+        Ok(e)
+    };
+    if let Some(c) = fmtspec::split(src) {
+        let spec = fmtspec::parse(&src[c + 1..]).expect("split only returns valid specs");
+        let e = expr_of(&src[..c])?;
+        let fmt = fmtspec::Fmt { spec, span: Span::new(offset + c + 1, offset + src.len()) };
+        return Ok((e, Some(fmt)));
+    }
+    match expr_of(src) {
+        Ok(e) => Ok((e, None)),
+        Err(err) => {
+            // not an expression: if there is a `:`, the format spec after it is the likely mistake
+            if let Some(&c) = fmtspec::colons(src).last() {
+                if let Err(why) = fmtspec::parse(&src[c + 1..]) {
+                    let span = Span::new(offset + c + 1, offset + src.len().max(c + 2));
+                    return Err(Diagnostic::new(format!("invalid format `{}`: {why}", &src[c + 1..]), span)
+                        .with_hint("a format is [[fill]align][+][#][0][width][.precision][type], like `{x:>8.3}`; the type is one of x, X, b, o, e, E"));
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
 /// Parse a source file whose first byte has the offset `base` (see `SourceMap`).
 pub fn parse_module_at(src: &str, base: usize) -> PResult<Module> {
     let toks = crate::lexer::lex_at(src, base)?;
@@ -1189,15 +1225,8 @@ impl Parser {
                     match part {
                         StrPart::Lit(s) => pieces.push(StrPiece::Lit(s)),
                         StrPart::Interp { src, offset } => {
-                            let toks = lex_at(&src, offset)?;
-                            let mut sub = Parser::new(toks);
-                            sub.skip_newlines();
-                            let e = sub.expr()?;
-                            sub.skip_newlines();
-                            if !sub.check(&K::Eof) {
-                                return Err(sub.err_expected("the end of the `{...}` expression"));
-                            }
-                            pieces.push(StrPiece::Interp(Box::new(e)));
+                            let (e, fmt) = parse_interpolation(&src, offset)?;
+                            pieces.push(StrPiece::Interp(Box::new(e), fmt));
                         }
                     }
                 }

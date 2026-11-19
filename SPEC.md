@@ -297,6 +297,36 @@ when the standard library can be written in Tau itself.
 
 ---
 
+## 8d. Formatting values
+
+`print("...")` and string literals interpolate expressions with `{expr}`. After a `:` comes a format that says how to write the value:
+
+```
+print("pi is about {pi:.3}")              // pi is about 3.142
+print("[{n:>6}] [{n:<6}] [{n:^6}]")       // [    42] [42    ] [  42  ]
+print("{n:06} {n:+} {n:#x} {n:08b}")      // 000042 +42 0x2a 00101010
+print("{x:12.4e} {x:E}")                  // "      3.1416e0 3.14159265E0"
+print("{name:*^11}")                      // ****Tau*****
+```
+
+```
+format = [[fill]align] [+] [#] [0] [width] [.precision] [type]
+fill   = any character      align = < (left)  ^ (centre)  > (right)
+type   = x X b o            hexadecimal, binary, octal (integers)
+       | e E                scientific notation (floats): 1.5e3, 1.50E3
+```
+
+- **width** is the least number of characters (not bytes); wider values are never cut. Numbers align right by default, text and everything else left.
+- **`.N` on a float** writes exactly N digits after the point, rounding the exact value (so `{2.5:.0}` is `2` and `{0.125:.2}` is `0.12`: ties go to the even digit). **On text** it keeps the first N characters. It is an error on integers.
+- **`+`** shows the sign of positive numbers. **`0`** fills a number with zeros after its sign and prefix, up to the width (it replaces fill and alignment). **`#`** adds `0x`, `0X`, `0b` or `0o` to `x`, `X`, `b`, `o`.
+- **`x X b o`** show the bits of the integer in its own width: `{-1i8:x}` is `ff`.
+- **`e`/`E`** without a precision uses the shortest digits that read back exactly: `1500.0` is `1.5e3`. NaN and infinity are written `NaN` and `inf`, never padded with zeros.
+- A complex number takes a precision and `e`, which apply to both parts: `{z:.2}` is `1.50-2.00i`. Anything else that can be printed (vectors, tuples, your own types) takes only a width, fill and alignment.
+- A format that does not fit the value (a precision on an integer, `x` on a float, `0` on text) is a compile error. The colon is taken as a format only if what follows it is a valid one, so `{f(|x: i64| x)}` and `{m["a:b"]}` still work.
+- A format has no way to take its width or precision from a variable yet.
+
+---
+
 ## 9. Modules and packages
 
 ### Modules
