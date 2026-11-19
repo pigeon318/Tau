@@ -1,0 +1,85 @@
+// A binary search tree and an expression tree built from boxes.
+
+enum Tree {
+    Leaf
+    Node(Box<Tree>, i64, Box<Tree>)
+}
+
+fn insert(own t: Tree, v: i64) -> Tree {
+    match own t {
+        Leaf => Node(Box.new(Leaf), v, Box.new(Leaf))
+        Node(l, x, r) => {
+            if v < x {
+                Node(Box.new(insert(l.take(), v)), x, r)
+            } else {
+                Node(l, x, Box.new(insert(r.take(), v)))
+            }
+        }
+    }
+}
+
+fn height(t: Tree) -> i64 {
+    match t {
+        Leaf => 0
+        Node(l, _, r) => 1 + max(height(l), height(r))
+    }
+}
+
+fn total(t: Tree) -> i64 {
+    match t {
+        Leaf => 0
+        Node(l, x, r) => total(l) + x + total(r)
+    }
+}
+
+fn contains(t: Tree, v: i64) -> bool {
+    match t {
+        Leaf => false
+        Node(l, x, r) => {
+            if v == x { true } else if v < x { contains(l, v) } else { contains(r, v) }
+        }
+    }
+}
+
+enum Expr {
+    Num(i64)
+    Add(Box<Expr>, Box<Expr>)
+    Mul(Box<Expr>, Box<Expr>)
+    Neg(Box<Expr>)
+}
+
+fn eval(e: Expr) -> i64 {
+    match e {
+        Num(x) => x
+        Add(a, b) => eval(a) + eval(b)
+        Mul(a, b) => eval(a) * eval(b)
+        Neg(a) => 0 - eval(a)
+    }
+}
+
+fn build(depth: i64, seed: i64) -> Expr {
+    if depth == 0 {
+        Num(seed % 10 + 1)
+    } else if seed % 3 == 0 {
+        Add(Box.new(build(depth - 1, seed * 7 + 1)), Box.new(build(depth - 1, seed * 5 + 2)))
+    } else if seed % 3 == 1 {
+        Mul(Box.new(build(depth - 1, seed + 3)), Box.new(build(depth - 1, seed * 2 + 1)))
+    } else {
+        Neg(Box.new(build(depth - 1, seed + 1)))
+    }
+}
+
+fn main() {
+    let mut t = Leaf
+    let mut x = 17
+    for i in 0..60 {
+        x = (x * 31 + 7) % 1009
+        t = insert(t, x)
+    }
+    print(height(t))
+    print(total(t))
+    print(contains(t, 17))
+    print(contains(t, 1000))
+    print(eval(build(6, 4)))
+    print(eval(build(8, 11)))
+}

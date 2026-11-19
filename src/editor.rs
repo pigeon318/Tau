@@ -276,7 +276,7 @@ impl<'a> Collector<'a> {
                 self.expr(value);
                 self.expr(len);
             }
-            ExprKind::Unary { expr, .. } | ExprKind::Cast { expr, .. } | ExprKind::Try(expr) | ExprKind::MutBorrow(expr) => self.expr(expr),
+            ExprKind::Unary { expr, .. } | ExprKind::Cast { expr, .. } | ExprKind::Try(expr) | ExprKind::MutBorrow(expr) | ExprKind::Own(expr) => self.expr(expr),
             ExprKind::Binary { lhs, rhs, .. } | ExprKind::Assign { lhs, rhs, .. } => {
                 self.expr(lhs);
                 self.expr(rhs);

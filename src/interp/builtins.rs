@@ -325,6 +325,16 @@ impl<'a> Interp<'a> {
             "std.time::format_iso" => Ok(Value::string(&clock::iso(self.i64_of(&a[0])?))),
             "std.time::format_duration" => Ok(Value::string(&clock::duration(self.i64_of(&a[0])?))),
 
+            // ---- boxes
+            "Box::new" => Ok(Value::Box(Value::slot(vec![a[0].clone()]))),
+            "Box::take" => match &a[0] {
+                Value::Box(s) => {
+                    let v = s.borrow()[0].clone();
+                    Ok(v)
+                }
+                other => panic(format!("take on a {}", other.type_name())),
+            },
+
             // ---- maps
             "Map::new" => Ok(Value::Map(Rc::new(RefCell::new(MapVal::default())))),
             "Map::contains" => match &a[0] {

@@ -372,7 +372,20 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::Match { scrutinee, arms } => {
-                let st = self.expr(scrutinee, None);
+                let mut st = self.expr(scrutinee, None);
+                // matching on a box looks through it, unless every arm just names the whole box
+                if arms.iter().any(|a| !matches!(a.pat.kind, PatKind::Wild | PatKind::Ident { .. })) {
+                    let mut cur = self.infer.shallow(&st);
+                    let mut layers = 0u32;
+                    while let Some(inner) = self.box_inner(&cur) {
+                        cur = self.infer.shallow(&inner);
+                        layers += 1;
+                    }
+                    if layers > 0 {
+                        self.results.derefs.insert(NodeKey::of(scrutinee), layers);
+                        st = cur;
+                    }
+                }
                 let mut result: Option<Ty> = None;
                 for arm in arms {
                     self.push_scope();
@@ -458,6 +471,8 @@ impl<'a> Checker<'a> {
                 );
                 Ty::Error
             }
+            // `own x` is `x`, moved
+            ExprKind::Own(inner) => self.expr(inner, exp),
             ExprKind::ParReduce { op, pat, iter, body } => {
                 let it = self.expr(iter, None);
                 let elem = self.iter_elem(&it, iter.span);
@@ -730,7 +745,7 @@ impl<'a> Checker<'a> {
             if let ExprKind::MutBorrow(inner) = &arg.kind {
                 match (mode, &ty) {
                     (Some(ParamMode::Mut), Some(t)) => {
-                        self.expr_coerce(inner, t);
+                        self.arg_coerce(inner, t, ParamMode::Mut);
                         self.check_mutable_place(inner, "borrow as mutable");
                         let t = t.clone();
                         self.record(arg, &t);
@@ -760,13 +775,37 @@ impl<'a> Checker<'a> {
                             "write `mut` before the argument, like `f(mut x)`",
                         );
                     }
-                    self.expr_coerce(arg, t);
+                    self.arg_coerce(arg, t, m);
                 }
                 _ => {
                     self.expr(arg, None);
                 }
             }
         }
+    }
+
+    /// Check an argument against its parameter's type. A box passed to a borrowed parameter of the
+    /// type it holds is looked through (`eval(left)` with `left: Box<Expr>` and `fn eval(e: Expr)`).
+    fn arg_coerce(&mut self, e: &'a Expr, expected: &Ty, mode: ParamMode) -> Ty {
+        let t = self.expr(e, Some(expected));
+        if mode != ParamMode::Own {
+            let want = self.infer.shallow(expected);
+            if self.box_inner(&want).is_none() && !matches!(want, Ty::Var(_) | Ty::Param(_) | Ty::Error) {
+                let mut cur = self.infer.shallow(&t);
+                let mut n = 0u32;
+                while let Some(inner) = self.box_inner(&cur) {
+                    cur = self.infer.shallow(&inner);
+                    n += 1;
+                }
+                if n > 0 {
+                    self.results.derefs.insert(NodeKey::of(e), n);
+                    self.coerce(&cur, expected, e.span);
+                    return t;
+                }
+            }
+        }
+        self.coerce(&t, expected, e.span);
+        t
     }
 
     /// Call a known function. `node` is where the resolution is recorded: the callee
@@ -964,6 +1003,9 @@ impl<'a> Checker<'a> {
         };
         self.check_unsafe_call(pick.fn_id, e.span);
         self.check_method_visible(pick.fn_id, name.span);
+        if pick.boxes > 0 {
+            self.results.derefs.insert(NodeKey::of(recv), pick.boxes);
+        }
         let inst = self.instantiate(pick.fn_id, &pick.subst, None, e.span);
         if inst.self_mode == Some(ParamMode::Mut) {
             self.check_mutable_place(recv, "borrow as mutable");
@@ -1108,7 +1150,16 @@ impl<'a> Checker<'a> {
             };
         }
         let bt = self.expr(base, None);
-        let st = self.infer.shallow(&bt);
+        let mut st = self.infer.shallow(&bt);
+        // a box is looked through to the value it holds
+        let mut layers = 0u32;
+        while let Some(inner) = self.box_inner(&st) {
+            st = self.infer.shallow(&inner);
+            layers += 1;
+        }
+        if layers > 0 {
+            self.results.derefs.insert(NodeKey::of(base), layers);
+        }
         match &st {
             Ty::Adt(id, args) => {
                 if let AdtKind::Struct(fs) = &self.prog.adt(*id).kind {
@@ -1538,7 +1589,7 @@ impl<'a> Checker<'a> {
 
         if comparison {
             let is_eq = matches!(op, BinOp::Eq | BinOp::Ne);
-            let overloaded = matches!(&l, Ty::Adt(..)) && !self.is_string(&l) && self.is_vec(&l).is_none();
+            let overloaded = matches!(&l, Ty::Adt(..)) && !self.is_string(&l) && self.is_vec(&l).is_none() && self.box_inner(&l).is_none();
             if overloaded {
                 let tn = if is_eq { "Eq" } else { "Ord" };
                 return match self.lookup_op(tn, &l, Some(&r), e.span) {
