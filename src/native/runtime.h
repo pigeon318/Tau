@@ -4,9 +4,18 @@
  * integer overflow behaviour must match it exactly (see tests/native.rs).
  */
 #define _GNU_SOURCE
+#ifdef _WIN32
+/* Windows (MinGW-w64 gcc or clang): C99 stdio, Win32 threads for the big stacks */
+#define _WIN32_WINNT 0x0602
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#endif
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <setjmp.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -18,6 +27,22 @@
 typedef unsigned char tau_unit;
 typedef struct { const uint8_t *ptr; size_t len; } tau_str;
 typedef struct { uint8_t *ptr; size_t len, cap; } tau_buf;
+
+/* ---- the few places where platforms differ ---- */
+#ifdef _WIN32
+#define tau_jmp_buf jmp_buf
+#define tau_setjmp(b) setjmp(b)
+#define tau_longjmp(b, v) longjmp(b, v)
+#else
+#define tau_jmp_buf sigjmp_buf
+#define tau_setjmp(b) sigsetjmp(b, 1)
+#define tau_longjmp(b, v) siglongjmp(b, v)
+#endif
+#ifdef __GLIBC__
+#define tau_sincos(a, s, c) sincos(a, s, c)
+#else
+#define tau_sincos(a, s, c) (*(s) = sin(a), *(c) = cos(a))
+#endif
 
 #define TAU_NORETURN __attribute__((noreturn))
 #define TAU_COLD __attribute__((cold, noinline))
@@ -66,7 +91,7 @@ static void tau_out_end(void) { if (!tau_cur_out && tau_stdout.len >= (1u << 16)
 
 /* A panic inside a parallel block or a task does not end the program at once: it jumps back to
  * the code running the block, which records it so the earliest one can be reported. */
-typedef struct { sigjmp_buf jb; char *msg; size_t len; } tau_task_ctx;
+typedef struct { tau_jmp_buf jb; char *msg; size_t len; } tau_task_ctx;
 static __thread tau_task_ctx *tau_cur_task;
 static __thread uintptr_t tau_stack_lo;
 
@@ -75,7 +100,7 @@ TAU_NORETURN static void tau_panic(const char *msg, size_t len) {
         tau_cur_task->msg = (char *)malloc(len + 1);
         if (tau_cur_task->msg) { memcpy(tau_cur_task->msg, msg, len); tau_cur_task->msg[len] = 0; }
         tau_cur_task->len = len;
-        siglongjmp(tau_cur_task->jb, 1);
+        tau_longjmp(tau_cur_task->jb, 1);
     }
     tau_flush_stdout();
     static const char pre[] = "panic: ";
@@ -246,6 +271,24 @@ static tau_str tau_intern(const uint8_t *p, size_t n) {
     return (tau_str){ (const uint8_t *)(blk + 1), n };
 }
 
+/* A stable merge sort of an index array with a comparator that gets a context (qsort_r differs
+ * between platforms, and the interpreter's sort is stable). */
+static void tau_sort_idx(size_t *a, size_t n, int (*cmp)(const void *, const void *, void *), void *ctx) {
+    if (n < 2) return;
+    size_t *tmp = (size_t *)malloc(n * sizeof(size_t));
+    for (size_t w = 1; w < n; w *= 2) {
+        for (size_t lo = 0; lo < n; lo += 2 * w) {
+            size_t mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n;
+            size_t i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) tmp[k++] = cmp(&a[j], &a[i], ctx) < 0 ? a[j++] : a[i++];
+            while (i < mid) tmp[k++] = a[i++];
+            while (j < hi) tmp[k++] = a[j++];
+        }
+        memcpy(a, tmp, n * sizeof(size_t));
+    }
+    free(tmp);
+}
+
 /* hashing for map keys */
 static uint64_t tau_hash_u64(uint64_t x) {
     x += 0x9e3779b97f4a7c15ULL;
@@ -292,6 +335,61 @@ static void tau_fmt_str(tau_buf *b, tau_str s) { tau_buf_push(b, s.ptr, s.len); 
 
 /* ---------------------------------------------------------------- floats */
 
+/* Does the decimal m * 10^q read back as exactly `x` (as a float when `single`)? Decided with exact
+ * integer arithmetic against the interval of reals that round to `x`, not with strtod, whose
+ * rounding is not always correct on every platform. */
+typedef struct { uint32_t d[100]; int n; } tau_big;
+static void tau_big_set(tau_big *b, uint64_t v) { b->n = 0; while (v) { b->d[b->n++] = (uint32_t)v; v >>= 32; } }
+static void tau_big_mul(tau_big *b, uint32_t m) {
+    uint64_t c = 0;
+    for (int i = 0; i < b->n; i++) { uint64_t t = (uint64_t)b->d[i] * m + c; b->d[i] = (uint32_t)t; c = t >> 32; }
+    if (c) b->d[b->n++] = (uint32_t)c;
+}
+static void tau_big_shl(tau_big *b, int s) {
+    if (!b->n || s <= 0) return;
+    int w = s / 32, r = s % 32;
+    if (r) {
+        uint32_t c = 0;
+        for (int i = 0; i < b->n; i++) { uint32_t v = b->d[i]; b->d[i] = (v << r) | c; c = v >> (32 - r); }
+        if (c) b->d[b->n++] = c;
+    }
+    if (w) { memmove(b->d + w, b->d, (size_t)b->n * 4); memset(b->d, 0, (size_t)w * 4); b->n += w; }
+}
+static void tau_big_pow10(tau_big *b, int q) {
+    static const uint32_t p10[10] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000};
+    while (q >= 9) { tau_big_mul(b, 1000000000u); q -= 9; }
+    if (q > 0) tau_big_mul(b, p10[q]);
+}
+static int tau_big_cmp(const tau_big *a, const tau_big *b) {
+    if (a->n != b->n) return a->n > b->n ? 1 : -1;
+    for (int i = a->n - 1; i >= 0; i--) if (a->d[i] != b->d[i]) return a->d[i] > b->d[i] ? 1 : -1;
+    return 0;
+}
+/* sign of m * 10^q - bm * 2^k */
+static int tau_dec_cmp(uint64_t m, int q, uint64_t bm, int k) {
+    tau_big l, r;
+    tau_big_set(&l, m); tau_big_set(&r, bm);
+    if (q >= 0) tau_big_pow10(&l, q); else tau_big_pow10(&r, -q);
+    if (k >= 0) tau_big_shl(&r, k); else tau_big_shl(&l, -k);
+    return tau_big_cmp(&l, &r);
+}
+static int tau_roundtrips(uint64_t m, int q, double x, int single) {
+    uint64_t f; int e, lower_closer;
+    if (single) {
+        float fl = (float)x; uint32_t bits; memcpy(&bits, &fl, 4);
+        uint32_t ex = (bits >> 23) & 0xff, fr = bits & 0x7fffff;
+        if (ex == 0) { f = fr; e = -149; lower_closer = 0; } else { f = fr | 0x800000u; e = (int)ex - 150; lower_closer = fr == 0 && ex > 1; }
+    } else {
+        uint64_t bits; memcpy(&bits, &x, 8);
+        uint64_t ex = (bits >> 52) & 0x7ff, fr = bits & 0xfffffffffffffULL;
+        if (ex == 0) { f = fr; e = -1074; lower_closer = 0; } else { f = fr | (1ULL << 52); e = (int)ex - 1075; lower_closer = fr == 0 && ex > 1; }
+    }
+    uint64_t low = 4 * f - (lower_closer ? 1 : 2), up = 4 * f + 2;
+    int even = (f & 1) == 0;
+    int cl = tau_dec_cmp(m, q, low, e - 2), cu = tau_dec_cmp(m, q, up, e - 2);
+    return (cl > 0 || (cl == 0 && even)) && (cu < 0 || (cu == 0 && even));
+}
+
 /* The shortest digits that read back exactly (as a float when `single`), never in
  * scientific notation, with ".0" added to a whole number. Same rule as the interpreter. */
 __attribute__((noinline)) static void tau_fmt_float(tau_buf *b, double x, int single) {
@@ -315,7 +413,7 @@ __attribute__((noinline)) static void tau_fmt_float(tau_buf *b, double x, int si
         ds[k] = 0;
         m = strtoull(ds, 0, 10);
         q = de - (p - 1);
-        if (single ? (strtof(buf, 0) == (float)x) : (strtod(buf, 0) == x)) {
+        if (tau_roundtrips(m, q, x, single)) {
             /* printf breaks an exact tie to even; the interpreter (Rust) rounds it up when both read back */
             char ex[96], t[64];
             snprintf(ex, sizeof ex, "%.50e", x);
@@ -328,16 +426,14 @@ __attribute__((noinline)) static void tau_fmt_float(tau_buf *b, double x, int si
             if (tie) {
                 t[p] = 0;
                 unsigned long long up = strtoull(t, 0, 10) + 1;
-                snprintf(buf, sizeof buf, "%llue%d", up, q);
-                if (single ? (strtof(buf, 0) == (float)x) : (strtod(buf, 0) == x)) m = up;
+                if (tau_roundtrips(up, q, x, single)) m = up;
             }
             break;
         }
         int found = 0;
         for (int d = 1; d >= -1 && !found; d -= 2) {
             if (d < 0 && m <= 1) break;
-            snprintf(buf, sizeof buf, "%llue%d", m + (unsigned long long)(long long)d, q);
-            if (single ? (strtof(buf, 0) == (float)x) : (strtod(buf, 0) == x)) { m += (unsigned long long)(long long)d; found = 1; }
+            if (tau_roundtrips(m + (unsigned long long)(long long)d, q, x, single)) { m += (unsigned long long)(long long)d; found = 1; }
         }
         if (found) break;
     }
@@ -709,7 +805,7 @@ static tau_cpx *tau_fft_pow2(const tau_cpx *x, size_t n, double sign) {
     for (size_t k = 0; k < h; k++) {
         double ang = sign * 2.0 * M_PI * (double)k / (double)n;
         double sn, cs;
-        sincos(ang, &sn, &cs);
+        tau_sincos(ang, &sn, &cs);
         tau_cpx t = { o[k].re * cs - o[k].im * sn, o[k].re * sn + o[k].im * cs };
         out[k] = (tau_cpx){ e[k].re + t.re, e[k].im + t.im };
         out[k + h] = (tau_cpx){ e[k].re - t.re, e[k].im - t.im };
@@ -734,7 +830,7 @@ static tau_cpx *tau_dft(const tau_cpx *x, size_t n, int inverse) {
             for (size_t j = 0; j < n; j++) {
                 double ang = sign * 2.0 * M_PI * (double)((k * j) % n) / (double)n;
                 double sn, cs;
-                sincos(ang, &sn, &cs);
+                tau_sincos(ang, &sn, &cs);
                 re += x[j].re * cs - x[j].im * sn;
                 im += x[j].re * sn + x[j].im * cs;
             }
@@ -778,11 +874,34 @@ static tau_tensor tau_ifft(tau_tensor a) {
 static tau_buf tau_io_msg(int code) {
     tau_buf b = {0};
     if (code == -1) { tau_buf_cstr(&b, "stream did not contain valid UTF-8"); return b; }
+#ifdef _WIN32
+    {   /* `code` is a Win32 error number; Rust prints the system's message for it */
+        WCHAR w[512];
+        DWORD n = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, (DWORD)code, 0, w, 512, 0);
+        while (n > 0 && (w[n - 1] == L'\r' || w[n - 1] == L'\n' || w[n - 1] == L' ')) n--;
+        char u[1536];
+        int m = n ? WideCharToMultiByte(CP_UTF8, 0, w, (int)n, u, (int)sizeof u, 0, 0) : 0;
+        if (m > 0) tau_buf_push(&b, u, (size_t)m); else tau_buf_cstr(&b, "unknown error");
+    }
+#else
     tau_buf_cstr(&b, strerror(code));
+#endif
     tau_buf_cstr(&b, " (os error ");
     tau_fmt_i32(&b, (int32_t)code);
     tau_buf_char(&b, ')');
     return b;
+}
+
+/* the error code of the failed call: errno, or on Windows the Win32 error number Rust reports */
+static int tau_oserr(void) {
+#ifdef _WIN32
+    unsigned long d = 0;
+    _get_doserrno(&d);
+    if (d) return (int)d;
+    switch (errno) { case ENOENT: return 2; case EACCES: return 5; case EEXIST: return 80; case EINVAL: return 87; case ENOMEM: return 8; default: return 31; }
+#else
+    return errno ? errno : EIO;
+#endif
 }
 
 static int tau_utf8_valid(const uint8_t *p, size_t n) {
@@ -820,11 +939,11 @@ static int tau_fs_read(tau_str path, tau_buf *out) {
     char *c = tau_cpath(path);
     FILE *f = fopen(c, "rb");
     free(c);
-    if (!f) return errno ? errno : EIO;
+    if (!f) return tau_oserr();
     uint8_t chunk[4096];
     size_t n;
     while ((n = fread(chunk, 1, sizeof chunk, f)) > 0) tau_buf_push(out, chunk, n);
-    int err = ferror(f) ? (errno ? errno : EIO) : 0;
+    int err = ferror(f) ? tau_oserr() : 0;
     fclose(f);
     if (err) return err;
     if (!tau_utf8_valid(out->ptr, out->len)) { free(out->ptr); out->ptr = 0; out->len = out->cap = 0; return -1; }
@@ -835,10 +954,10 @@ static int tau_fs_write(tau_str path, tau_str data) {
     char *c = tau_cpath(path);
     FILE *f = fopen(c, "wb");
     free(c);
-    if (!f) return errno ? errno : EIO;
+    if (!f) return tau_oserr();
     int err = 0;
-    if (data.len && fwrite(data.ptr, 1, data.len, f) != data.len) err = errno ? errno : EIO;
-    if (fclose(f) != 0 && !err) err = errno ? errno : EIO;
+    if (data.len && fwrite(data.ptr, 1, data.len, f) != data.len) err = tau_oserr();
+    if (fclose(f) != 0 && !err) err = tau_oserr();
     return err;
 }
 
@@ -858,7 +977,7 @@ static int tau_read_line(tau_buf *out) {
         tau_buf_push(out, &b, 1);
     }
     while (out->len > 0 && out->ptr[out->len - 1] == '\r') out->len--;
-    if (ch == EOF && ferror(stdin)) return errno ? errno : EIO;
+    if (ch == EOF && ferror(stdin)) return tau_oserr();
     if (!tau_utf8_valid(out->ptr, out->len)) { free(out->ptr); out->ptr = 0; out->len = out->cap = 0; return -1; }
     return 0;
 }
@@ -874,9 +993,26 @@ static pthread_cond_t tau_pool_cv = PTHREAD_COND_INITIALIZER;
 static tau_job *tau_pool_first, *tau_pool_last;
 static int tau_pool_workers = -1;
 static pthread_once_t tau_pool_once = PTHREAD_ONCE_INIT;
-static pthread_mutex_t tau_const_mu = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static pthread_mutex_t tau_const_mu;
+static pthread_once_t tau_const_once = PTHREAD_ONCE_INIT;
+static void tau_const_init(void) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&tau_const_mu, &a);
+}
+static void tau_const_lock(void) { pthread_once(&tau_const_once, tau_const_init); pthread_mutex_lock(&tau_const_mu); }
+static void tau_const_unlock(void) { pthread_mutex_unlock(&tau_const_mu); }
 
 static void tau_thread_setup(void) {
+#ifdef _WIN32
+    ULONG_PTR lo = 0, hi = 0;
+    GetCurrentThreadStackLimits(&lo, &hi);
+    tau_stack_lo = (uintptr_t)lo;
+    /* keep some stack in reserve, so that the overflow handler has room to print its message */
+    ULONG guarantee = 1 << 17;
+    SetThreadStackGuarantee(&guarantee);
+#else
     pthread_attr_t at;
     void *lo = 0;
     size_t sz = 0;
@@ -891,7 +1027,44 @@ static void tau_thread_setup(void) {
     ss.ss_size = sizeof altstack;
     ss.ss_flags = 0;
     sigaltstack(&ss, 0);
+#endif
 }
+
+/* ---- threads with large stacks: pthreads on POSIX, Win32 threads (stack reserved, not committed) on Windows */
+typedef void *(*tau_thread_fn)(void *);
+#ifdef _WIN32
+typedef struct { tau_thread_fn fn; void *arg; } tau_thread_start;
+static DWORD WINAPI tau_win_entry(LPVOID p) {
+    tau_thread_start st = *(tau_thread_start *)p;
+    free(p);
+    st.fn(st.arg);
+    return 0;
+}
+static int tau_thread_create(tau_thread_fn fn, void *arg, size_t stack, void **handle) {
+    tau_thread_start *st = (tau_thread_start *)malloc(sizeof *st);
+    st->fn = fn; st->arg = arg;
+    HANDLE h = CreateThread(0, stack, tau_win_entry, st, STACK_SIZE_PARAM_IS_A_RESERVATION, 0);
+    if (!h) { free(st); return -1; }
+    *handle = h;
+    return 0;
+}
+static void tau_thread_join(void *h) { WaitForSingleObject((HANDLE)h, INFINITE); CloseHandle((HANDLE)h); }
+static void tau_thread_detach(void *h) { CloseHandle((HANDLE)h); }
+#else
+static int tau_thread_create(tau_thread_fn fn, void *arg, size_t stack, void **handle) {
+    pthread_attr_t at;
+    pthread_t *th = (pthread_t *)malloc(sizeof *th);
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, stack);
+    int r = pthread_create(th, &at, fn, arg);
+    pthread_attr_destroy(&at);
+    if (r != 0) { free(th); return -1; }
+    *handle = th;
+    return 0;
+}
+static void tau_thread_join(void *h) { pthread_join(*(pthread_t *)h, 0); free(h); }
+static void tau_thread_detach(void *h) { pthread_detach(*(pthread_t *)h); free(h); }
+#endif
 
 static void *tau_worker(void *arg) {
     (void)arg;
@@ -913,20 +1086,25 @@ static void tau_pool_init(void) {
     int total = 0;
     const char *e = getenv("TAU_THREADS");
     if (e && *e) total = atoi(e);
-    if (total <= 0) { long n = sysconf(_SC_NPROCESSORS_ONLN); total = n > 0 ? (int)n : 1; }
+    if (total <= 0) {
+#ifdef _WIN32
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        total = (int)si.dwNumberOfProcessors;
+#else
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        total = n > 0 ? (int)n : 1;
+#endif
+        if (total < 1) total = 1;
+    }
     if (total > 256) total = 256;
     tau_pool_workers = total - 1;
     for (int i = 0; i < tau_pool_workers; i++) {
-        pthread_attr_t at;
-        pthread_t th;
-        pthread_attr_init(&at);
+        void *h = 0;
         size_t sizes[] = {(size_t)1 << 28, (size_t)1 << 26, (size_t)1 << 24};
         int ok = 0;
-        for (int k = 0; k < 3 && !ok; k++) {
-            pthread_attr_setstacksize(&at, sizes[k]);
-            if (pthread_create(&th, &at, tau_worker, 0) == 0) ok = 1;
-        }
-        if (ok) pthread_detach(th);
+        for (int k = 0; k < 3 && !ok; k++) ok = tau_thread_create(tau_worker, 0, sizes[k], &h) == 0;
+        if (ok) tau_thread_detach(h);
         else { tau_pool_workers = i; break; }
     }
 }
@@ -971,7 +1149,7 @@ static void tau_region_help(tau_region *r) {
             tau_buf *saved_out = tau_cur_out;
             tau_cur_task = &ctx;
             tau_cur_out = &r->bufs[b];
-            if (sigsetjmp(ctx.jb, 1) == 0) {
+            if (tau_setjmp(ctx.jb) == 0) {
                 r->fn(r->env, b, lo, hi, r->outs ? r->outs + b * r->tsize : 0);
             } else {
                 r->msgs[b] = ctx.msg ? ctx.msg : strdup("panic");
@@ -1058,7 +1236,7 @@ static void tau_task_exec(tau_task *t) {
     tau_buf *saved_out = tau_cur_out;
     tau_cur_task = &ctx;
     tau_cur_out = &t->out;
-    if (sigsetjmp(ctx.jb, 1) == 0) t->run(t);
+    if (tau_setjmp(ctx.jb) == 0) t->run(t);
     else { t->panicked = 1; free(ctx.msg); }
     tau_cur_task = saved_ctx;
     tau_cur_out = saved_out;
@@ -1107,6 +1285,20 @@ static void tau_task_drop(tau_task **p) {
 static int tau_run_main(void);
 static int tau_exit_status;
 
+#ifdef _WIN32
+/* Stack overflow arrives as a structured exception. Inside a task it ends the program too (it
+ * cannot be reported through `join` as it is on Linux). */
+static LONG WINAPI tau_veh(EXCEPTION_POINTERS *ep) {
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW) {
+        static const char m[] = "panic: stack overflow: the program recursed too deeply\n";
+        tau_flush_stdout();
+        DWORD wrote = 0;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), m, (DWORD)(sizeof m - 1), &wrote, 0);
+        ExitProcess(101);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#else
 static void tau_segv(int sig, siginfo_t *si, void *ctx) {
     (void)ctx;
     uintptr_t a = (uintptr_t)si->si_addr;
@@ -1115,7 +1307,7 @@ static void tau_segv(int sig, siginfo_t *si, void *ctx) {
             static const char sm[] = "stack overflow: the program recursed too deeply";
             tau_cur_task->msg = strdup(sm);
             tau_cur_task->len = sizeof sm - 1;
-            siglongjmp(tau_cur_task->jb, 1);
+            tau_longjmp(tau_cur_task->jb, 1);
         }
         static const char m[] = "panic: stack overflow: the program recursed too deeply\n";
         tau_flush_stdout();
@@ -1124,10 +1316,12 @@ static void tau_segv(int sig, siginfo_t *si, void *ctx) {
     }
     signal(sig, SIG_DFL);
 }
+#endif
 
 static void *tau_thread_main(void *arg) {
     (void)arg;
     tau_thread_setup();
+#ifndef _WIN32
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = tau_segv;
@@ -1135,22 +1329,25 @@ static void *tau_thread_main(void *arg) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, 0);
     sigaction(SIGBUS, &sa, 0);
+#endif
     tau_exit_status = tau_run_main();
     return 0;
 }
 
 int main(void) {
-    pthread_attr_t at;
-    pthread_t th;
-    pthread_attr_init(&at);
+#ifdef _WIN32
+    /* bytes in, bytes out: no newline translation, as in the interpreter */
+    _setmode(0, _O_BINARY);
+    _setmode(1, _O_BINARY);
+    _setmode(2, _O_BINARY);
+    AddVectoredExceptionHandler(1, tau_veh);
+#endif
+    void *h = 0;
     size_t sizes[] = {(size_t)1 << 30, (size_t)1 << 28, (size_t)1 << 26};
     int started = 0;
-    for (int i = 0; i < 3 && !started; i++) {
-        pthread_attr_setstacksize(&at, sizes[i]);
-        if (pthread_create(&th, &at, tau_thread_main, 0) == 0) started = 1;
-    }
-    if (!started) { tau_thread_main(0); }
-    else pthread_join(th, 0);
+    for (int i = 0; i < 3 && !started; i++) started = tau_thread_create(tau_thread_main, 0, sizes[i], &h) == 0;
+    if (!started) tau_thread_main(0);
+    else tau_thread_join(h);
     tau_flush_stdout();
     return tau_exit_status;
 }

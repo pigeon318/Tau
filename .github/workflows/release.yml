@@ -1,0 +1,46 @@
+name: release
+
+# Publishes tau.exe (Windows) and tau (Linux) when a version tag such as v0.1.0 is pushed.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tau-windows-x86_64
+          path: target/release/tau.exe
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tau-linux-x86_64
+          path: target/release/tau
+
+  publish:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          zip -j tau-windows-x86_64.zip tau-windows-x86_64/tau.exe
+          tar -C tau-linux-x86_64 -czf tau-linux-x86_64.tar.gz tau
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --title "Tau ${GITHUB_REF_NAME}" --generate-notes tau-windows-x86_64.zip tau-linux-x86_64.tar.gz

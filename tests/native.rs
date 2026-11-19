@@ -77,6 +77,16 @@ fn same(src: &str) -> String {
     want_out
 }
 
+/// A path in the temp directory, written with forward slashes (valid in a Tau string on every platform).
+fn tmp_path(name: &str) -> String {
+    std::env::temp_dir().join(name).to_string_lossy().replace('\\', "/")
+}
+
+/// What the system says when a file does not exist (Rust's `io::Error` text).
+fn not_found_message() -> &'static str {
+    if cfg!(windows) { "The system cannot find the file specified. (os error 2)" } else { "No such file or directory (os error 2)" }
+}
+
 /// Like `same`, for the body of `main`.
 fn body(b: &str) -> String {
     same(&format!("fn main() {{\n{b}\n}}"))
@@ -571,20 +581,21 @@ fn maps() {
 
 #[test]
 fn files_and_main_results() {
-    same("use std.fs\nfn main() -> Result<(), IoError> {\n let path = \"/tmp/tau-native-test.txt\"\n fs.write(path, \"alpha\\nbeta\\n\")?\n print(fs.exists(path))\n let t = fs.read(path)?\n print(t.len)\n print(t)\n print(fs.exists(\"/tmp/tau-no-such-file\"))\n Ok(())\n}");
+    same(&format!("use std.fs\nfn main() -> Result<(), IoError> {{\n let path = \"{}\"\n fs.write(path, \"alpha\\nbeta\\n\")?\n print(fs.exists(path))\n let t = fs.read(path)?\n print(t.len)\n print(t)\n print(fs.exists(\"{}\"))\n Ok(())\n}}", tmp_path("tau-native-test.txt"), tmp_path("tau-no-such-file")));
     if !have_cc() {
         return;
     }
     // main returning Err: the message goes to stderr, exit status 1, stdout is kept
-    let src = "use std.fs\nfn main() -> Result<(), IoError> {\n print(\"before\")\n let t = fs.read(\"/tmp/tau-no-such-file\")?\n print(t)\n Ok(())\n}";
+    let src = format!("use std.fs\nfn main() -> Result<(), IoError> {{\n print(\"before\")\n let t = fs.read(\"{}\")?\n print(t)\n Ok(())\n}}", tmp_path("tau-no-such-file"));
+    let src = src.as_str();
     let got = native::run_captured(src).unwrap();
     assert_eq!(got.stdout, "before\n");
     assert_eq!(got.code, 1);
-    assert_eq!(got.stderr, "error: io error: No such file or directory (os error 2)\n");
+    assert_eq!(got.stderr, format!("error: io error: {}\n", not_found_message()));
     let cap = Capture(Arc::new(Mutex::new(Vec::new())));
     let r = tau::run_source(src, Box::new(cap.clone())).unwrap();
     match r.outcome.unwrap() {
-        Outcome::Error(m) => assert_eq!(m, "io error: No such file or directory (os error 2)"),
+        Outcome::Error(m) => assert_eq!(m, format!("io error: {}", not_found_message())),
         other => panic!("{other:?}"),
     }
 }
