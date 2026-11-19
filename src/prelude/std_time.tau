@@ -1,0 +1,27 @@
+// Clocks and the calendar. Times are plain numbers: nanoseconds for clocks and durations,
+// seconds since 1970-01-01 00:00:00 UTC for dates (the "Unix time").
+
+// A clock for timing: nanoseconds since some arbitrary moment. It never goes backwards,
+// and only the difference of two readings means anything.
+pub fn monotonic_ns() -> i64
+
+// The wall clock: nanoseconds since 1970-01-01 00:00:00 UTC. It can jump when the system clock is set.
+pub fn unix_ns() -> i64
+
+// Wait for this many seconds (not negative).
+pub fn sleep(secs: f64)
+
+// (year, month 1-12, day 1-31, hour 0-23, minute 0-59, second 0-59) of a Unix time, in UTC.
+pub fn civil(unix_secs: i64) -> (i64, i64, i64, i64, i64, i64)
+
+// The Unix time of a UTC date and time. Panics on a date that does not exist (month 13, February 30th).
+pub fn from_civil(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64
+
+// The day of the week of a Unix time: 0 is Monday, 6 is Sunday.
+pub fn weekday(unix_secs: i64) -> i64
+
+// "2026-11-19T07:13:02Z"
+pub fn format_iso(unix_secs: i64) -> String
+
+// A readable duration from nanoseconds: "950 ns", "1.500 µs", "12.345 ms", "1.250 s", "2m 05s", "1h 02m 05s".
+pub fn format_duration(ns: i64) -> String

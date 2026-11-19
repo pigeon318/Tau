@@ -5,6 +5,7 @@
 //! loops, `spawn` and `on` run sequentially: the results are the same, just not faster.
 
 mod builtins;
+mod clock;
 mod eval;
 mod tensor;
 pub mod value;

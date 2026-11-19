@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef unsigned char tau_unit;
@@ -966,6 +967,127 @@ static bool tau_fs_exists(tau_str path) {
     bool ok = access(c, F_OK) == 0;
     free(c);
     return ok;
+}
+
+/* ---- time (std.time): the clocks, the calendar (UTC, proleptic Gregorian) and formatting.
+ * The arithmetic is integer only, so the interpreter's version of each function gives identical results. */
+
+static int64_t tau_monotonic_ns(void) {
+#ifdef _WIN32
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    int64_t q = c.QuadPart / f.QuadPart, r = c.QuadPart % f.QuadPart;
+    return q * 1000000000LL + r * 1000000000LL / f.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+#endif
+}
+
+static int64_t tau_unix_ns(void) {
+#ifdef _WIN32
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime; /* 100 ns since 1601 */
+    return ((int64_t)(t - 116444736000000000ULL)) * 100;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+#endif
+}
+
+static void tau_sleep(double secs) {
+    if (!(secs >= 0.0)) tau_panic_cstr("sleep needs a number of seconds that is not negative");
+    if (secs > 1e9) tau_panic_cstr("sleep: the duration is too long (the limit is 1e9 seconds)");
+#ifdef _WIN32
+    double ms = secs * 1000.0 + 0.5;
+    while (ms > 0.0) {
+        double chunk = ms > 1e9 ? 1e9 : ms;
+        Sleep((DWORD)chunk);
+        ms -= chunk;
+    }
+#else
+    struct timespec ts;
+    ts.tv_sec = (time_t)secs;
+    ts.tv_nsec = (long)((secs - (double)ts.tv_sec) * 1e9);
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+#endif
+}
+
+static int64_t tau_floor_div(int64_t a, int64_t b) { int64_t q = a / b; return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q; }
+static int64_t tau_floor_mod(int64_t a, int64_t b) { return a - tau_floor_div(a, b) * b; }
+
+/* field 0..5 of the date and time of a Unix timestamp: year, month, day, hour, minute, second */
+static int64_t tau_civil_field(int64_t secs, int field) {
+    int64_t days = tau_floor_div(secs, 86400), rem = tau_floor_mod(secs, 86400);
+    if (field == 3) return rem / 3600;
+    if (field == 4) return rem % 3600 / 60;
+    if (field == 5) return rem % 60;
+    int64_t z = days + 719468;
+    int64_t era = tau_floor_div(z, 146097);
+    int64_t doe = z - era * 146097;
+    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int64_t mp = (5 * doy + 2) / 153;
+    int64_t d = doy - (153 * mp + 2) / 5 + 1;
+    int64_t m = mp < 10 ? mp + 3 : mp - 9;
+    int64_t y = yoe + era * 400 + (m <= 2 ? 1 : 0);
+    return field == 0 ? y : field == 1 ? m : d;
+}
+
+static int64_t tau_weekday(int64_t secs) { return tau_floor_mod(tau_floor_div(secs, 86400) + 3, 7); } /* Monday is 0 */
+
+static int64_t tau_from_civil(int64_t y, int64_t m, int64_t d, int64_t h, int64_t mi, int64_t s) {
+    static const int dim[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (y < -1000000000 || y > 1000000000 || m < 1 || m > 12 || h < 0 || h > 23 || mi < 0 || mi > 59 || s < 0 || s > 59) tau_panic_cstr("invalid date or time");
+    bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    if (d < 1 || d > dim[m - 1] + (m == 2 && leap ? 1 : 0)) tau_panic_cstr("invalid date or time");
+    int64_t yy = m <= 2 ? y - 1 : y;
+    int64_t era = tau_floor_div(yy, 400);
+    int64_t yoe = yy - era * 400;
+    int64_t doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (era * 146097 + doe - 719468) * 86400 + h * 3600 + mi * 60 + s;
+}
+
+static void tau_put_pad(tau_buf *b, int64_t v, int width) {
+    char t[24];
+    int n = snprintf(t, sizeof t, "%0*lld", width, (long long)v);
+    tau_buf_push(b, t, (size_t)n);
+}
+
+static tau_buf tau_time_iso(int64_t secs) {
+    tau_buf b = {0};
+    int64_t y = tau_civil_field(secs, 0);
+    if (y < 0) { tau_buf_char(&b, '-'); y = -y; }
+    tau_put_pad(&b, y, 4);
+    tau_buf_char(&b, '-'); tau_put_pad(&b, tau_civil_field(secs, 1), 2);
+    tau_buf_char(&b, '-'); tau_put_pad(&b, tau_civil_field(secs, 2), 2);
+    tau_buf_char(&b, 'T'); tau_put_pad(&b, tau_civil_field(secs, 3), 2);
+    tau_buf_char(&b, ':'); tau_put_pad(&b, tau_civil_field(secs, 4), 2);
+    tau_buf_char(&b, ':'); tau_put_pad(&b, tau_civil_field(secs, 5), 2);
+    tau_buf_char(&b, 'Z');
+    return b;
+}
+
+/* "950 ns", "1.500 us" (with the micro sign), "12.345 ms", "1.250 s", "2m 05s", "1h 02m 05s"; truncated, not rounded */
+static tau_buf tau_time_dur(int64_t ns) {
+    tau_buf b = {0};
+    uint64_t u = ns < 0 ? (uint64_t)0 - (uint64_t)ns : (uint64_t)ns;
+    if (ns < 0) tau_buf_char(&b, '-');
+    char t[48];
+    int n;
+    if (u < 1000ULL) n = snprintf(t, sizeof t, "%llu ns", (unsigned long long)u);
+    else if (u < 1000000ULL) n = snprintf(t, sizeof t, "%llu.%03llu \xc2\xb5s", (unsigned long long)(u / 1000), (unsigned long long)(u % 1000));
+    else if (u < 1000000000ULL) n = snprintf(t, sizeof t, "%llu.%03llu ms", (unsigned long long)(u / 1000000), (unsigned long long)(u % 1000000 / 1000));
+    else if (u < 60000000000ULL) n = snprintf(t, sizeof t, "%llu.%03llu s", (unsigned long long)(u / 1000000000), (unsigned long long)(u % 1000000000 / 1000000));
+    else if (u < 3600000000000ULL) n = snprintf(t, sizeof t, "%llum %02llus", (unsigned long long)(u / 60000000000ULL), (unsigned long long)(u % 60000000000ULL / 1000000000));
+    else n = snprintf(t, sizeof t, "%lluh %02llum %02llus", (unsigned long long)(u / 3600000000000ULL), (unsigned long long)(u % 3600000000000ULL / 60000000000ULL), (unsigned long long)(u % 60000000000ULL / 1000000000));
+    tau_buf_push(&b, t, (size_t)n);
+    return b;
 }
 
 /* one line of standard input without its line ending (empty at end of input) */
