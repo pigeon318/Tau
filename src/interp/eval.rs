@@ -604,7 +604,7 @@ impl<'a> Interp<'a> {
             }
             Some(Res::Variant(adt, i, _)) => self.construct(*adt, Some(*i), args, f),
             Some(Res::StructCtor(adt, _)) => self.construct(*adt, None, args, f),
-            Some(Res::Builtin(kind)) => self.tensor_ctor(kind, e, args, f),
+            Some(Res::Builtin(kind)) => self.tensor_builtin(kind, e, recv, args, f),
             _ => panic("an unresolved method call reached the interpreter"),
         }
     }
@@ -668,6 +668,11 @@ impl<'a> Interp<'a> {
             }
             Value::Slice(slot, s, en) => self.index_into(&slot, s, en, indices, f),
             Value::Tensor(t) => {
+                if indices.iter().any(|i| matches!(i.kind, ExprKind::Range { .. })) {
+                    let specs = self.slice_specs(indices, f)?;
+                    let guard = t.borrow();
+                    return self.tensor_slice(&guard, &specs);
+                }
                 let mut idx = Vec::new();
                 for i in indices {
                     idx.push(self.usize_of(i, f)?);
@@ -901,6 +906,16 @@ impl<'a> Interp<'a> {
     // ------------------------------------------------------------ assignment
 
     fn assign(&mut self, e: &'a Expr, op: Option<BinOp>, lhs: &'a Expr, rhs: &'a Expr, f: &Frame<'a>) -> R<'a, ()> {
+        // `t[0..2, 1] = x`: part of a tensor
+        if let ExprKind::Index { base, indices } = &lhs.kind {
+            if indices.iter().any(|i| matches!(i.kind, ExprKind::Range { .. })) && matches!(self.ty_of(base, f), Ty::Tensor(..)) {
+                let rv = self.eval_val(rhs, f)?;
+                let bv = self.eval(base, f)?;
+                let Value::Tensor(t) = self.deref(bv)? else { return panic("expected a tensor") };
+                let specs = self.slice_specs(indices, f)?;
+                return self.tensor_slice_set(&t, &specs, rv);
+            }
+        }
         let rv = self.eval_val(rhs, f)?;
         let target = self.place(lhs, f)?;
         let Some(bop) = op else {

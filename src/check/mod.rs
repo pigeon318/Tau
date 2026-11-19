@@ -133,6 +133,11 @@ impl CheckResult {
     }
 }
 
+/// Is this tensor builtin a method of a tensor value (`t.sum()`), rather than a constructor (`Type.zeros(2)`)?
+pub fn tensor_builtin_has_receiver(kind: &str) -> bool {
+    matches!(kind, "tensor.sum" | "tensor.mean" | "tensor.min" | "tensor.max" | "tensor.shape" | "tensor.to_vec" | "tensor.map" | "tensor.reshape" | "tensor.transpose")
+}
+
 /// Parse `src` and check it against the built-in library.
 pub fn check_source(src: &str) -> Result<CheckResult, Diagnostic> {
     let user = crate::parser::parse_module(src)?;

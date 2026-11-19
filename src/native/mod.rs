@@ -289,7 +289,8 @@ fn run_exe_captured(exe: &Path, env: &[(&str, &str)]) -> Result<NativeOutput, Na
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let out = cmd.stdin(Stdio::null()).output().map_err(|e| NativeError::plain(format!("cannot run {}: {e}", exe.display())))?;
+    cmd.stdin(Stdio::null());
+    let out = retry_busy(|| cmd.output()).map_err(|e| NativeError::plain(format!("cannot run {}: {e}", exe.display())))?;
     let mut stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let mut code = out.status.code().unwrap_or(-1);
     if valgrind {
@@ -307,8 +308,21 @@ fn run_exe_captured(exe: &Path, env: &[(&str, &str)]) -> Result<NativeOutput, Na
     Ok(NativeOutput { stdout: String::from_utf8_lossy(&out.stdout).into_owned(), stderr, code })
 }
 
+/// Run `f`; a program that was written a moment ago can be reported "text file busy" (Linux error 26)
+/// when another thread forks while the file is still open for writing. That passes in a moment, so it
+/// is tried again.
+fn retry_busy<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    for _ in 0..100 {
+        match f() {
+            Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            r => return r,
+        }
+    }
+    f()
+}
+
 /// Run an already built program with the terminal attached; returns its exit code.
 pub fn exec(exe: &Path) -> Result<i32, NativeError> {
-    let status = Command::new(exe).status().map_err(|e| NativeError::plain(format!("cannot run {}: {e}", exe.display())))?;
+    let status = retry_busy(|| Command::new(exe).status()).map_err(|e| NativeError::plain(format!("cannot run {}: {e}", exe.display())))?;
     Ok(status.code().unwrap_or(1))
 }
