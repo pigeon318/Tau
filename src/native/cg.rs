@@ -384,6 +384,8 @@ impl<'a> Cg<'a> {
                         "Vec" => return Ok(format!("Vec_{}", self.mangle(&args[0])?)),
                         "Task" => return Ok(format!("Task_{}", self.mangle(&args[0])?)),
                         "Box" => return Ok(format!("Box_{}", self.mangle(&args[0])?)),
+                        "Shared" => return Ok(format!("Shared_{}", self.mangle(&args[0])?)),
+                        "Mutex" => return Ok(format!("Mutex_{}", self.mangle(&args[0])?)),
                         "Ptr" | "Cluster" => {
                             return unsupported(self.describe(ty));
                         }
@@ -519,13 +521,17 @@ impl<'a> Cg<'a> {
                 self.type_names.insert(key, name.clone());
                 name
             }
-            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Box") => {
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Box") || self.is_builtin_adt(*id, "Shared") || self.is_builtin_adt(*id, "Mutex") => {
                 let key = self.mangle(ty)?;
                 if let Some(nm) = self.type_names.get(&key) {
                     return Ok(nm.clone());
                 }
                 // (a recursive type is already named, and declared, while its fields are being generated)
                 let et = self.cty(&args[0])?;
+                // (generating the held type may have generated this one: `Shared<Tree>` inside `Tree`)
+                if let Some(nm) = self.type_names.get(&key) {
+                    return Ok(nm.clone());
+                }
                 let name = format!("box_{key}");
                 self.types.push_str(&format!("typedef struct {{ {et} *p; }} {name};\n"));
                 self.type_names.insert(key, name.clone());
@@ -594,7 +600,7 @@ impl<'a> Cg<'a> {
     /// A struct whose fields are real fields (the prelude's iterator types are; `Vec` and friends are not).
     fn plain_struct(&self, id: AdtId) -> bool {
         let d = self.prog.adt(id);
-        d.module != 0 || !matches!(d.name.as_str(), "String" | "Vec" | "Task" | "Box" | "Ptr" | "Cluster" | "IoError" | "TaskPanicked")
+        d.module != 0 || !matches!(d.name.as_str(), "String" | "Vec" | "Task" | "Box" | "Shared" | "Mutex" | "Ptr" | "Cluster" | "IoError" | "TaskPanicked")
     }
 
     fn is_builtin_adt(&self, id: AdtId, name: &str) -> bool {
@@ -648,7 +654,15 @@ impl<'a> Cg<'a> {
     /// `T` if `ty` is `Box<T>`.
     fn box_inner(&self, ty: &Ty) -> Option<Ty> {
         match ty {
-            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Box") => Some(args[0].clone()),
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Box") || self.is_builtin_adt(*id, "Shared") => Some(args[0].clone()),
+            _ => None,
+        }
+    }
+
+    /// `T` if `ty` is `Mutex<T>`.
+    fn mutex_inner(&self, ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Mutex") => Some(args[0].clone()),
             _ => None,
         }
     }
@@ -685,7 +699,7 @@ impl<'a> Cg<'a> {
             Ty::Array(t, _) => self.needs_drop(t),
             Ty::Adt(id, args) => {
                 let d = self.prog.adt(*id);
-                if d.module == 0 && matches!(d.name.as_str(), "String" | "Vec" | "Task" | "Box") {
+                if d.module == 0 && matches!(d.name.as_str(), "String" | "Vec" | "Task" | "Box" | "Shared" | "Mutex") {
                     return true;
                 }
                 if self.map_kv(ty).is_some() {
@@ -731,6 +745,21 @@ impl<'a> Cg<'a> {
                 body.push_str("free(p->ptr);\n");
             }
             Ty::Adt(id, _) if self.is_builtin_adt(*id, "Task") => body.push_str("tau_task_drop(p);\n"),
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Shared") => {
+                // the value goes with the last handle
+                body.push_str("if (p->p && tau_sh_dec(p->p)) {\n");
+                if let Some(f) = self.drop_fn(&args[0])? {
+                    body.push_str(&format!("{f}(p->p);\n"));
+                }
+                body.push_str("tau_sh_free(p->p);\n}\n");
+            }
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Mutex") => {
+                body.push_str("if (p->p) {\n");
+                if let Some(f) = self.drop_fn(&args[0])? {
+                    body.push_str(&format!("{f}(p->p);\n"));
+                }
+                body.push_str("tau_mx_free(p->p);\n}\n");
+            }
             Ty::Adt(id, args) if self.is_builtin_adt(*id, "Box") => {
                 body.push_str("if (p->p) {\n");
                 if let Some(f) = self.drop_fn(&args[0])? {
@@ -1203,7 +1232,7 @@ impl<'a> Cg<'a> {
                 }
             }
             ExprKind::Index { base, indices } if indices.len() == 1 && !matches!(indices[0].kind, ExprKind::Range { .. }) => {
-                let bt = self.ty_of(base);
+                let bt = self.eff_ty(base);
                 let elem = match &bt {
                     Ty::Array(t, Some(_)) | Ty::Slice(t) => (**t).clone(),
                     other => match self.vec_elem(other) {
@@ -2025,15 +2054,15 @@ impl<'a> Cg<'a> {
             let subst = self.apply_sub(subst);
             return self.call_resolved(*fid, &subst, None, &[base, &indices[0]]);
         }
-        if indices.len() != 1 && !matches!(self.ty_of(base), Ty::Tensor(..)) {
+        if indices.len() != 1 && !matches!(self.eff_ty(base), Ty::Tensor(..)) {
             return unsupported("indexing with several indices");
         }
-        if matches!(self.ty_of(base), Ty::Tensor(..)) && indices.iter().any(|i| matches!(i.kind, ExprKind::Range { .. })) {
+        if matches!(self.eff_ty(base), Ty::Tensor(..)) && indices.iter().any(|i| matches!(i.kind, ExprKind::Range { .. })) {
             let (decls, sl, n, b) = self.tensor_slice_specs(base, indices)?;
             return Ok(format!("({{ {decls}tau_tensor *t_ = &({b}); tau_sl sl_[{}] = {{ {sl} }}; tau_t_slice(t_, {n}, sl_); }})", n.max(1)));
         }
         if let ExprKind::Range { start, end, inclusive } = &indices[0].kind {
-            let bt = self.ty_of(base);
+            let bt = self.eff_ty(base);
             let Some(el) = self.seq_elem(&bt) else { return unsupported("slicing this type") };
             let (b, _) = self.place(base)?;
             let view = self.view(&b, &bt)?;
@@ -2050,7 +2079,7 @@ impl<'a> Cg<'a> {
                 "({{ {st} s_ = {view}; __int128 a_ = {lo}; __int128 b_ = {hi}; if (b_ > (__int128)s_.len) b_ = (__int128)s_.len; if (a_ < 0 || a_ > b_) tau_slice_oob(a_, b_, s_.len); ({st}){{ s_.ptr + a_, (size_t)(b_ - a_) }}; }})"
             ));
         }
-        let bt = self.ty_of(base);
+        let bt = self.eff_ty(base);
         if matches!(bt, Ty::Tensor(..)) {
             let (pre, el) = self.tensor_access(base, indices, true)?;
             return Ok(format!("({{ {pre}{}; }})", self.tensor_get(&el)));
@@ -2836,6 +2865,52 @@ impl<'a> Cg<'a> {
                 let v = self.convert(ops[0].0, &inner)?;
                 Ok(format!("({{ {it} bv_ = {v}; {bt} b_; b_.p = ({it} *)tau_xmalloc(sizeof({it})); *b_.p = bv_; b_; }})"))
             }
+            "Shared::new" | "Mutex::new" => {
+                let inner = if name == "Shared::new" { self.box_inner(ret) } else { self.mutex_inner(ret) };
+                let Some(inner) = inner else { return unsupported("this `new`") };
+                let it = self.cty(&inner)?;
+                let ht = self.cty(ret)?;
+                let v = self.convert(ops[0].0, &inner)?;
+                let alloc = if name == "Shared::new" { "tau_sh_new" } else { "tau_mx_new" };
+                Ok(format!("({{ {it} bv_ = {v}; {ht} h_; h_.p = ({it} *){alloc}(sizeof({it})); *h_.p = bv_; h_; }})"))
+            }
+            "Mutex::get" | "Mutex::set" | "Mutex::update" | "Mutex::with" | "Mutex::into_inner" => {
+                let Some(inner) = self.mutex_inner(&ops[0].2) else { return unsupported("this mutex operation") };
+                let it = self.cty(&inner)?;
+                let mt = self.cty(&ops[0].2)?;
+                if name == "Mutex::into_inner" {
+                    let m = self.convert(ops[0].0, &ops[0].2)?;
+                    return Ok(format!("({{ {mt} m_ = {m}; {it} v_ = *m_.p; tau_mx_free(m_.p); v_; }})"));
+                }
+                let m = self.borrowed_as(ops[0].0, &ops[0].2)?;
+                let drop_old = self.drop_stmt("(*m_.p)", &inner)?;
+                match name {
+                    "Mutex::get" => {
+                        let copy = match self.clone_fn(&inner)? {
+                            Some(c) => format!("{c}(m_.p)"),
+                            None => "*m_.p".to_string(),
+                        };
+                        Ok(format!("({{ {mt} m_ = {m}; tau_mx_lock(m_.p); {it} r_ = {copy}; tau_mx_unlock(m_.p); r_; }})"))
+                    }
+                    "Mutex::set" => {
+                        let v = self.convert(ops[1].0, &inner)?;
+                        Ok(format!("({{ {mt} m_ = {m}; {it} nv_ = {v}; tau_mx_lock(m_.p); {drop_old}*m_.p = nv_; tau_mx_unlock(m_.p); ((tau_unit)0); }})"))
+                    }
+                    "Mutex::update" => {
+                        let fty = Ty::Fn(vec![inner.clone()], Box::new(inner.clone()));
+                        let fct = self.cty(&fty)?;
+                        let f = self.borrowed_as(ops[1].0, &fty)?;
+                        Ok(format!("({{ {mt} m_ = {m}; {fct} f_ = {f}; tau_mx_lock(m_.p); {it} nv_ = f_.call(f_.env, *m_.p); {drop_old}*m_.p = nv_; tau_mx_unlock(m_.p); ((tau_unit)0); }})"))
+                    }
+                    _ => {
+                        let fty = Ty::Fn(vec![inner.clone()], Box::new(ret.clone()));
+                        let fct = self.cty(&fty)?;
+                        let rct = self.cty(ret)?;
+                        let f = self.borrowed_as(ops[1].0, &fty)?;
+                        Ok(format!("({{ {mt} m_ = {m}; {fct} f_ = {f}; tau_mx_lock(m_.p); {rct} r_ = f_.call(f_.env, *m_.p); tau_mx_unlock(m_.p); r_; }})"))
+                    }
+                }
+            }
             "Box::take" => {
                 let Some(inner) = self.box_inner(&ops[0].2) else { return unsupported("this `take`") };
                 let it = self.cty(&inner)?;
@@ -2947,6 +3022,8 @@ impl<'a> Cg<'a> {
             t if self.is_string(t) => {
                 body.push_str("r.ptr = 0; r.len = r.cap = 0; tau_buf_push(&r, p->ptr, p->len);\n");
             }
+            // another handle to the same value
+            Ty::Adt(id, _) if self.is_builtin_adt(*id, "Shared") => body.push_str("tau_sh_inc(p->p);\n"),
             t if self.box_inner(t).is_some() => {
                 let inner = self.box_inner(t).unwrap();
                 let it = self.cty(&inner)?;

@@ -14,6 +14,7 @@
 #endif
 #include <math.h>
 #include <pthread.h>
+#include <errno.h>
 #include <signal.h>
 #include <setjmp.h>
 #include <stdbool.h>
@@ -96,8 +97,16 @@ typedef struct { tau_jmp_buf jb; char *msg; size_t len; } tau_task_ctx;
 static __thread tau_task_ctx *tau_cur_task;
 static __thread uintptr_t tau_stack_lo;
 
+/* Mutexes the current thread holds, so that a panic in a task lets them go (see `Mutex<T>`). */
+static __thread pthread_mutex_t *tau_held[16];
+static __thread int tau_nheld;
+static void tau_mx_release_held(void) {
+    while (tau_nheld > 0) pthread_mutex_unlock(tau_held[--tau_nheld]);
+}
+
 TAU_NORETURN static void tau_panic(const char *msg, size_t len) {
     if (tau_cur_task) {
+        tau_mx_release_held();
         tau_cur_task->msg = (char *)malloc(len + 1);
         if (tau_cur_task->msg) { memcpy(tau_cur_task->msg, msg, len); tau_cur_task->msg[len] = 0; }
         tau_cur_task->len = len;
@@ -118,6 +127,46 @@ static void *tau_xmalloc(size_t n) {
     void *p = malloc(n ? n : 1);
     if (!p) tau_panic_cstr("out of memory");
     return p;
+}
+
+/* `Shared<T>` and `Mutex<T>`: the value sits TAU_HDR bytes into one allocation, behind a header: the
+ * reference count of a `Shared`, or the mutex of a `Mutex`. A handle is a pointer to the value. */
+#define TAU_HDR 64
+static void *tau_sh_new(size_t n) {
+    char *raw = (char *)tau_xmalloc(TAU_HDR + n);
+    memset(raw, 0, TAU_HDR);
+    *(size_t *)raw = 1;
+    return raw + TAU_HDR;
+}
+static void tau_sh_inc(void *p) { __atomic_fetch_add((size_t *)((char *)p - TAU_HDR), 1, __ATOMIC_RELAXED); }
+/* true when that was the last handle */
+static int tau_sh_dec(void *p) { return __atomic_fetch_sub((size_t *)((char *)p - TAU_HDR), 1, __ATOMIC_ACQ_REL) == 1; }
+static void tau_sh_free(void *p) { free((char *)p - TAU_HDR); }
+
+static void *tau_mx_new(size_t n) {
+    char *raw = (char *)tau_xmalloc(TAU_HDR + n);
+    memset(raw, 0, TAU_HDR);
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_ERRORCHECK);
+    pthread_mutex_init((pthread_mutex_t *)raw, &a);
+    pthread_mutexattr_destroy(&a);
+    return raw + TAU_HDR;
+}
+static void tau_mx_lock(void *p) {
+    pthread_mutex_t *m = (pthread_mutex_t *)((char *)p - TAU_HDR);
+    if (pthread_mutex_lock(m) == EDEADLK) tau_panic_cstr("deadlock: the mutex is already locked by this thread");
+    if (tau_nheld < 16) tau_held[tau_nheld++] = m;
+}
+static void tau_mx_unlock(void *p) {
+    pthread_mutex_t *m = (pthread_mutex_t *)((char *)p - TAU_HDR);
+    if (tau_nheld > 0 && tau_held[tau_nheld - 1] == m) tau_nheld--;
+    pthread_mutex_unlock(m);
+}
+static void tau_mx_free(void *p) {
+    char *raw = (char *)p - TAU_HDR;
+    pthread_mutex_destroy((pthread_mutex_t *)raw);
+    free(raw);
 }
 
 /* ---------------------------------------------------------------- integer formatting */

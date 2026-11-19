@@ -1360,3 +1360,91 @@ fn of_equal_items_min_keeps_the_first_and_max_the_last() {
     let out = same("fn main() {\n let v = vec[(1, \"a\"), (3, \"b\"), (3, \"c\"), (1, \"d\")]\n print(v.iter().max())\n print(v.iter().min())\n}");
     assert_eq!(out, "Some((3, c))\nSome((1, a))\n");
 }
+
+// ------------------------------------------------------------------ Shared<T> and Mutex<T>
+
+#[test]
+fn shared_values_are_read_through_every_handle() {
+    let out = same(
+        "struct Config { name: String, scale: f64 }\n\
+         fn area(c: Config, w: f64) -> f64 { c.scale * w }\n\
+         fn main() {\n\
+          let cfg = Shared.new(Config(String.from(\"lab\"), 2.5))\n let other = cfg.clone()\n\
+          print(cfg.name)\n print(other.scale)\n print(area(cfg, 4.0))\n\
+          let data = Shared.new(vec[1, 2, 3, 4])\n let d2 = data.clone()\n\
+          print(data.len)\n print(d2[2])\n print(data)\n print(data == d2)\n print(data < Shared.new(vec[1, 2, 4]))\n\
+          let mut total = 0\n for x in data.iter() { total += x }\n print(total)\n\
+          let v = vec[Shared.new(1), Shared.new(2)]\n let w = v.clone()\n print(w)\n\
+          let s = Shared.new(String.from(\"hi\"))\n print(\"{s}!\")\n\
+         }",
+    );
+    assert_eq!(out, "lab\n2.5\n10.0\n4\n3\n[1, 2, 3, 4]\ntrue\ntrue\n10\n[1, 2]\nhi!\n");
+}
+
+#[test]
+fn a_persistent_tree_shares_its_subtrees() {
+    let out = same(
+        "enum Tree {\n Leaf\n Node(Shared<Tree>, i64, Shared<Tree>)\n}\n\
+         fn insert(t: Shared<Tree>, x: i64) -> Shared<Tree> {\n match t {\n  Leaf => Shared.new(Node(Shared.new(Leaf), x, Shared.new(Leaf)))\n  Node(l, v, r) => {\n   if x < v { Shared.new(Node(insert(l.clone(), x), v, r.clone())) } else { Shared.new(Node(l.clone(), v, insert(r.clone(), x))) }\n  }\n }\n}\n\
+         fn size(t: Shared<Tree>) -> i64 {\n match t {\n  Leaf => 0\n  Node(l, _, r) => 1 + size(l) + size(r)\n }\n}\n\
+         fn sum(t: Shared<Tree>) -> i64 {\n match t {\n  Leaf => 0\n  Node(l, v, r) => v + sum(l) + sum(r)\n }\n}\n\
+         fn main() {\n let mut v1 = Shared.new(Leaf)\n for x in [5, 3, 8, 1] { v1 = insert(v1, x) }\n let v2 = insert(v1.clone(), 7)\n\
+          print(size(v1))\n print(size(v2))\n print(sum(v1))\n print(sum(v2))\n}",
+    );
+    assert_eq!(out, "4\n5\n17\n24\n");
+}
+
+#[test]
+fn a_mutex_changes_its_value_one_task_at_a_time() {
+    let out = same_on_any_thread_count(
+        "fn work(id: i64, counter: Shared<Mutex<i64>>, data: Shared<Vec<i64>>) -> i64 {\n let mut local = 0\n for x in data.iter() { local += x * id }\n for _ in 0..500 { counter.update(|n| n + 1) }\n local\n}\n\
+         fn main() {\n\
+          let counter = Shared.new(Mutex.new(0))\n let data = Shared.new(vec[1, 2, 3, 4])\n\
+          let (c1, d1) = (counter.clone(), data.clone())\n let (c2, d2) = (counter.clone(), data.clone())\n let (c3, d3) = (counter.clone(), data.clone())\n\
+          let a = spawn { work(1, own c1, own d1) }\n let b = spawn { work(2, own c2, own d2) }\n let c = spawn { work(3, own c3, own d3) }\n\
+          let mut total = 0\n for r in [a.join(), b.join(), c.join()] {\n match r {\n  Ok(v) => total += v\n  Err(_) => print(\"a task panicked\")\n }\n}\n\
+          print(total)\n print(counter.get())\n\
+          let log = Shared.new(Mutex.new(vec[0]))\n\
+          let n = par sum(i in 0..100) {\n log.update(|v| {\n let mut w = v.clone()\n w.push(1)\n w\n })\n 1\n }\n\
+          print(n)\n print(log.with(|v| v.len))\n\
+          let m = Mutex.new(String.from(\"a\"))\n m.set(String.from(\"b\"))\n print(m.get())\n print(m.into_inner())\n\
+         }",
+    );
+    assert_eq!(out, "60\n1500\n100\n101\nb\nb\n");
+}
+
+#[test]
+fn locking_a_mutex_inside_itself_is_a_deadlock_panic() {
+    let src = "fn main() {\n let m = Mutex.new(1)\n m.update(|x| x + m.get())\n}";
+    let (_, p) = interpret(src);
+    assert_eq!(p.as_deref(), Some("deadlock: the mutex is already locked by this thread"));
+    same(src);
+}
+
+#[test]
+fn a_panic_in_a_task_lets_go_of_its_lock() {
+    // (a task that panics does not free what it owned, so a valgrind leak check does not apply to this one)
+    let out = same(
+        "fn bad(m: Shared<Mutex<i64>>) -> i64 {\n m.update(|x| { assert(x < 0)\n x })\n 1\n}\n\
+         fn main() {\n let m = Shared.new(Mutex.new(5))\n let c = m.clone()\n let t = spawn { bad(own c) }\n\
+          match t.join() {\n  Ok(_) => print(\"ok\")\n  Err(_) => print(\"the task panicked\")\n }\n\
+          m.set(7)\n print(m.get())\n}",
+    );
+    assert_eq!(out, "the task panicked\n7\n");
+}
+
+#[test]
+fn shared_values_and_mutexes_free_what_they_own() {
+    // (`TAU_VALGRIND=1` reports a leak) strings inside, many handles, a tree, a task holding a handle
+    let out = same(
+        "enum Tree {\n Leaf\n Node(Shared<Tree>, String, Shared<Tree>)\n}\n\
+         fn grow(t: Shared<Tree>, own s: String) -> Shared<Tree> {\n match t {\n  Leaf => Shared.new(Node(Shared.new(Leaf), s, Shared.new(Leaf)))\n  Node(l, v, r) => Shared.new(Node(grow(l.clone(), s), v.clone(), r.clone()))\n }\n}\n\
+         fn main() {\n\
+          let a = Shared.new(vec[String.from(\"x\"), String.from(\"y\")])\n let b = a.clone()\n let c = b.clone()\n print(c.len)\n\
+          let mut t = Shared.new(Leaf)\n for w in [\"a\", \"b\", \"c\"] { t = grow(t, w.to_string()) }\n let t2 = t.clone()\n let t3 = grow(t2, String.from(\"d\"))\n print(\"done\")\n\
+          let m = Shared.new(Mutex.new(String.from(\"s\")))\n let m2 = m.clone()\n let h = spawn { m2.update(|s| \"{s}t\".to_string())\n 1 }\n match h.join() {\n  Ok(_) => print(\"joined\")\n  Err(_) => print(\"panicked\")\n }\n print(m.get())\n\
+          let own_m = Mutex.new(vec[String.from(\"q\")])\n own_m.set(vec[String.from(\"r\")])\n print(own_m.into_inner())\n\
+         }",
+    );
+    assert!(out.starts_with("2\ndone\n"), "{out}");
+}

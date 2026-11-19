@@ -52,6 +52,10 @@ pub enum Value<'a> {
     Ptr(Slot<'a>),
     /// A `Box<T>`: one slot holding the value. A box is moved, never copied (like a vector).
     Box(Slot<'a>),
+    /// `Shared<T>`: handles to one value share the slot, and cloning a handle does not copy it.
+    Shared(Slot<'a>),
+    /// `Mutex<T>`: the value, and whether it is locked right now.
+    Mutex(Slot<'a>),
     /// A reference to a place (arguments for `mut` parameters, `mut` loop elements).
     Ref(RefTarget<'a>),
 }
@@ -265,6 +269,8 @@ impl<'a> Value<'a> {
             Value::Closure(_) | Value::Func(..) | Value::Ctor(..) => "function",
             Value::Task(_) => "Task",
             Value::Box(_) => "Box",
+            Value::Shared(_) => "Shared",
+            Value::Mutex(_) => "Mutex",
             Value::Range(..) => "range",
             Value::Ptr(_) => "pointer",
             Value::Ref(_) => "reference",

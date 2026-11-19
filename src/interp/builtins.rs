@@ -342,6 +342,39 @@ impl<'a> Interp<'a> {
                 other => panic(format!("take on a {}", other.type_name())),
             },
 
+            // ---- shared values and mutexes
+            "Shared::new" => Ok(Value::Shared(Value::slot(vec![a[0].clone()]))),
+            "Mutex::new" => Ok(Value::Mutex(Value::slot(vec![a[0].clone(), Value::Bool(false)]))),
+            "Mutex::get" | "Mutex::set" | "Mutex::update" | "Mutex::with" | "Mutex::into_inner" => {
+                let Value::Mutex(s) = &a[0] else { return panic(format!("a mutex method on a {}", a[0].type_name())) };
+                let s = s.clone();
+                if matches!(s.borrow()[1], Value::Bool(true)) {
+                    return panic("deadlock: the mutex is already locked by this thread");
+                }
+                let cur = s.borrow()[0].clone();
+                match key {
+                    "Mutex::get" => Ok(clone_value(&cur)),
+                    "Mutex::into_inner" => Ok(cur),
+                    "Mutex::set" => {
+                        s.borrow_mut()[0] = a[1].clone();
+                        Ok(Value::Unit)
+                    }
+                    _ => {
+                        // the function runs with the mutex locked (using it again inside would wait for itself)
+                        s.borrow_mut()[1] = Value::Bool(true);
+                        let r = self.call_value(a[1].clone(), vec![cur]);
+                        s.borrow_mut()[1] = Value::Bool(false);
+                        let r = r?;
+                        if key == "Mutex::update" {
+                            s.borrow_mut()[0] = r;
+                            Ok(Value::Unit)
+                        } else {
+                            Ok(r)
+                        }
+                    }
+                }
+            }
+
             // ---- maps
             "Map::new" => Ok(Value::Map(Rc::new(RefCell::new(MapVal::default())))),
             "Map::contains" => match &a[0] {
@@ -421,6 +454,8 @@ pub(super) fn clone_value<'a>(v: &Value<'a>) -> Value<'a> {
         Value::Array(s) => Value::Array(Value::slot(all(s))),
         Value::Vec(s) => Value::Vec(Value::slot(all(s))),
         Value::Box(s) => Value::Box(Value::slot(all(s))),
+        // another handle to the same value
+        Value::Shared(s) => Value::Shared(s.clone()),
         Value::Struct(a, s) => Value::Struct(*a, Value::slot(all(s))),
         Value::Variant(a, i, s) => Value::Variant(*a, *i, Value::slot(all(s))),
         Value::String(s) => Value::String(Rc::new(RefCell::new(s.borrow().clone()))),

@@ -243,7 +243,8 @@ impl<'a> Checker<'a> {
             "Num" => ty.is_numeric(),
             "Int" => matches!(ty, Ty::Int(_)),
             "Float" => matches!(ty, Ty::Float(_)),
-            "Clone" => true,
+            // a mutex and a task handle have one owner
+            "Clone" => !matches!(ty, Ty::Adt(id, _) if self.prog.adt(*id).module == 0 && matches!(self.prog.adt(*id).name.as_str(), "Mutex" | "Task")),
             "Copy" => match ty {
                 Ty::Tuple(ts) => all(self, ts, "Copy"),
                 Ty::Array(t, _) => all(self, std::slice::from_ref(t), "Copy"),
@@ -304,6 +305,7 @@ impl<'a> Checker<'a> {
         // a box is looked through to what it holds
         while let Some(inner) = self.box_inner(&cur) {
             boxes += 1;
+            let inner = self.infer.shallow(&inner);
             out.push((inner.clone(), boxes));
             cur = inner;
         }
@@ -321,12 +323,17 @@ impl<'a> Checker<'a> {
         out
     }
 
-    /// `T` if `ty` is `Box<T>`.
+    /// `T` if `ty` is `Box<T>` or `Shared<T>` (both are looked through to what they hold).
     pub(crate) fn box_inner(&self, ty: &Ty) -> Option<Ty> {
         match ty {
-            Ty::Adt(id, args) if args.len() == 1 && self.prog.adt(*id).name == "Box" && self.prog.adt(*id).module == 0 => Some(args[0].clone()),
+            Ty::Adt(id, args) if args.len() == 1 && matches!(self.prog.adt(*id).name.as_str(), "Box" | "Shared") && self.prog.adt(*id).module == 0 => Some(args[0].clone()),
             _ => None,
         }
+    }
+
+    /// Is `ty` a `Shared<T>`? Its contents can be read but not changed.
+    pub(crate) fn is_shared(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Adt(id, args) if args.len() == 1 && self.prog.adt(*id).name == "Shared" && self.prog.adt(*id).module == 0)
     }
 
     /// Find a method named `name` on `recv`. With `want_self` the method must take
