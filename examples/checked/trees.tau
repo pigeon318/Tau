@@ -1,0 +1,75 @@
+// Recursive data with Box: a linked list, a binary search tree, and an expression tree.
+//
+// A `Box<T>` owns one value on the heap, which is what lets a type contain itself.
+// `match own x { ... }` takes an owned value apart, moving its pieces out; `b.take()` gives back the value in a box.
+
+enum List {
+    Nil
+    Cons(i64, Box<List>)
+}
+
+fn sum(l: List) -> i64 {
+    match l {
+        Nil => 0
+        Cons(x, rest) => x + sum(rest)    // `rest` is a Box<List>, used where a List is borrowed
+    }
+}
+
+enum Tree {
+    Leaf
+    Node(Box<Tree>, i64, Box<Tree>)
+}
+
+fn insert(own t: Tree, v: i64) -> Tree {
+    match own t {
+        Leaf => Node(Box.new(Leaf), v, Box.new(Leaf))
+        Node(l, x, r) => {
+            if v < x {
+                Node(Box.new(insert(l.take(), v)), x, r)
+            } else {
+                Node(l, x, Box.new(insert(r.take(), v)))
+            }
+        }
+    }
+}
+
+fn in_order(t: Tree, out: mut Vec<i64>) {
+    match t {
+        Leaf => {}
+        Node(l, x, r) => {
+            in_order(l, mut out)
+            out.push(x)
+            in_order(r, mut out)
+        }
+    }
+}
+
+enum Expr {
+    Num(f64)
+    Add(Box<Expr>, Box<Expr>)
+    Mul(Box<Expr>, Box<Expr>)
+}
+
+fn eval(e: Expr) -> f64 {
+    match e {
+        Num(x) => x
+        Add(a, b) => eval(a) + eval(b)
+        Mul(a, b) => eval(a) * eval(b)
+    }
+}
+
+fn main() {
+    let mut list = Nil
+    for i in 1..=10 { list = Cons(i, Box.new(list)) }
+    print("sum = {sum(list)}")
+
+    let mut tree = Leaf
+    for v in [50, 30, 70, 20, 40, 60, 80] { tree = insert(tree, v) }
+    let mut sorted = vec[0]
+    sorted.pop()
+    in_order(tree, mut sorted)
+    print("sorted = {sorted}")
+
+    let e = Add(Box.new(Num(2.0)), Box.new(Mul(Box.new(Num(3.0)), Box.new(Num(4.0)))))
+    print("2 + 3 * 4 = {eval(e)}")
+}

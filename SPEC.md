@@ -245,6 +245,32 @@ fn main() {
 }
 ```
 
+### Boxes and recursive types
+
+`Box<T>` owns one `T` on the heap. It is what lets a type contain itself (a type cannot hold a value of its own type directly, because it would have to be infinitely large; it can hold a `Box` of it, or a `Vec` of it):
+
+```
+enum List {
+    Nil
+    Cons(i64, Box<List>)
+}
+
+fn sum(l: List) -> i64 {
+    match l {
+        Nil => 0
+        Cons(x, rest) => x + sum(rest)       // rest: Box<List>, used where a List is borrowed
+    }
+}
+
+let l = Cons(1, Box.new(Cons(2, Box.new(Nil))))
+```
+
+- `Box.new(x)` moves `x` into a box; `b.take()` moves it out again (`b` is gone).
+- A box is looked through wherever a borrow of the value it holds is wanted: a field access (`b.value`), a method call (`b.push(1)`), a `match` (when an arm has a pattern), and an argument passed to a *borrowed* parameter of the held type (`sum(rest)`). It is not looked through where a value is moved: `let x: T = b` and an `own` parameter of type `T` are type errors; use `b.take()`.
+- A box can be compared (`==`, `<`) and printed when what it holds can.
+- **Taking an owned value apart.** `match t { Node(l, x, r) => ... }` on a variable binds *views* of its parts, which cannot be moved. To move the parts out, mark the scrutinee: `match own t { Node(l, x, r) => Node(Box.new(f(l.take())), x, r) }`. `own e` is the value of `e` moved out of its place (a copy for a `Copy` type), so `t` cannot be used afterwards, and a borrowed parameter cannot be moved from. This is how a tree is rebuilt by value (see `examples/checked/trees.tau`).
+- Mutating through a `match` binding is not possible yet (the bindings are copies of the parts); rebuild the value as above, or keep the data in a `Vec`.
+
 Escape hatches:
 - `Shared<T>`: reference-counted shared ownership, atomic when sent across threads. For mutation, `Shared<Mutex<T>>`.
 - `unsafe { ... }`: raw pointers, manual allocation (`alloc` / `free`), unchecked indexing, calling C.

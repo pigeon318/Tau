@@ -113,6 +113,13 @@ TAU_NORETURN static void tau_panic(const char *msg, size_t len) {
 TAU_NORETURN static void tau_panic_cstr(const char *m) { tau_panic(m, strlen(m)); }
 TAU_NORETURN static void tau_panic_str(tau_str s) { tau_panic((const char *)s.ptr, s.len); }
 
+/* an allocation that panics when memory runs out (boxes) */
+static void *tau_xmalloc(size_t n) {
+    void *p = malloc(n ? n : 1);
+    if (!p) tau_panic_cstr("out of memory");
+    return p;
+}
+
 /* ---------------------------------------------------------------- integer formatting */
 
 static size_t tau_u128_to_str(char *out, unsigned __int128 v) {

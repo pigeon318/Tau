@@ -547,3 +547,60 @@ fn parts_of_a_tensor_are_copies_that_nothing_keeps_borrowed() {
     ok_m("let mut m = Tensor<f64, [_, _]>.zeros(3, 3)\n let row = m[0, ..]\n m[1, ..] = row\n let col = m[.., 0]\n m[.., 1] = col\n m[2, 2] = 5.0\n print(row)\n print(col)\n print(m)");
     err_m("let mut m = Tensor<f64, [_, _]>.zeros(3, 3)\n let r = m[0, ..]\n let s = r\n print(r)", "use of moved value");
 }
+
+// ------------------------------------------------------------------ Box<T> and `own`
+
+const TREE: &str = "\
+enum Tree {
+    Leaf
+    Node(Box<Tree>, i64, Box<Tree>)
+}
+fn depth(t: Tree) -> i64 {
+    match t {
+        Leaf => 0
+        Node(l, _, r) => 1 + max(depth(l), depth(r))
+    }
+}
+";
+
+fn with_tree(rest: &str) -> String {
+    format!("{TREE}{rest}")
+}
+
+#[test]
+fn boxes_are_looked_through_where_a_borrow_is_wanted() {
+    ok(&with_tree("fn main() {\n let t = Node(Box.new(Leaf), 1, Box.new(Leaf))\n print(depth(t))\n print(depth(t))\n}\n"));
+    // a field, a method and a match see through a box
+    ok("struct P { x: i64 }\nfn main() {\n let b = Box.new(P(1))\n let v = Box.new(vec[1, 2])\n print(b.x + v.len as i64)\n match v { x => print(x) }\n}\n");
+}
+
+#[test]
+fn a_box_is_moved_by_take_and_by_being_passed_on() {
+    err("fn main() {\n let b = Box.new(vec[1])\n let v = b.take()\n print(v.len)\n print(b.len)\n}\n", "use of moved value");
+    err("fn eat(own b: Box<i64>) {}\nfn main() {\n let b = Box.new(1)\n eat(b)\n eat(b)\n}\n", "use of moved value");
+}
+
+#[test]
+fn match_own_moves_the_parts_out_of_an_owned_value() {
+    // without `own`, the parts are views and cannot be moved
+    err(
+        &with_tree("fn f(own t: Tree) -> Tree {\n match t {\n  Leaf => Leaf\n  Node(l, _, _) => f(l.take())\n }\n}\nfn main() {}\n"),
+        "it is a borrowed view of another value",
+    );
+    // with it they can
+    ok(&with_tree("fn f(own t: Tree) -> Tree {\n match own t {\n  Leaf => Leaf\n  Node(l, x, r) => Node(Box.new(f(l.take())), x, r)\n }\n}\nfn main() {}\n"));
+    // `t` is gone afterwards
+    err(
+        &with_tree("fn f(own t: Tree) -> i64 {\n let n = match own t {\n  Leaf => 0\n  Node(_, x, _) => x\n }\n n + depth(t)\n}\nfn main() {}\n"),
+        "use of moved value",
+    );
+    // a borrowed parameter cannot be moved out of
+    err(&with_tree("fn f(t: Tree) -> i64 {\n match own t {\n  Leaf => 0\n  Node(_, x, _) => x\n }\n}\nfn main() {}\n"), "only borrowed");
+}
+
+#[test]
+fn own_copies_a_copy_value_and_moves_anything_else() {
+    ok_m("let a = 5\n let b = own a\n print(a + b)");
+    err_m("let v = vec[1]\n let w = own v\n print(v.len)", "use of moved value");
+    ok_m("let v = vec[1]\n let w = own v\n print(w.len)");
+}

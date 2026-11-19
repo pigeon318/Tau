@@ -121,7 +121,35 @@ impl<'a> Interp<'a> {
 
     // ------------------------------------------------------------ expressions
 
+    /// Evaluate `e`. If the checker says it is a box used as the value it holds (`Results::derefs`),
+    /// the box is looked through.
     pub fn eval(&mut self, e: &'a Expr, f: &Frame<'a>) -> R<'a, Value<'a>> {
+        let v = self.eval_plain(e, f)?;
+        if self.res.derefs.is_empty() {
+            return Ok(v);
+        }
+        match self.res.derefs.get(&NodeKey::of(e)) {
+            Some(&n) => self.unbox(v, n),
+            None => Ok(v),
+        }
+    }
+
+    /// Look through `n` layers of `Box` (and references to them).
+    fn unbox(&mut self, mut v: Value<'a>, n: u32) -> R<'a, Value<'a>> {
+        for _ in 0..n {
+            v = self.deref(v)?;
+            match v {
+                Value::Box(s) => {
+                    let inner = s.borrow()[0].clone();
+                    v = inner;
+                }
+                other => return Ok(other),
+            }
+        }
+        Ok(v)
+    }
+
+    fn eval_plain(&mut self, e: &'a Expr, f: &Frame<'a>) -> R<'a, Value<'a>> {
         self.steps += 1;
         if self.steps > self.max_steps {
             return panic("step limit exceeded");
@@ -298,6 +326,7 @@ impl<'a> Interp<'a> {
             }
             ExprKind::Continue => Err(Ctl::Continue),
             ExprKind::MutBorrow(inner) => self.eval(inner, f),
+            ExprKind::Own(inner) => self.eval(inner, f),
             ExprKind::ParReduce { op, pat, iter, body } => self.par_reduce(e, &op.name, pat, iter, body, f),
             ExprKind::Spawn(b) => {
                 // tasks run to completion when spawned; what they print is kept until they are joined
@@ -368,6 +397,21 @@ impl<'a> Interp<'a> {
 
     /// The place an expression denotes, for assignment and `mut` arguments.
     pub fn place(&mut self, e: &'a Expr, f: &Frame<'a>) -> R<'a, RefTarget<'a>> {
+        let mut t = self.place_plain(e, f)?;
+        // a box used as the value it holds: the place is its slot
+        if !self.res.derefs.is_empty() {
+            for _ in 0..self.res.derefs.get(&NodeKey::of(e)).copied().unwrap_or(0) {
+                let v = self.load(&t)?;
+                match self.deref(v)? {
+                    Value::Box(s) => t = RefTarget::Slot(s, 0),
+                    _ => break,
+                }
+            }
+        }
+        Ok(t)
+    }
+
+    fn place_plain(&mut self, e: &'a Expr, f: &Frame<'a>) -> R<'a, RefTarget<'a>> {
         match &e.kind {
             ExprKind::Ident(name) => match f.env.find(name) {
                 Some((env, i)) => {

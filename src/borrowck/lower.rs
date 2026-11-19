@@ -762,6 +762,11 @@ impl<'r> Lowerer<'r> {
                 Operand::Value(vec![])
             }
             ExprKind::MutBorrow(inner) => self.lower(inner),
+            // `own x` moves `x` out (a copy for a `Copy` type); the result is a value, not a place
+            ExprKind::Own(inner) => {
+                let op = self.lower(inner);
+                Operand::Value(self.consume_value(op, inner.span))
+            }
             ExprKind::ParReduce { pat, iter, body, .. } => {
                 self.lower_par_reduce(pat, iter, body);
                 Operand::Value(vec![])

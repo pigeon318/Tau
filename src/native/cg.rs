@@ -83,7 +83,7 @@ fn sub_exprs<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
             out.push(value);
             out.push(len);
         }
-        ExprKind::Unary { expr, .. } | ExprKind::Cast { expr, .. } | ExprKind::Try(expr) | ExprKind::MutBorrow(expr) => out.push(expr),
+        ExprKind::Unary { expr, .. } | ExprKind::Cast { expr, .. } | ExprKind::Try(expr) | ExprKind::MutBorrow(expr) | ExprKind::Own(expr) => out.push(expr),
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::Assign { lhs, rhs, .. } => {
             out.push(lhs);
             out.push(rhs);
@@ -383,6 +383,7 @@ impl<'a> Cg<'a> {
                         "String" => return Ok("String".to_string()),
                         "Vec" => return Ok(format!("Vec_{}", self.mangle(&args[0])?)),
                         "Task" => return Ok(format!("Task_{}", self.mangle(&args[0])?)),
+                        "Box" => return Ok(format!("Box_{}", self.mangle(&args[0])?)),
                         "Range" | "Ptr" | "Cluster" => {
                             return unsupported(self.describe(ty));
                         }
@@ -518,6 +519,18 @@ impl<'a> Cg<'a> {
                 self.type_names.insert(key, name.clone());
                 name
             }
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Box") => {
+                let key = self.mangle(ty)?;
+                if let Some(nm) = self.type_names.get(&key) {
+                    return Ok(nm.clone());
+                }
+                // (a recursive type is already named, and declared, while its fields are being generated)
+                let et = self.cty(&args[0])?;
+                let name = format!("box_{key}");
+                self.types.push_str(&format!("typedef struct {{ {et} *p; }} {name};\n"));
+                self.type_names.insert(key, name.clone());
+                name
+            }
             Ty::Adt(id, args) if self.is_builtin_adt(*id, "Vec") => {
                 let key = self.mangle(ty)?;
                 if let Some(nm) = self.type_names.get(&key) {
@@ -537,6 +550,10 @@ impl<'a> Cg<'a> {
                 let all = self.adt_fields(*id, args);
                 let is_enum = self.is_enum(*id);
                 let name = format!("{}_{key}", if is_enum { "en" } else { "st" });
+                // Name and declare the type before its fields are generated: a field may point back to
+                // it (`Box<List>` inside `List`, or a `Vec` of the type), and a pointer needs only the name.
+                self.type_names.insert(key.clone(), name.clone());
+                self.types.push_str(&format!("typedef struct {name} {name};\n"));
                 let mut text = String::new();
                 if is_enum {
                     let mut union = String::new();
@@ -552,9 +569,9 @@ impl<'a> Cg<'a> {
                         union.push_str(&format!(" struct {{{fs} }} v{vi};"));
                     }
                     if union.is_empty() {
-                        text.push_str(&format!("typedef struct {{ uint32_t tag; }} {name};\n"));
+                        text.push_str(&format!("struct {name} {{ uint32_t tag; }};\n"));
                     } else {
-                        text.push_str(&format!("typedef struct {{ uint32_t tag; union {{{union} }} u; }} {name};\n"));
+                        text.push_str(&format!("struct {name} {{ uint32_t tag; union {{{union} }} u; }};\n"));
                     }
                 } else {
                     let mut fs = String::new();
@@ -565,10 +582,9 @@ impl<'a> Cg<'a> {
                     if fs.is_empty() {
                         fs.push_str(" uint8_t unit_;");
                     }
-                    text.push_str(&format!("typedef struct {{{fs} }} {name};\n"));
+                    text.push_str(&format!("struct {name} {{{fs} }};\n"));
                 }
                 self.types.push_str(&text);
-                self.type_names.insert(key, name.clone());
                 name
             }
             other => return unsupported(self.describe(other)),
@@ -623,6 +639,30 @@ impl<'a> Cg<'a> {
         }
     }
 
+    /// `T` if `ty` is `Box<T>`.
+    fn box_inner(&self, ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Box") => Some(args[0].clone()),
+            _ => None,
+        }
+    }
+
+    /// How many `Box` layers the checker says `e` is looked through (see `Results::derefs`).
+    fn deref_layers(&self, e: &Expr) -> u32 {
+        self.res.derefs.get(&NodeKey::of(e)).copied().unwrap_or(0)
+    }
+
+    /// The type of `e` after looking through its boxes.
+    fn eff_ty(&self, e: &Expr) -> Ty {
+        let mut t = self.ty_of(e);
+        for _ in 0..self.deref_layers(e) {
+            if let Some(i) = self.box_inner(&t) {
+                t = i;
+            }
+        }
+        t
+    }
+
     fn is_string(&self, ty: &Ty) -> bool {
         matches!(ty, Ty::Adt(id, _) if self.is_builtin_adt(*id, "String"))
     }
@@ -639,7 +679,7 @@ impl<'a> Cg<'a> {
             Ty::Array(t, _) => self.needs_drop(t),
             Ty::Adt(id, args) => {
                 let d = self.prog.adt(*id);
-                if d.module == 0 && matches!(d.name.as_str(), "String" | "Vec" | "Task") {
+                if d.module == 0 && matches!(d.name.as_str(), "String" | "Vec" | "Task" | "Box") {
                     return true;
                 }
                 if self.map_kv(ty).is_some() {
@@ -685,6 +725,13 @@ impl<'a> Cg<'a> {
                 body.push_str("free(p->ptr);\n");
             }
             Ty::Adt(id, _) if self.is_builtin_adt(*id, "Task") => body.push_str("tau_task_drop(p);\n"),
+            Ty::Adt(id, args) if self.is_builtin_adt(*id, "Box") => {
+                body.push_str("if (p->p) {\n");
+                if let Some(f) = self.drop_fn(&args[0])? {
+                    body.push_str(&format!("{f}(p->p);\n"));
+                }
+                body.push_str("free(p->p);\n}\n");
+            }
             Ty::Adt(id, args) if self.is_builtin_adt(*id, "Vec") => {
                 if let Some(f) = self.drop_fn(&args[0])? {
                     body.push_str(&format!("for (size_t i = 0; i < p->len; i++) {f}(&p->ptr[i]);\n"));
@@ -1114,7 +1161,19 @@ impl<'a> Cg<'a> {
     // ------------------------------------------------------------ expression helpers
 
 
+    /// The C lvalue of the place `e` and its type; a box the checker looks through is dereferenced.
     fn place(&mut self, e: &'a Expr) -> CgResult<(String, Ty)> {
+        let (mut p, mut t) = self.place_raw(e)?;
+        for _ in 0..self.deref_layers(e) {
+            if let Some(inner) = self.box_inner(&t) {
+                p = format!("(*({p}).p)");
+                t = inner;
+            }
+        }
+        Ok((p, t))
+    }
+
+    fn place_raw(&mut self, e: &'a Expr) -> CgResult<(String, Ty)> {
         match &e.kind {
             ExprKind::Ident(name) => {
                 let Some(l) = self.lookup(name) else { return unsupported(format!("assigning to `{name}`")) };
@@ -1216,12 +1275,18 @@ impl<'a> Cg<'a> {
     /// end of the statement.
     fn borrow(&mut self, e: &'a Expr) -> CgResult<String> {
         let ty = self.ty_of(e);
-        if self.needs_drop(&ty) && !self.is_place(e) {
+        let mut code = if self.needs_drop(&ty) && !self.is_place(e) {
             let v = self.expr(e)?;
             let t = self.new_temp(&ty)?;
-            return Ok(format!("(*({{ {t} = {v}; &{t}; }}))"));
+            format!("(*({{ {t} = {v}; &{t}; }}))")
+        } else {
+            self.expr(e)?
+        };
+        // a box that is used as the value it holds
+        for _ in 0..self.deref_layers(e) {
+            code = format!("(*({code}).p)");
         }
-        self.expr(e)
+        Ok(code)
     }
 
     /// A view (slice or `str`) of the C lvalue `place` of type `ty`.
@@ -1266,7 +1331,7 @@ impl<'a> Cg<'a> {
 
     /// `e` passed to a parameter of type `to`: by borrow (a view if the types differ).
     fn borrowed_as(&mut self, e: &'a Expr, to: &Ty) -> CgResult<String> {
-        let from = self.ty_of(e);
+        let from = self.eff_ty(e);
         if self.coerces_to_view(&from, to) {
             let b = self.borrow(e)?;
             return self.view(&b, &from);
@@ -1349,6 +1414,11 @@ impl<'a> Cg<'a> {
             Ty::Never => format!("tau_fmt_unit({buf}, {value});"),
             Ty::Tuple(ts) if ts.is_empty() => format!("tau_fmt_unit({buf}, {value});"),
             t if self.is_string(t) => format!("{{ tau_buf *sv_ = &({value}); tau_buf_push({buf}, sv_->ptr, sv_->len); }}"),
+            t if self.box_inner(t).is_some() => {
+                let inner = self.box_inner(t).unwrap();
+                let value_inner = format!("(*({value}).p)");
+                self.fmt_stmt(buf, &value_inner, &inner)?
+            }
             Ty::Tuple(_) | Ty::Array(..) | Ty::Slice(_) | Ty::Adt(..) => {
                 let name = self.fmt_helper(ty)?;
                 format!("{name}({buf}, {value});")
@@ -1585,6 +1655,10 @@ impl<'a> Cg<'a> {
                 format!("{n}({a}, {b})")
             }
             t if self.is_string(t) => format!("tau_str_eq((tau_str){{ ({a}).ptr, ({a}).len }}, (tau_str){{ ({b}).ptr, ({b}).len }})"),
+            t if self.box_inner(t).is_some() => {
+                let inner = self.box_inner(t).unwrap();
+                self.eq_expr(&format!("(*({a}).p)"), &format!("(*({b}).p)"), &inner)?
+            }
             t if self.seq_elem(t).is_some() => {
                 let n = self.seq_helper(ty, "eq")?;
                 format!("{n}({a}, {b})")
@@ -1610,6 +1684,10 @@ impl<'a> Cg<'a> {
                 format!("{n}({a}, {b})")
             }
             t if self.is_string(t) => format!("tau_str_cmp((tau_str){{ ({a}).ptr, ({a}).len }}, (tau_str){{ ({b}).ptr, ({b}).len }})"),
+            t if self.box_inner(t).is_some() => {
+                let inner = self.box_inner(t).unwrap();
+                self.cmp_expr(&format!("(*({a}).p)"), &format!("(*({b}).p)"), &inner)?
+            }
             t if self.seq_elem(t).is_some() => {
                 let n = self.seq_helper(ty, "cmp")?;
                 format!("{n}({a}, {b})")
@@ -1724,6 +1802,7 @@ impl<'a> Cg<'a> {
             }
             ExprKind::Try(inner) => self.try_expr(&ty, inner),
             ExprKind::MutBorrow(inner) => self.expr(inner),
+            ExprKind::Own(inner) => self.owned(inner),
             ExprKind::Imag(v) => Ok(format!("((tau_c128){{ 0.0, {v:?} }})")),
             ExprKind::Array(es) => self.array_literal(&ty, es),
             ExprKind::ArrayRepeat { value, .. } => self.array_repeat(&ty, value),
@@ -1977,7 +2056,7 @@ impl<'a> Cg<'a> {
             }
             _ => {}
         }
-        let bt = self.ty_of(base);
+        let bt = self.eff_ty(base);
         if name == "len" && matches!(bt, Ty::Tensor(..)) {
             let b = self.borrow(base)?;
             return Ok(format!("((uint64_t)tau_t_len(&({b})))"));
@@ -2700,6 +2779,20 @@ impl<'a> Cg<'a> {
                 let x = self.expr(args[0])?;
                 Ok(format!("tau_time_dur({x})"))
             }
+            "Box::new" => {
+                let Some(inner) = self.box_inner(ret) else { return unsupported("this `Box.new`") };
+                let it = self.cty(&inner)?;
+                let bt = self.cty(ret)?;
+                let v = self.convert(ops[0].0, &inner)?;
+                Ok(format!("({{ {it} bv_ = {v}; {bt} b_; b_.p = ({it} *)tau_xmalloc(sizeof({it})); *b_.p = bv_; b_; }})"))
+            }
+            "Box::take" => {
+                let Some(inner) = self.box_inner(&ops[0].2) else { return unsupported("this `take`") };
+                let it = self.cty(&inner)?;
+                let bt = self.cty(&ops[0].2)?;
+                let b = self.convert(ops[0].0, &ops[0].2)?;
+                Ok(format!("({{ {bt} b_ = {b}; {it} v_ = *b_.p; free(b_.p); v_; }})"))
+            }
             "Map::new" => {
                 let mt = self.cty(ret)?;
                 Ok(format!("(({mt}){{0}})"))
@@ -2803,6 +2896,15 @@ impl<'a> Cg<'a> {
             }
             t if self.is_string(t) => {
                 body.push_str("r.ptr = 0; r.len = r.cap = 0; tau_buf_push(&r, p->ptr, p->len);\n");
+            }
+            t if self.box_inner(t).is_some() => {
+                let inner = self.box_inner(t).unwrap();
+                let it = self.cty(&inner)?;
+                body.push_str(&format!("r.p = ({it} *)tau_xmalloc(sizeof({it})); "));
+                match self.clone_fn(&inner)? {
+                    Some(f) => body.push_str(&format!("*r.p = {f}(p->p);\n")),
+                    None => body.push_str("*r.p = *p->p;\n"),
+                }
             }
             t if self.vec_elem(t).is_some() => {
                 let el = self.vec_elem(t).unwrap();
@@ -3976,10 +4078,12 @@ static {vect} {top}({mt} *m, uint64_t n) {{
 
 
     fn match_expr(&mut self, ty: &Ty, scrutinee: &'a Expr, arms: &'a [MatchArm]) -> CgResult<String> {
-        let st = self.ty_of(scrutinee);
+        let looked_through = self.deref_layers(scrutinee) > 0;
+        let st = self.eff_ty(scrutinee);
         let sct = self.cty(&st)?;
-        let owned_src = self.needs_drop(&st) && !self.is_place(scrutinee);
-        let sv = self.expr(scrutinee)?;
+        // matching on a box borrows what it holds
+        let owned_src = !looked_through && self.needs_drop(&st) && !self.is_place(scrutinee);
+        let sv = if looked_through { self.borrow(scrutinee)? } else { self.expr(scrutinee)? };
         let never = Self::is_never(ty);
         let ct = self.cty(ty)?;
         let (s, r, end) = (self.fresh("scrut"), self.fresh("m"), self.fresh("mend"));
