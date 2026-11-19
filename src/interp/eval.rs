@@ -173,10 +173,13 @@ impl<'a> Interp<'a> {
                 for p in pieces {
                     match p {
                         StrPiece::Lit(l) => s.push_str(l),
-                        StrPiece::Interp(inner) => {
+                        StrPiece::Interp(inner, fmt) => {
                             let v = self.eval(inner, f)?;
                             let ty = self.ty_of(inner, f);
-                            s.push_str(&self.display_ty(&v, &ty)?);
+                            match fmt {
+                                None => s.push_str(&self.display_ty(&v, &ty)?),
+                                Some(fmt) => s.push_str(&self.display_spec(&v, &ty, &fmt.spec)?),
+                            }
                         }
                     }
                 }

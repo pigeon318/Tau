@@ -632,7 +632,7 @@ impl<'r> Lowerer<'r> {
             | ExprKind::TypeApp { .. } => Operand::Value(vec![]),
             ExprKind::Str(pieces) => {
                 for p in pieces {
-                    if let StrPiece::Interp(inner) = p {
+                    if let StrPiece::Interp(inner, _) = p {
                         let op = self.lower(inner);
                         self.consume_borrow(op, false, inner.span);
                     }

@@ -18,9 +18,12 @@ pub fn expr(e: &Expr) -> String {
             for p in pieces {
                 match p {
                     StrPiece::Lit(l) => s.push_str(l),
-                    StrPiece::Interp(e) => {
+                    StrPiece::Interp(e, f) => {
                         s.push('{');
                         s.push_str(&expr(e));
+                        if let Some(f) = f {
+                            s.push_str(&format!(":{:?}", f.spec));
+                        }
                         s.push('}');
                     }
                 }

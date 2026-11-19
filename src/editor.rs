@@ -266,7 +266,7 @@ impl<'a> Collector<'a> {
             }
             ExprKind::Str(ps) => {
                 for p in ps {
-                    if let StrPiece::Interp(x) = p {
+                    if let StrPiece::Interp(x, _) = p {
                         self.expr(x);
                     }
                 }

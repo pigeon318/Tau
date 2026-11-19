@@ -73,7 +73,7 @@ fn sub_exprs<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
     match &e.kind {
         ExprKind::Str(ps) => {
             for p in ps {
-                if let StrPiece::Interp(x) = p {
+                if let StrPiece::Interp(x, _) = p {
                     out.push(x);
                 }
             }
@@ -1427,6 +1427,55 @@ impl<'a> Cg<'a> {
         })
     }
 
+    /// A `tau_spec` literal for a format spec.
+    fn spec_literal(spec: &crate::fmtspec::FmtSpec) -> String {
+        use crate::fmtspec::{Align, FmtType};
+        let align = match spec.align {
+            None => -1,
+            Some(Align::Left) => 0,
+            Some(Align::Center) => 1,
+            Some(Align::Right) => 2,
+        };
+        let ty = match spec.ty {
+            None => 0,
+            Some(FmtType::LowerHex) => 1,
+            Some(FmtType::UpperHex) => 2,
+            Some(FmtType::Binary) => 3,
+            Some(FmtType::Octal) => 4,
+            Some(FmtType::LowerExp) => 5,
+            Some(FmtType::UpperExp) => 6,
+        };
+        format!(
+            "((tau_spec){{ {}u, {align}, {}, {}, {}, {}, {}, {ty} }})",
+            spec.fill as u32,
+            spec.plus as u8,
+            spec.alt as u8,
+            spec.zero as u8,
+            spec.width.unwrap_or(0),
+            spec.precision.map(|p| p as i64).unwrap_or(-1),
+        )
+    }
+
+    /// Like `fmt_stmt`, for an interpolation with a format spec (`{x:>8.3}`).
+    fn fmt_spec_stmt(&mut self, buf: &str, value: &str, ty: &Ty, spec: &crate::fmtspec::FmtSpec) -> CgResult<String> {
+        let sp = Self::spec_literal(spec);
+        Ok(match ty {
+            Ty::Int(it) => {
+                let pattern = if it.is_signed() { format!("(unsigned __int128)(__int128)({value})") } else { format!("(unsigned __int128)({value})") };
+                format!("tau_fmt_int_spec({buf}, {pattern}, {}, {}, {sp});", it.is_signed() as u8, it.bits())
+            }
+            Ty::Float(f) => format!("tau_fmt_float_spec({buf}, (double)({value}), {}, {sp});", (*f == FloatTy::F32) as u8),
+            Ty::Complex(f) => format!("tau_fmt_complex_spec({buf}, ({value}).re, ({value}).im, {}, {sp});", (*f == FloatTy::F32) as u8),
+            Ty::Str => format!("tau_fmt_text_spec({buf}, {value}, {sp});"),
+            t if self.is_string(t) => format!("{{ tau_buf *sv_ = &({value}); tau_fmt_text_spec({buf}, (tau_str){{ sv_->ptr, sv_->len }}, {sp}); }}"),
+            _ => {
+                // anything else: its text, padded
+                let inner = self.fmt_stmt("&ft_", value, ty)?;
+                format!("{{ tau_buf ft_ = {{0}}; {inner} tau_fmt_other_spec({buf}, &ft_, {sp}); free(ft_.ptr); }}")
+            }
+        })
+    }
+
     /// The implementation of trait method `method` of the (prelude) trait `trait_name` for the
     /// concrete type `ty`, if there is one.
     fn trait_impl_fn(&self, trait_name: &str, method: &str, ty: &Ty) -> Option<(FnId, Subst)> {
@@ -1849,13 +1898,16 @@ impl<'a> Cg<'a> {
                         s.push_str(&format!("tau_buf_push({buf}, {}, {});\n", c_bytes_literal(l), l.len()));
                     }
                 }
-                StrPiece::Interp(inner) => {
+                StrPiece::Interp(inner, fmt) => {
                     let ty = self.ty_of(inner);
                     let ct = self.cty(&ty)?;
                     let v = self.borrow(inner)?;
                     let tmp = self.fresh("fv");
                     s.push_str(&format!("{{ {ct} {tmp} = {v}; "));
-                    s.push_str(&self.fmt_stmt(buf, &tmp, &ty)?);
+                    match fmt {
+                        None => s.push_str(&self.fmt_stmt(buf, &tmp, &ty)?),
+                        Some(f) => s.push_str(&self.fmt_spec_stmt(buf, &tmp, &ty, &f.spec)?),
+                    }
                     s.push_str(" }\n");
                 }
             }
@@ -2486,7 +2538,7 @@ impl<'a> Cg<'a> {
                 let a = args[0];
                 let ty = self.ty_of(a);
                 if let ExprKind::Str(pieces) = &a.kind {
-                    if pieces.iter().any(|p| matches!(p, StrPiece::Interp(_))) {
+                    if pieces.iter().any(|p| matches!(p, StrPiece::Interp(..))) {
                         let body = self.interp_into("o_", pieces)?;
                         return Ok(format!("({{ tau_buf *o_ = tau_out_begin(); {body}tau_buf_char(o_, '\\n'); tau_out_end(); ((tau_unit)0); }})"));
                     }

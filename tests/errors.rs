@@ -93,3 +93,35 @@ fn unit_literals_are_not_supported_yet() {
     let out = err("fn f() { let v = 9.8 m }");
     assert!(out.contains("new line or `}`"), "{out}");
 }
+
+// ------------------------------------------------------------------ format specs
+
+#[test]
+fn a_bad_format_spec_is_explained() {
+    let out = err("fn main() {\n    print(\"{x:.2f}\")\n}");
+    assert!(out.contains("invalid format `.2f`"), "{out}");
+    assert!(out.contains("unknown format type `f`"), "{out}");
+    assert!(out.contains("2:15"), "the spec is underlined: {out}");
+    assert!(out.contains("[[fill]align]"), "{out}");
+    let out = err("fn main() {\n    print(\"{x:99999999}\")\n}");
+    assert!(out.contains("too large"), "{out}");
+    let out = err("fn main() {\n    print(\"{x:.}\")\n}");
+    assert!(out.contains("followed by the number of digits"), "{out}");
+    // a colon that is not a format at all still gives the usual error
+    let out = err("fn main() {\n    print(\"{x +}\")\n}");
+    assert!(!out.contains("invalid format"), "{out}");
+}
+
+#[test]
+fn colons_in_expressions_are_not_formats() {
+    // a closure with a typed parameter, a string and a character that contain colons
+    for src in [
+        "fn main() { print(\"{apply(|x: i64| x * 2, 3)}\") }",
+        "fn main() { print(\"{m[\"a:b\"]}\") }",
+        "fn main() { print(\"{':'}\") }",
+        "fn main() { print(\"{f(1, 2):>5}\") }",
+        "fn main() { print(\"{x:}\") }",
+    ] {
+        parse_module(src).unwrap_or_else(|d| panic!("{src}: {}", d.render(src, "t.tau")));
+    }
+}
