@@ -20,6 +20,7 @@ use crate::borrowck::CaptureKind;
 use crate::check::{CheckResult, NodeKey, Res, Results};
 use crate::interp::match_ty;
 use crate::program::*;
+use crate::unit::ModRef;
 use crate::types::*;
 
 type CgResult<T> = Result<T, NativeError>;
@@ -231,7 +232,8 @@ pub struct Cg<'a> {
 }
 
 /// Translate a checked program to a complete C source file (runtime included).
-pub fn translate(user: &Module, check: &CheckResult, mod_paths: Vec<String>, captures: HashMap<NodeKey, Vec<(String, CaptureKind)>>) -> Result<String, NativeError> {
+pub fn translate<'a>(mods: &[ModRef<'a>], root: usize, check: &'a CheckResult, captures: HashMap<NodeKey, Vec<(String, CaptureKind)>>) -> Result<String, NativeError> {
+    let mod_paths: Vec<String> = mods.iter().map(|m| m.path.to_string()).collect();
     let mut cg = Cg {
         prog: &check.program,
         res: &check.results,
@@ -257,10 +259,12 @@ pub fn translate(user: &Module, check: &CheckResult, mod_paths: Vec<String>, cap
         captures,
         in_par: 0,
     };
-    for item in &user.items {
-        cg.register_item(item);
+    for m in mods {
+        for item in &m.module.items {
+            cg.register_item(item, !m.builtin);
+        }
     }
-    let main = user.items.iter().find_map(|i| match &i.kind {
+    let main = mods[root].module.items.iter().find_map(|i| match &i.kind {
         ItemKind::Fn(f) if f.name.name == "main" => cg.res.fn_decl.get(&NodeKey::of(f)).copied(),
         _ => None,
     });
@@ -285,16 +289,16 @@ pub fn translate(user: &Module, check: &CheckResult, mod_paths: Vec<String>, cap
 impl<'a> Cg<'a> {
     // ------------------------------------------------------------ registration
 
-    fn register_item(&mut self, item: &'a Item) {
+    fn register_item(&mut self, item: &'a Item, consts: bool) {
         match &item.kind {
             ItemKind::Fn(f) => self.register(f),
-            ItemKind::Const(c) => {
+            ItemKind::Const(c) if consts => {
                 if let Some(id) = self.res.const_decl.get(&NodeKey::of(c)) {
                     self.consts.insert(*id, c);
                 }
             }
-            ItemKind::Impl(i) => i.items.iter().for_each(|x| self.register_item(x)),
-            ItemKind::Trait(t) => t.items.iter().for_each(|x| self.register_item(x)),
+            ItemKind::Impl(i) => i.items.iter().for_each(|x| self.register_item(x, consts)),
+            ItemKind::Trait(t) => t.items.iter().for_each(|x| self.register_item(x, consts)),
             _ => {}
         }
     }

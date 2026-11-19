@@ -42,16 +42,20 @@ impl NativeError {
 
 /// Check `src` and translate it to C.
 pub fn emit_c(src: &str) -> Result<String, NativeError> {
-    let user = crate::parse_module(src).map_err(NativeError::Parse)?;
-    let lib = crate::prelude::load();
-    let result = crate::analyze(&lib, &user);
+    let ws = crate::Workspace::single("<main>", src).map_err(NativeError::Parse)?;
+    emit_c_workspace(&ws)
+}
+
+/// Check a whole program (all its modules) and translate it to C.
+pub fn emit_c_workspace(ws: &crate::Workspace) -> Result<String, NativeError> {
+    let result = ws.analyze();
     if !result.diagnostics.is_empty() {
         return Err(NativeError::Rejected(result.diagnostics));
     }
-    // The checker's side tables are keyed by node address, so `user` must stay put.
-    let paths = lib.iter().map(|m| m.path.clone()).collect();
-    let captures = crate::borrowck::capture_modes(&user, &result.program, &result.results);
-    cg::translate(&user, &result, paths, captures)
+    // The checker's side tables are keyed by node address, so the modules must stay put.
+    let refs = ws.refs();
+    let captures = crate::borrowck::capture_modes(&refs, &result.program, &result.results);
+    cg::translate(&refs, ws.root, &result, captures)
 }
 
 /// The C compiler to use: `$TAU_CC`, else the first of clang, gcc, cc that exists (on Windows:
@@ -233,6 +237,11 @@ pub fn build_source(src: &str) -> Result<PathBuf, NativeError> {
     compile_c(&emit_c(src)?)
 }
 
+/// Check, translate and compile a whole program (all its modules); the path of the executable.
+pub fn build_workspace(ws: &crate::Workspace) -> Result<PathBuf, NativeError> {
+    compile_c(&emit_c_workspace(ws)?)
+}
+
 /// What a native program did.
 #[derive(Debug, PartialEq)]
 pub struct NativeOutput {
@@ -250,6 +259,17 @@ pub fn run_captured(src: &str) -> Result<NativeOutput, NativeError> {
 /// Like `run_captured`, with extra environment variables (e.g. `TAU_THREADS`).
 pub fn run_captured_env(src: &str, env: &[(&str, &str)]) -> Result<NativeOutput, NativeError> {
     let exe = build_source(src)?;
+    run_exe_captured(&exe, env)
+}
+
+/// Build a whole program (all its modules) and run it, capturing its output (used by tests).
+pub fn run_workspace_captured(ws: &crate::Workspace) -> Result<NativeOutput, NativeError> {
+    let exe = build_workspace(ws)?;
+    run_exe_captured(&exe, &[])
+}
+
+fn run_exe_captured(exe: &Path, env: &[(&str, &str)]) -> Result<NativeOutput, NativeError> {
+    let exe = exe.to_path_buf();
     // TAU_VALGRIND=1 runs the program under valgrind: an invalid access or double free gives exit
     // status 99, and a leak on a normal exit gives 98 (used by the test suite's memory run)
     let valgrind = std::env::var("TAU_VALGRIND").map(|v| !v.is_empty() && v != "0").unwrap_or(false);

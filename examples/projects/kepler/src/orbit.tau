@@ -1,0 +1,4 @@
+// `use orbit` inside this package is this file; it is not visible to a program that uses `kepler`
+// unless it names it as `kepler.orbit`.
+
+pub fn two_pi() -> f64 { 2.0 * PI }

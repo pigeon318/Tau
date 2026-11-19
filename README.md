@@ -28,7 +28,7 @@ See [`docs/native/DESIGN.md`](docs/native/DESIGN.md).
 | 4 | Native code generation via C (see `docs/native/DESIGN.md`) | done |
 | 5 | Std library, tensors | |
 | 6 | Thread pool, `par` | done (part of stage 4) |
-| 7 | Package manager, `tau test`, `tau fmt` | |
+| 7 | Modules and packages (`tau.toml`, `tau.lock`), `tau test`, `tau fmt` | modules and packages done |
 
 ## Try it
 
@@ -82,6 +82,22 @@ program with the usual panic instead of being reported by `join`; and maths func
 floats) come from the system's C library, so their last digits can differ from Linux's. The interpreter and
 the native backend still agree with each other on the same machine.
 
+## Modules and packages
+
+A program can be many files and can use other packages (SPEC.md, section 9):
+
+```bash
+tau new orbits              # a package: tau.toml and src/main.tau
+cd orbits
+tau add kepler --path ../kepler
+tau run                     # use kepler  /  use bodies  /  use geo.shapes.{Circle, area}
+tau test                    # the #[test] functions of every module
+```
+
+Names are private to their module unless `pub`; `use` paths start at the package's `src/` folder. Git
+dependencies (`tau add x --git URL --tag v1`) are pinned in `tau.lock`. See `examples/projects/` for a program
+with a dependency.
+
 ## Updating
 
 `tau update` replaces the program with the newest release: it downloads the file for your platform, checks it against
@@ -115,6 +131,8 @@ It needs `tau` on the PATH (or the `tau.path` setting).
 | `src/interp/` | The interpreter: `eval` (expressions, patterns), `builtins`, `tensor` (matrices, linear algebra, FFT), `value` |
 | `src/native/` | The native backend: `cg` (checked AST to C), `runtime.h` (the C runtime), and the driver that compiles, caches and runs |
 | `src/borrowck/` | The borrow checker: `lower` (AST to an event CFG), `analysis` (liveness and dataflow, the checks), `mir` |
+| `src/project.rs`, `src/toml.rs`, `src/gitdeps.rs` | Packages: finding and loading the files of a program, `tau.toml`, dependencies and `tau.lock` |
+| `src/workspace.rs`, `src/source.rs`, `src/unit.rs` | A program as a list of modules, and the map from error positions to files |
 | `src/editor.rs` | What editors need: `tau check --json` (diagnostics and hover types, LSP-style positions) |
 | `editors/vscode/` | The VS Code extension (grammar, snippets, live diagnostics, hovers, run/test links); see its README |
 | `src/prelude/*.tau` | The built-in library's signatures, written in Tau |
