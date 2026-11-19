@@ -719,6 +719,9 @@ mod boxes {
     fn a_missing_field_or_method_through_a_box_is_reported() {
         err("struct P { x: i64 }\nfn main() {\n let b = Box.new(P(1))\n print(b.y)\n}\n", "no field `y`");
         err("struct P { x: i64 }\nfn main() {\n let b = Box.new(P(1))\n b.nothing()\n}\n", "no method named `nothing`");
+    }
+}
+
 // ------------------------------------------------------------------ format specs
 
 mod format_specs {

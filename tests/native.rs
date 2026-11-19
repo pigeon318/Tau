@@ -1014,6 +1014,8 @@ fn a_long_list_is_dropped_without_trouble() {
          fn main() {\n let mut l = Nil\n for i in 0..20000 {\n  l = Cons(i, Box.new(l))\n }\n print(sum(l))\n}",
     );
     assert_eq!(out, "199990000\n");
+}
+
 // ------------------------------------------------------------------ format specs
 
 #[test]
