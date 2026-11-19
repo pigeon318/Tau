@@ -279,9 +279,11 @@ impl<'a> Checker<'a> {
         let mod_builtin = refs.iter().map(|m| m.builtin).collect();
         let mod_package = refs.iter().map(|m| m.package.to_string()).collect();
         let _ = root; // the entry module is found by the later stages (it holds `main`)
+        // (the entry module is called `main`, but no module can import it by that name)
         let mod_by_path = mods
             .iter()
             .enumerate()
+            .filter(|(_, (p, _))| p != "main")
             .map(|(i, (p, _))| (p.clone(), i))
             .collect();
         let scopes = mods.iter().map(|_| ModScope::default()).collect();

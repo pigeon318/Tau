@@ -576,7 +576,7 @@ impl Loader {
 
 // ------------------------------------------------------------------ `tau new` and `tau add`
 
-/// Create a package in `dir/name`: `tau.toml`, `src/main.tau`, `.gitignore`.
+/// Create a package in `dir/name`: `tau.toml` and `src/main.tau` (or `src/lib.tau` for a library).
 pub fn new_package(parent: &Path, name: &str, library: bool) -> Result<PathBuf, String> {
     if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
         return Err(format!("`{name}` is not a good package name (letters, digits, `_` and `-`)"));
@@ -593,7 +593,6 @@ pub fn new_package(parent: &Path, name: &str, library: bool) -> Result<PathBuf, 
     } else {
         write(dir.join("src").join("main.tau"), "fn main() {\n    print(\"hello, world\")\n}\n")?;
     }
-    write(dir.join(".gitignore"), "tau.lock.tmp\n")?;
     Ok(dir)
 }
 
