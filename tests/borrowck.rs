@@ -541,3 +541,9 @@ fn a_view_of_an_inner_variable_cannot_outlive_its_block() {
 fn tensor_methods_only_read_the_tensor() {
     ok_m("let a = Tensor<f64, [_]>.arange(4)\n let s = a.sum()\n let m = a.max()\n let b = a.map(|x| x + s)\n let r = a.reshape(2, 2)\n print(a)\n print(s + m)\n print(b)\n print(r)");
 }
+
+#[test]
+fn parts_of_a_tensor_are_copies_that_nothing_keeps_borrowed() {
+    ok_m("let mut m = Tensor<f64, [_, _]>.zeros(3, 3)\n let row = m[0, ..]\n m[1, ..] = row\n let col = m[.., 0]\n m[.., 1] = col\n m[2, 2] = 5.0\n print(row)\n print(col)\n print(m)");
+    err_m("let mut m = Tensor<f64, [_, _]>.zeros(3, 3)\n let r = m[0, ..]\n let s = r\n print(r)", "use of moved value");
+}

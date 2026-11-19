@@ -756,3 +756,33 @@ mod tensor_api {
         err("fn main() {\n let a = Tensor<f64, [_]>.arange(3)\n let b = a.sum(1)\n}\n", "takes 0 arguments");
     }
 }
+
+mod tensor_slices {
+    use super::{err, ok};
+
+    #[test]
+    fn a_range_keeps_its_axis() {
+        let r = ok("fn main() {\n let m = Tensor<f64, [_, _]>.zeros(3, 3)\n let a = m[1, 0]\n let b = m[1, ..]\n let c = m[0..2, 1..]\n let d = m[.., 2]\n let e = m[..=1, ..=1]\n}\n");
+        assert_eq!(r.binding_ty("a").as_deref(), Some("f64"));
+        assert_eq!(r.binding_ty("b").as_deref(), Some("Tensor<f64, [_]>"));
+        assert_eq!(r.binding_ty("c").as_deref(), Some("Tensor<f64, [_, _]>"));
+        assert_eq!(r.binding_ty("d").as_deref(), Some("Tensor<f64, [_]>"));
+        assert_eq!(r.binding_ty("e").as_deref(), Some("Tensor<f64, [_, _]>"));
+    }
+
+    #[test]
+    fn parts_can_be_assigned_a_tensor_or_one_number() {
+        ok("fn main() {\n let mut m = Tensor<f64, [_, _]>.zeros(3, 3)\n m[0, ..] = 1.0\n m[.., 1] = Tensor<f64, [_]>.arange(3)\n m[0..2, 0..2] = m[1..3, 1..3]\n}\n");
+        err("fn main() {\n let m = Tensor<f64, [_, _]>.zeros(3, 3)\n m[0, ..] = 1.0\n}\n", "not declared `mut`");
+        err("fn main() {\n let mut m = Tensor<f64, [_, _]>.zeros(3, 3)\n m[0, ..] += 1.0\n}\n", "cannot be combined with assignment");
+        err("fn main() {\n let mut m = Tensor<f64, [_, _]>.zeros(3, 3)\n m[0, ..] = \"x\"\n}\n", "mismatched types");
+        err("fn main() {\n let mut m = Tensor<f64, [_, _]>.zeros(3, 3)\n m[0, ..] = Tensor<f32, [_]>.zeros(3)\n}\n", "mismatched types");
+    }
+
+    #[test]
+    fn the_number_of_indices_and_their_types_are_checked() {
+        err("fn main() {\n let m = Tensor<f64, [_, _]>.zeros(3, 3)\n let a = m[1..2]\n}\n", "2 dimension(s), but 1 index");
+        err("fn main() {\n let m = Tensor<f64, [_, _]>.zeros(3, 3)\n let a = m[\"a\"..2, 0]\n}\n", "mismatched types");
+        err("fn main() {\n let m = Tensor<f64, [_, _]>.zeros(3, 3)\n let a = m[1.5, ..]\n}\n", "mismatched types");
+    }
+}

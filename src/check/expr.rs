@@ -312,6 +312,26 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Unary { op, expr: inner } => self.unary(e, *op, inner, exp),
             ExprKind::Binary { op, lhs, rhs } => self.binary(e, *op, lhs, rhs, exp),
+            ExprKind::Assign { op, lhs, rhs } if is_tensor_slice_target(lhs) => {
+                // `t[0..2, 1] = other` (a tensor of that shape) or `= 0.0` (every element)
+                let lt = self.expr(lhs, None);
+                self.check_mutable_place(lhs, "assign to");
+                if op.is_some() {
+                    self.err_hint(e.span, "an operator cannot be combined with assignment to part of a tensor", "write it out: `t[0..2, 1] = t[0..2, 1] + x`");
+                    self.expr(rhs, None);
+                } else if let Ty::Tensor(elem, _) = self.infer.shallow(&lt) {
+                    let rt = self.expr(rhs, Some(&elem));
+                    if matches!(self.infer.shallow(&rt), Ty::Tensor(..)) {
+                        self.coerce(&rt, &lt, rhs.span);
+                    } else {
+                        self.coerce(&rt, &elem, rhs.span);
+                    }
+                } else {
+                    // not a tensor (a slice of a vector, say): as for any other assignment
+                    self.expr_coerce(rhs, &lt);
+                }
+                Ty::unit()
+            }
             ExprKind::Assign { op, lhs, rhs } => {
                 let lt = self.expr(lhs, None);
                 self.check_mutable_place(lhs, "assign to");
@@ -1334,10 +1354,27 @@ impl<'a> Checker<'a> {
                         format!("this tensor has {} dimension(s), but {} index(es) were given", dims.len(), indices.len()),
                     );
                 }
+                // each index is a position (`i`), or a range of positions (`a..b`, `a..=b`, `..b`, `a..`, `..`)
+                // that keeps its axis: `t[1, 0..3]` is a tensor of rank 1, a copy of part of `t`
+                let mut ranges = 0;
                 for i in indices {
-                    self.expr_coerce(i, &Ty::usize());
+                    if let ExprKind::Range { start, end, .. } = &i.kind {
+                        for x in [start, end].into_iter().flatten() {
+                            self.expr_coerce(x, &Ty::usize());
+                        }
+                        if let Some(r) = self.adt_named("Range") {
+                            self.record(i, &Ty::Adt(r, vec![Ty::usize()]));
+                        }
+                        ranges += 1;
+                    } else {
+                        self.expr_coerce(i, &Ty::usize());
+                    }
                 }
-                (**elem).clone()
+                if ranges == 0 {
+                    (**elem).clone()
+                } else {
+                    Ty::Tensor(elem.clone(), vec![Dim::Dyn; ranges])
+                }
             }
             Ty::Adt(..) => {
                 if indices.len() != 1 {
@@ -1812,4 +1849,10 @@ impl<'a> Checker<'a> {
             self.err(span, format!("cannot cast `{a}` to `{b}`"));
         }
     }
+}
+
+/// Is `lhs` a part of a tensor, like `t[0..2, 1]` (an index with at least one range)?
+fn is_tensor_slice_target(lhs: &Expr) -> bool {
+    matches!(&lhs.kind, ExprKind::Index { indices, .. } if indices.iter().any(|i| matches!(i.kind, ExprKind::Range { .. })) && indices.len() > 1)
+        || matches!(&lhs.kind, ExprKind::Index { indices, .. } if indices.len() == 1 && matches!(indices[0].kind, ExprKind::Range { .. }))
 }

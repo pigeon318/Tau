@@ -843,6 +843,101 @@ static tau_tensor tau_t_transpose(const tau_tensor *t) {
     return o;
 }
 
+/* slices: t[a..b, j] (src/interp/tensor.rs has the same). `range` is 0 for a position (`lo`) and 1 for a
+ * range [lo, hi); hi == TAU_OPEN_END means an open end. */
+typedef struct { int8_t range; __int128 lo, hi; } tau_sl;
+#define TAU_OPEN_END ((__int128)(~(unsigned __int128)0 >> 2))
+
+static void tau_t_slice_plan(const tau_tensor *t, int n, const tau_sl *s, size_t *first, size_t *count) {
+    for (int d = 0; d < n; d++) {
+        __int128 dim = (__int128)t->dims[d];
+        if (!s[d].range) {
+            if (s[d].lo < 0 || s[d].lo >= dim) {
+                tau_buf m = {0};
+                tau_buf_cstr(&m, "tensor index "); tau_put_i128(&m, s[d].lo);
+                tau_buf_cstr(&m, " is out of bounds for axis "); tau_put_i128(&m, (__int128)d);
+                tau_buf_cstr(&m, " of length "); tau_put_i128(&m, dim);
+                tau_panic((const char *)m.ptr, m.len);
+            }
+            first[d] = (size_t)s[d].lo; count[d] = 1;
+        } else {
+            __int128 a = s[d].lo, b = s[d].hi == TAU_OPEN_END ? dim : s[d].hi;
+            if (a < 0 || a > b || b > dim) {
+                tau_buf m = {0};
+                tau_buf_cstr(&m, "slice "); tau_put_i128(&m, a);
+                tau_buf_cstr(&m, ".."); tau_put_i128(&m, b);
+                tau_buf_cstr(&m, " is out of range for axis "); tau_put_i128(&m, (__int128)d);
+                tau_buf_cstr(&m, " of length "); tau_put_i128(&m, dim);
+                tau_panic((const char *)m.ptr, m.len);
+            }
+            first[d] = (size_t)a; count[d] = (size_t)(b - a);
+        }
+    }
+}
+
+/* the source position of each element of the slice, in the result's column-major order: calls
+ * `visit(k, flat)` through the loop below (written out twice, as a macro, to stay in C) */
+#define TAU_T_SLICE_LOOP(t, n, s, first, count, total, BODY)                                              \
+    do {                                                                                                  \
+        size_t strides_[8]; strides_[0] = 1;                                                              \
+        for (int d_ = 1; d_ < (n); d_++) strides_[d_] = strides_[d_ - 1] * (t)->dims[d_ - 1];             \
+        size_t ctr_[8] = {0};                                                                             \
+        for (size_t k = 0; k < (total); k++) {                                                            \
+            size_t flat = 0;                                                                              \
+            for (int d_ = 0; d_ < (n); d_++) flat += ((first)[d_] + ((s)[d_].range ? ctr_[d_] : 0)) * strides_[d_]; \
+            BODY                                                                                          \
+            for (int d_ = 0; d_ < (n); d_++) {                                                            \
+                if (!(s)[d_].range) continue;                                                             \
+                if (++ctr_[d_] < (count)[d_]) break;                                                      \
+                ctr_[d_] = 0;                                                                             \
+            }                                                                                             \
+        }                                                                                                 \
+    } while (0)
+
+static tau_tensor tau_t_slice(const tau_tensor *t, int n, const tau_sl *s) {
+    size_t first[8], count[8], rd[8];
+    int ra = 0;
+    tau_t_slice_plan(t, n, s, first, count);
+    for (int d = 0; d < n; d++) if (s[d].range) rd[ra++] = count[d];
+    tau_tensor r = tau_t_new(ra, rd, t->cplx, t->single);
+    size_t total = tau_t_len(&r), w = t->cplx ? 2 : 1;
+    TAU_T_SLICE_LOOP(t, n, s, first, count, total, { for (size_t j = 0; j < w; j++) r.data[k * w + j] = t->data[flat * w + j]; });
+    return r;
+}
+
+static void tau_t_dims_text(tau_buf *m, const size_t *d, int n) {
+    tau_buf_char(m, '[');
+    for (int i = 0; i < n; i++) { if (i) tau_buf_cstr(m, ", "); tau_fmt_u64(m, (uint64_t)d[i]); }
+    tau_buf_char(m, ']');
+}
+
+/* t[a..b, j] = src (a tensor of that shape), or = (re, im) for every element when src is NULL */
+static void tau_t_slice_set(tau_tensor *t, int n, const tau_sl *s, const tau_tensor *src, double re, double im) {
+    size_t first[8], count[8], rd[8];
+    int ra = 0;
+    tau_t_slice_plan(t, n, s, first, count);
+    for (int d = 0; d < n; d++) if (s[d].range) rd[ra++] = count[d];
+    size_t total = 1, w = t->cplx ? 2 : 1;
+    for (int i = 0; i < ra; i++) total *= rd[i];
+    if (src) {
+        int same = src->rank == ra;
+        for (int i = 0; same && i < ra; i++) if (src->dims[i] != rd[i]) same = 0;
+        if (!same) {
+            tau_buf m = {0};
+            tau_buf_cstr(&m, "shape mismatch: cannot assign a tensor of shape ");
+            tau_t_dims_text(&m, src->dims, src->rank);
+            tau_buf_cstr(&m, " to a part of shape ");
+            tau_t_dims_text(&m, rd, ra);
+            tau_panic((const char *)m.ptr, m.len);
+        }
+        TAU_T_SLICE_LOOP(t, n, s, first, count, total, { for (size_t j = 0; j < w; j++) t->data[flat * w + j] = src->data[k * w + j]; });
+    } else {
+        re = tau_t_rnd(re, t->single);
+        im = tau_t_rnd(im, t->single);
+        TAU_T_SLICE_LOOP(t, n, s, first, count, total, { t->data[flat * w] = re; if (w == 2) t->data[flat * w + 1] = im; });
+    }
+}
+
 static tau_tensor tau_t_binop(char op, tau_tensor a, tau_tensor b) {
     if (a.rank != b.rank || memcmp(a.dims, b.dims, sizeof(size_t) * a.rank) != 0) tau_t_shape_panic("shape mismatch: ", &a, &b);
     tau_tensor r = tau_t_new(a.rank, a.dims, a.cplx, a.single);

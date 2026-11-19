@@ -1926,6 +1926,10 @@ impl<'a> Cg<'a> {
         if indices.len() != 1 && !matches!(self.ty_of(base), Ty::Tensor(..)) {
             return unsupported("indexing with several indices");
         }
+        if matches!(self.ty_of(base), Ty::Tensor(..)) && indices.iter().any(|i| matches!(i.kind, ExprKind::Range { .. })) {
+            let (decls, sl, n, b) = self.tensor_slice_specs(base, indices)?;
+            return Ok(format!("({{ {decls}tau_tensor *t_ = &({b}); tau_sl sl_[{}] = {{ {sl} }}; tau_t_slice(t_, {n}, sl_); }})", n.max(1)));
+        }
         if let ExprKind::Range { start, end, inclusive } = &indices[0].kind {
             let bt = self.ty_of(base);
             let Some(el) = self.seq_elem(&bt) else { return unsupported("slicing this type") };
@@ -3346,7 +3350,62 @@ static {vect} {top}({mt} *m, uint64_t n) {{
     }
 
     /// `t[i, j] = v` and `t[i, j] += v`
+    /// The indices of `t[a..b, j, ..]` as C: declarations (evaluating the indices in order), the `tau_sl`
+    /// initialisers, the number of axes and the tensor's place.
+    fn tensor_slice_specs(&mut self, base: &'a Expr, indices: &'a [Expr]) -> CgResult<(String, String, usize, String)> {
+        let Ty::Tensor(el, _) = self.ty_of(base) else { return unsupported("indexing this type") };
+        self.tensor_elem(&el)?;
+        let (b, _) = self.place(base)?;
+        let mut decls = String::new();
+        let mut inits = Vec::new();
+        for (k, i) in indices.iter().enumerate() {
+            match &i.kind {
+                ExprKind::Range { start, end, inclusive } => {
+                    let lo = match start {
+                        Some(x) => format!("(__int128)({})", self.expr(x)?),
+                        None => "(__int128)0".to_string(),
+                    };
+                    let hi = match end {
+                        Some(x) => format!("(__int128)({}){}", self.expr(x)?, if *inclusive { " + 1" } else { "" }),
+                        None => "TAU_OPEN_END".to_string(),
+                    };
+                    // evaluated here, in order: the bounds may have side effects
+                    decls.push_str(&format!("__int128 lo{k}_ = {lo}; __int128 hi{k}_ = {hi}; "));
+                    inits.push(format!("{{ 1, lo{k}_, hi{k}_ }}"));
+                }
+                _ => {
+                    let v = self.expr(i)?;
+                    decls.push_str(&format!("__int128 lo{k}_ = (__int128)({v}); "));
+                    inits.push(format!("{{ 0, lo{k}_, 0 }}"));
+                }
+            }
+        }
+        Ok((decls, inits.join(", "), indices.len(), b))
+    }
+
+    /// `t[0..2, 1] = value`
+    fn tensor_slice_assign(&mut self, base: &'a Expr, indices: &'a [Expr], rhs: &'a Expr) -> CgResult<String> {
+        let rty = self.ty_of(rhs);
+        let (decls, sl, n, b) = self.tensor_slice_specs(base, indices)?;
+        let Ty::Tensor(el, _) = self.ty_of(base) else { return unsupported("indexing this type") };
+        let (cplx, _) = self.tensor_elem(&el)?;
+        let init = format!("{decls}tau_tensor *t_ = &({b}); tau_sl sl_[{}] = {{ {sl} }}; ", n.max(1));
+        if matches!(rty, Ty::Tensor(..)) {
+            // the elements are copied in; the value itself is only read (a computed one is freed with the statement)
+            let r = self.borrow(rhs)?;
+            Ok(format!("({{ tau_tensor *src_ = &({r}); {init}tau_t_slice_set(t_, {n}, sl_, src_, 0.0, 0.0); ((tau_unit)0); }})"))
+        } else {
+            let r = self.expr(rhs)?;
+            let ect = self.cty(&el)?;
+            let (re, im) = if cplx { ("rv_.re".to_string(), "rv_.im".to_string()) } else { ("(double)rv_".to_string(), "0.0".to_string()) };
+            Ok(format!("({{ {ect} rv_ = {r}; {init}tau_t_slice_set(t_, {n}, sl_, 0, {re}, {im}); ((tau_unit)0); }})"))
+        }
+    }
+
     fn tensor_assign(&mut self, op: Option<BinOp>, lhs: &'a Expr, base: &'a Expr, indices: &'a [Expr], rhs: &'a Expr) -> CgResult<String> {
+        if indices.iter().any(|i| matches!(i.kind, ExprKind::Range { .. })) {
+            return self.tensor_slice_assign(base, indices, rhs);
+        }
         let lt = self.ty_of(lhs);
         let lct = self.cty(&lt)?;
         let rv = self.fresh("rv");
@@ -3601,9 +3660,10 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         };
         let (code, hoisted) = self.outline(&env, &caps, |c| {
             let bind = c.region_bind(pat, &elem_ty, &elem, mut_iter)?;
-            let v = c.convert(body, &ty.clone())?;
+            // what the body creates and owns (a part of a tensor, a string) is freed once its value is taken
+            let (v, drops) = c.with_temps(|c| c.convert(body, &ty.clone()))?;
             let step = reduce(c, "acc_", "x_")?;
-            Ok(format!("{bind}{ct} x_ = {v}; if (!have_) {{ acc_ = x_; have_ = 1; }} else acc_ = {step};"))
+            Ok(format!("{bind}{ct} x_ = {v}; {drops}if (!have_) {{ acc_ = x_; have_ = 1; }} else acc_ = {step};"))
         })?;
         let fname = format!("{id}_fn");
         let def = format!(

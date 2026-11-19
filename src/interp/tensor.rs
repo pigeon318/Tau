@@ -62,6 +62,131 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// The indices of `t[a, 0..3, ..]`: for each axis, whether it is a range, and its bounds (a position
+    /// is `lo` with `hi` unused; an open end is `i128::MAX / 2`).
+    pub fn slice_specs(&mut self, indices: &'a [Expr], f: &Frame<'a>) -> R<'a, Vec<(bool, i128, i128)>> {
+        let mut out = Vec::with_capacity(indices.len());
+        for i in indices {
+            match self.eval(i, f)? {
+                Value::Range(a, b) => out.push((true, a, b)),
+                Value::Int(n) => out.push((false, n, 0)),
+                other => return panic(format!("a tensor index must be a number or a range, found a {}", other.type_name())),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Check the indices against the shape: for each axis the first position and the number of positions.
+    fn slice_plan(&self, t: &Tensor, specs: &[(bool, i128, i128)]) -> R<'a, Vec<(usize, usize)>> {
+        const OPEN: i128 = i128::MAX / 2;
+        let mut plan = Vec::with_capacity(specs.len());
+        for (axis, (range, lo, hi)) in specs.iter().enumerate() {
+            let dim = t.dims[axis] as i128;
+            if !*range {
+                if *lo < 0 || *lo >= dim {
+                    return panic(format!("tensor index {lo} is out of bounds for axis {axis} of length {dim}"));
+                }
+                plan.push((*lo as usize, 1));
+            } else {
+                let b = if *hi == OPEN { dim } else { *hi };
+                if *lo < 0 || *lo > b || b > dim {
+                    return panic(format!("slice {lo}..{b} is out of range for axis {axis} of length {dim}"));
+                }
+                plan.push((*lo as usize, (b - *lo) as usize));
+            }
+        }
+        Ok(plan)
+    }
+
+    /// The elements of a slice, as flat positions in the source, in the result's (column-major) order.
+    fn slice_positions(t: &Tensor, specs: &[(bool, i128, i128)], plan: &[(usize, usize)]) -> (Vec<usize>, Vec<usize>) {
+        let range_axes: Vec<usize> = (0..specs.len()).filter(|&a| specs[a].0).collect();
+        let result_dims: Vec<usize> = range_axes.iter().map(|&a| plan[a].1).collect();
+        let total: usize = result_dims.iter().product();
+        let mut strides = vec![1usize; t.dims.len()];
+        for a in 1..t.dims.len() {
+            strides[a] = strides[a - 1] * t.dims[a - 1];
+        }
+        let mut pos = Vec::with_capacity(total);
+        let mut counter = vec![0usize; specs.len()];
+        for _ in 0..total {
+            let flat: usize = (0..specs.len()).map(|a| (plan[a].0 + if specs[a].0 { counter[a] } else { 0 }) * strides[a]).sum();
+            pos.push(flat);
+            for &a in &range_axes {
+                counter[a] += 1;
+                if counter[a] < plan[a].1 {
+                    break;
+                }
+                counter[a] = 0;
+            }
+        }
+        (pos, result_dims)
+    }
+
+    /// `t[a..b, j]`: a copy of that part.
+    pub fn tensor_slice(&mut self, t: &Tensor, specs: &[(bool, i128, i128)]) -> R<'a, Value<'a>> {
+        let plan = self.slice_plan(t, specs)?;
+        let (pos, dims) = Self::slice_positions(t, specs, &plan);
+        let data = match &t.data {
+            TData::F(d) => TData::F(pos.iter().map(|&p| d[p]).collect()),
+            TData::C(d) => TData::C(pos.iter().map(|&p| d[p]).collect()),
+        };
+        Ok(Self::make_tensor(dims, data, t.single))
+    }
+
+    /// `t[a..b, j] = value`: a tensor of that shape, or one number for every element.
+    pub fn tensor_slice_set(&mut self, t: &Rc<RefCell<Tensor>>, specs: &[(bool, i128, i128)], value: Value<'a>) -> R<'a, ()> {
+        let value = self.clone_deref(&value);
+        // a tensor being assigned to a part of itself is copied first
+        let src: Option<Tensor> = match &value {
+            Value::Tensor(s) => Some(s.borrow().clone()),
+            _ => None,
+        };
+        let mut guard = t.borrow_mut();
+        let plan = self.slice_plan(&guard, specs)?;
+        let (pos, dims) = Self::slice_positions(&guard, specs, &plan);
+        let single = guard.single;
+        match src {
+            Some(s) => {
+                if s.dims != dims {
+                    return panic(format!("shape mismatch: cannot assign a tensor of shape {} to a part of shape {}", shape_text(&s.dims), shape_text(&dims)));
+                }
+                match (&mut guard.data, &s.data) {
+                    (TData::F(d), TData::F(x)) => {
+                        for (k, &p) in pos.iter().enumerate() {
+                            d[p] = x[k];
+                        }
+                    }
+                    (TData::C(d), TData::C(x)) => {
+                        for (k, &p) in pos.iter().enumerate() {
+                            d[p] = x[k];
+                        }
+                    }
+                    _ => return panic("cannot assign tensors of different element types"),
+                }
+            }
+            None => match (&mut guard.data, value) {
+                (TData::F(d), Value::Float(x)) => {
+                    for &p in &pos {
+                        d[p] = round(single, x);
+                    }
+                }
+                (TData::C(d), Value::Complex(a, b)) => {
+                    for &p in &pos {
+                        d[p] = (round(single, a), round(single, b));
+                    }
+                }
+                (TData::F(d), Value::Int(i)) => {
+                    for &p in &pos {
+                        d[p] = round(single, i as f64);
+                    }
+                }
+                (_, other) => return panic(format!("cannot assign a {} to part of a tensor", other.type_name())),
+            },
+        }
+        Ok(())
+    }
+
     /// `from`, `from_rows`, `eye`, `full`, `linspace`, `arange`.
     fn tensor_ctor2(&mut self, kind: &str, e: &'a Expr, args: &'a [Expr], f: &Frame<'a>) -> R<'a, Value<'a>> {
         let Ty::Tensor(elem, _) = self.ty_of(e, f) else { return panic("a tensor constructor needs a tensor type") };

@@ -922,6 +922,11 @@ impl<'r> Lowerer<'r> {
             let op = self.lower(i);
             self.consume_value(op, i.span);
         }
+        // part of a tensor is a copy of it: the tensor is read, and nothing keeps borrowing it
+        if self.is_tensor_slice(base, indices) {
+            self.consume_borrow(b, false, e.span);
+            return Operand::Value(vec![]);
+        }
         // inside a `par for`: reading an outer collection at some index other than the
         // loop variable may race with another iteration writing that element
         if let Operand::Place(p, _) = &b {
@@ -973,11 +978,31 @@ impl<'r> Lowerer<'r> {
             }
             return;
         }
+        // `t[0..2, 1] = x` writes the elements of `x` into the tensor `t`: `x` is only read
+        if let ExprKind::Index { base, indices } = &lhs.kind {
+            if self.is_tensor_slice(base, indices) {
+                self.consume_borrow(rhs_op, false, rhs.span);
+                let b = self.lower(base);
+                for i in indices {
+                    let op = self.lower(i);
+                    self.consume_value(op, i.span);
+                }
+                if let Operand::Place(p, _) = b {
+                    self.write(p.index(), vec![], lhs.span, Some(lhs));
+                }
+                return;
+            }
+        }
         let srcs = self.consume_value(rhs_op, rhs.span);
         let l = self.lower(lhs);
         if let Operand::Place(p, _) = l {
             self.write(p, srcs, lhs.span, Some(lhs));
         }
+    }
+
+    /// `t[0..2, 1]` on a tensor `t`: an index with a range, which makes a copy.
+    fn is_tensor_slice(&self, base: &Expr, indices: &[Expr]) -> bool {
+        matches!(self.ty_of(base), Ty::Tensor(..)) && indices.iter().any(|i| matches!(i.kind, ExprKind::Range { .. }))
     }
 
     fn write(&mut self, p: Place, srcs: Vec<Src>, span: Span, lhs: Option<&Expr>) {
