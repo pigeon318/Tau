@@ -1,8 +1,8 @@
 [package]
 name = "tau"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
-description = "Tau: a low-level, math/science-focused language (stage 1: lexer, parser, AST)"
+description = "Tau: a low-level, math/science-focused programming language"
 
 [lib]
 name = "tau"
