@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test (interpreter and native backend)
+        run: cargo test --release
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # the native backend needs a C compiler: MinGW-w64 gcc (UCRT) from MSYS2
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+      - name: Put gcc on the PATH
+        shell: pwsh
+        run: |
+          "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Show the toolchain
+        shell: pwsh
+        run: |
+          gcc --version
+          rustc --version
+      - name: Test (interpreter and native backend)
+        shell: pwsh
+        run: cargo test --release
+      - name: Stack overflow handling, repeated (it used to fail intermittently)
+        shell: pwsh
+        run: |
+          1..25 | ForEach-Object {
+            cargo test --release --test native -- runaway_recursion 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Error "run $_ failed"; exit 1 }
+          }
+      - name: Build tau.exe
+        shell: pwsh
+        run: cargo build --release
+      - name: Smoke test tau.exe
+        shell: pwsh
+        run: |
+          .\target\release\tau.exe --version
+          # native backend, output compared with the reference
+          foreach ($name in "collatz", "primes", "sort", "bank", "wordcount", "integrate") {
+            $out = (.\target\release\tau.exe run "examples\run\$name.tau" --native) -join "`n"
+            $want = (Get-Content "examples\run\$name.expected" -Raw).Trim()
+            if ($out.Trim() -ne $want) { Write-Error "$name differs"; exit 1 }
+            Write-Host "$name ok"
+          }
+          # no C compiler: falls back to the interpreter with a note
+          $env:TAU_CC = "no-such-compiler"
+          .\target\release\tau.exe run examples\hello.tau
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Remove-Item Env:\TAU_CC
+          # and the cache can be emptied
+          .\target\release\tau.exe clean
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tau-windows-x86_64
+          path: target/release/tau.exe
