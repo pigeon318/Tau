@@ -2309,7 +2309,13 @@ impl<'a> Cg<'a> {
             Some(Res::Variant(adt, i, _)) => self.construct_call(e, *adt, Some(*i), args),
             Some(Res::Builtin(kind)) => {
                 let kind = *kind;
-                self.tensor_ctor(e, kind, args)
+                if crate::check::tensor_builtin_has_receiver(kind) {
+                    self.tensor_value_method(e, kind, recv, args)
+                } else if matches!(kind, "tensor.zeros" | "tensor.ones" | "tensor.random") {
+                    self.tensor_ctor(e, kind, args)
+                } else {
+                    self.tensor_ctor2(e, kind, args)
+                }
             }
             _ => unsupported("this method call"),
         }
@@ -3187,6 +3193,119 @@ static {vect} {top}({mt} *m, uint64_t n) {{
             decls,
             format!("({{ size_t d_[{}] = {{ {} }}; tau_t_fill({k}, {n}, d_, {}, {}); }})", n.max(1), sizes.join(", "), cplx as u8, single as u8),
         ))
+    }
+
+    /// `from`, `from_rows`, `eye`, `full`, `linspace`, `arange`.
+    fn tensor_ctor2(&mut self, e: &'a Expr, kind: &str, args: &'a [Expr]) -> CgResult<String> {
+        let Ty::Tensor(el, dims) = self.ty_of(e) else { return unsupported("this tensor constructor") };
+        let (cplx, single) = self.tensor_elem(&el)?;
+        let refs: Vec<&'a Expr> = args.iter().collect();
+        let usz = Ty::usize();
+        let (c, s) = (cplx as u8, single as u8);
+        match kind {
+            "tensor.from" => {
+                let v = self.borrowed_as(&args[0], &Ty::Slice(el.clone()))?;
+                let st = self.cty(&Ty::Slice(el.clone()))?;
+                let store = if cplx {
+                    "t_.data[2 * i_] = (double)s_.ptr[i_].re; t_.data[2 * i_ + 1] = (double)s_.ptr[i_].im;"
+                } else {
+                    "t_.data[i_] = (double)s_.ptr[i_];"
+                };
+                Ok(format!("({{ {st} s_ = {v}; size_t d_[1] = {{ s_.len }}; tau_tensor t_ = tau_t_new(1, d_, {c}, {s}); for (size_t i_ = 0; i_ < s_.len; i_++) {{ {store} }} t_; }})"))
+            }
+            "tensor.from_rows" => {
+                let vv = Ty::Adt(self.vec_adt()?, vec![Ty::Adt(self.vec_adt()?, vec![(*el).clone()])]);
+                let v = self.borrowed_as(&args[0], &vv)?;
+                let vt = self.cty(&vv)?;
+                let store = if cplx {
+                    "t_.data[2 * (j_ * nr_ + i_)] = (double)r_.ptr[i_].ptr[j_].re; t_.data[2 * (j_ * nr_ + i_) + 1] = (double)r_.ptr[i_].ptr[j_].im;"
+                } else {
+                    "t_.data[j_ * nr_ + i_] = (double)r_.ptr[i_].ptr[j_];"
+                };
+                Ok(format!(
+                    "({{ {vt} r_ = {v}; size_t nr_ = r_.len, nc_ = nr_ ? r_.ptr[0].len : 0; for (size_t i_ = 0; i_ < nr_; i_++) if (r_.ptr[i_].len != nc_) tau_panic_cstr(\"`from_rows` needs rows of the same length\"); size_t d_[2] = {{ nr_, nc_ }}; tau_tensor t_ = tau_t_new(2, d_, {c}, {s}); for (size_t i_ = 0; i_ < nr_; i_++) for (size_t j_ = 0; j_ < nc_; j_++) {{ {store} }} t_; }})"
+                ))
+            }
+            "tensor.eye" => {
+                let (decls, n) = self.ordered_with(&refs, Some(&[usz]), true)?;
+                Ok(Self::wrap(decls, format!("tau_t_eye({}, {c}, {s})", n[0])))
+            }
+            "tensor.arange" => {
+                let (decls, n) = self.ordered_with(&refs, Some(&[usz]), true)?;
+                Ok(Self::wrap(decls, format!("tau_t_arange({}, {s})", n[0])))
+            }
+            "tensor.linspace" => {
+                let tys = [(*el).clone(), (*el).clone(), usz];
+                let (decls, n) = self.ordered_with(&refs, Some(&tys), true)?;
+                Ok(Self::wrap(decls, format!("tau_t_linspace((double)({}), (double)({}), {}, {s})", n[0], n[1], n[2])))
+            }
+            _ => {
+                // full(value, sizes...)
+                let mut tys = vec![(*el).clone()];
+                tys.extend(std::iter::repeat(usz).take(dims.len()));
+                let (decls, n) = self.ordered_with(&refs, Some(&tys), true)?;
+                let (re, im) = if cplx { (format!("({}).re", n[0]), format!("({}).im", n[0])) } else { (format!("(double)({})", n[0]), "0.0".to_string()) };
+                Ok(Self::wrap(
+                    decls,
+                    format!("({{ size_t d_[{}] = {{ {} }}; tau_t_full({}, d_, {re}, {im}, {c}, {s}); }})", dims.len().max(1), n[1..].join(", "), dims.len()),
+                ))
+            }
+        }
+    }
+
+    /// `sum`, `mean`, `min`, `max`, `shape`, `to_vec`, `map`, `reshape`, `transpose` of a tensor value.
+    fn tensor_value_method(&mut self, e: &'a Expr, kind: &str, recv: &'a Expr, args: &'a [Expr]) -> CgResult<String> {
+        let Ty::Tensor(el, _) = self.ty_of(recv) else { return unsupported("this tensor method") };
+        let (cplx, single) = self.tensor_elem(&el)?;
+        let rty = self.ty_of(recv);
+        let t = self.borrowed_as(recv, &rty)?;
+        let ect = self.cty(&el)?;
+        let refs: Vec<&'a Expr> = args.iter().collect();
+        match kind {
+            "tensor.sum" | "tensor.mean" => {
+                let mean = (kind == "tensor.mean") as u8;
+                if cplx {
+                    let ct = if single { "tau_c64" } else { "tau_c128" };
+                    Ok(format!("({{ double re_, im_; tau_t_sum_c(&({t}), {mean}, &re_, &im_); ({ct}){{ re_, im_ }}; }})"))
+                } else {
+                    Ok(format!("(({ect})tau_t_sum(&({t}), {mean}))"))
+                }
+            }
+            "tensor.min" | "tensor.max" => Ok(format!("(({ect})tau_t_minmax(&({t}), {}))", (kind == "tensor.max") as u8)),
+            "tensor.shape" => {
+                let rt = self.ty_of(e);
+                let vt = self.cty(&rt)?;
+                let push = self.vec_helper(&Ty::usize(), "push")?;
+                Ok(format!("({{ tau_tensor *t_ = &({t}); {vt} r_ = {{0}}; for (int i_ = 0; i_ < t_->rank; i_++) {push}(&r_, (uint64_t)t_->dims[i_]); r_; }})"))
+            }
+            "tensor.to_vec" => {
+                let rt = self.ty_of(e);
+                let vt = self.cty(&rt)?;
+                let get = if cplx { format!("({ect}){{ t_->data[2 * i_], t_->data[2 * i_ + 1] }}") } else { format!("({ect})t_->data[i_]") };
+                Ok(format!(
+                    "({{ tau_tensor *t_ = &({t}); size_t n_ = tau_t_len(t_); {vt} r_ = {{0}}; if (n_) {{ r_.ptr = ({ect} *)malloc(n_ * sizeof({ect})); r_.cap = n_; r_.len = n_; for (size_t i_ = 0; i_ < n_; i_++) r_.ptr[i_] = {get}; }} r_; }})"
+                ))
+            }
+            "tensor.map" => {
+                let fty = Ty::Fn(vec![(*el).clone()], Box::new((*el).clone()));
+                let fct = self.cty(&fty)?;
+                let f = self.borrowed_as(&args[0], &fty)?;
+                let sg = single as u8;
+                let step = if cplx {
+                    format!("{ect} y_ = f_.call(f_.env, ({ect}){{ t_.data[2 * i_], t_.data[2 * i_ + 1] }}); t_.data[2 * i_] = tau_t_rnd(y_.re, {sg}); t_.data[2 * i_ + 1] = tau_t_rnd(y_.im, {sg});")
+                } else {
+                    format!("t_.data[i_] = tau_t_rnd((double)f_.call(f_.env, ({ect})t_.data[i_]), {sg});")
+                };
+                // the function may use the tensor itself, so a copy is filled in
+                Ok(format!("({{ tau_tensor src_ = {t}; {fct} f_ = {f}; tau_tensor t_ = tau_t_clone(&src_); size_t n_ = tau_t_len(&t_); for (size_t i_ = 0; i_ < n_; i_++) {{ {step} }} t_; }})"))
+            }
+            "tensor.reshape" => {
+                let usz = vec![Ty::usize(); args.len()];
+                let (decls, n) = self.ordered_with(&refs, Some(&usz), true)?;
+                Ok(Self::wrap(decls, format!("({{ size_t d_[{}] = {{ {} }}; tau_t_reshape(&({t}), {}, d_); }})", n.len().max(1), n.join(", "), n.len())))
+            }
+            _ => Ok(format!("tau_t_transpose(&({t}))")),
+        }
     }
 
     /// The pieces of an element access `t[i, j]`: C text binding `t_` (the tensor), `ix_` (the

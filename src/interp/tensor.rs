@@ -17,7 +17,271 @@ fn round(single: bool, x: f64) -> f64 {
     }
 }
 
+/// `[2, 3]`
+fn shape_text(dims: &[usize]) -> String {
+    format!("[{}]", dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "))
+}
+
 impl<'a> Interp<'a> {
+    /// The tensor builtins that are called as methods: the constructors (`Type.zeros(..)`), and the
+    /// methods of a tensor value (`t.sum()`).
+    pub fn tensor_builtin(&mut self, kind: &str, e: &'a Expr, recv: &'a Expr, args: &'a [Expr], f: &Frame<'a>) -> R<'a, Value<'a>> {
+        match kind {
+            "tensor.zeros" | "tensor.ones" | "tensor.random" => self.tensor_ctor(kind, e, args, f),
+            "tensor.from" | "tensor.from_rows" | "tensor.eye" | "tensor.full" | "tensor.linspace" | "tensor.arange" => self.tensor_ctor2(kind, e, args, f),
+            _ => {
+                let t = match self.eval(recv, f)? {
+                    Value::Tensor(t) => t,
+                    other => match self.deref(other)? {
+                        Value::Tensor(t) => t,
+                        other => return panic(format!("expected a tensor, found a {}", other.type_name())),
+                    },
+                };
+                if kind == "tensor.map" {
+                    // the function may use the tensor itself: work on a copy
+                    let copy = t.borrow().clone();
+                    self.tensor_method(kind, &copy, args, f)
+                } else {
+                    let guard = t.borrow();
+                    let r = self.tensor_method(kind, &guard, args, f);
+                    drop(guard);
+                    r
+                }
+            }
+        }
+    }
+
+    fn make_tensor(dims: Vec<usize>, data: TData, single: bool) -> Value<'a> {
+        Value::Tensor(Rc::new(RefCell::new(Tensor { dims, data, single })))
+    }
+
+    fn checked_len(&self, dims: &[usize]) -> R<'a, usize> {
+        match dims.iter().try_fold(1usize, |a, &d| a.checked_mul(d)) {
+            Some(n) if n <= crate::types::MAX_TENSOR_ELEMS => Ok(n),
+            _ => panic(format!("a tensor can have at most {} elements", crate::types::MAX_TENSOR_ELEMS)),
+        }
+    }
+
+    /// `from`, `from_rows`, `eye`, `full`, `linspace`, `arange`.
+    fn tensor_ctor2(&mut self, kind: &str, e: &'a Expr, args: &'a [Expr], f: &Frame<'a>) -> R<'a, Value<'a>> {
+        let Ty::Tensor(elem, _) = self.ty_of(e, f) else { return panic("a tensor constructor needs a tensor type") };
+        let single = matches!(*elem, Ty::Float(FloatTy::F32) | Ty::Complex(FloatTy::F32));
+        let complex = matches!(*elem, Ty::Complex(_));
+        let mut vals = Vec::new();
+        for a in args {
+            vals.push(self.eval(a, f)?);
+        }
+        let usize_of = |v: &Value<'a>| -> R<'a, usize> {
+            match v {
+                Value::Int(n) if *n >= 0 => Ok(*n as usize),
+                _ => panic("tensor sizes must be non-negative integers"),
+            }
+        };
+        let pair = |this: &Self, v: &Value<'a>| -> R<'a, (f64, f64)> {
+            match this.clone_deref(v) {
+                Value::Float(x) => Ok((round(single, x), 0.0)),
+                Value::Int(i) => Ok((round(single, i as f64), 0.0)),
+                Value::Complex(a, b) => Ok((round(single, a), round(single, b))),
+                other => panic(format!("expected a number, found a {}", other.type_name())),
+            }
+        };
+        let build = |dims: Vec<usize>, items: Vec<(f64, f64)>| -> Value<'a> {
+            let data = if complex { TData::C(items) } else { TData::F(items.into_iter().map(|p| p.0).collect()) };
+            Self::make_tensor(dims, data, single)
+        };
+        match kind {
+            "tensor.from" => {
+                let (s, a, b) = self.slice_of(&self.clone_deref(&vals[0]))?;
+                let items: Vec<(f64, f64)> = s.borrow()[a..b].iter().map(|v| pair(self, v)).collect::<R<'a, Vec<_>>>()?;
+                self.checked_len(&[items.len()])?;
+                Ok(build(vec![items.len()], items))
+            }
+            "tensor.from_rows" => {
+                let (s, a, b) = self.slice_of(&self.clone_deref(&vals[0]))?;
+                let rows: Vec<Value<'a>> = s.borrow()[a..b].to_vec();
+                let mut parsed: Vec<Vec<(f64, f64)>> = Vec::new();
+                for r in &rows {
+                    let (rs, ra, rb) = self.slice_of(&self.clone_deref(r))?;
+                    parsed.push(rs.borrow()[ra..rb].iter().map(|v| pair(self, v)).collect::<R<'a, Vec<_>>>()?);
+                }
+                let cols = parsed.first().map(|r| r.len()).unwrap_or(0);
+                if parsed.iter().any(|r| r.len() != cols) {
+                    return panic("`from_rows` needs rows of the same length");
+                }
+                let nr = parsed.len();
+                self.checked_len(&[nr, cols])?;
+                // column-major: element (i, j) is at j * rows + i
+                let mut items = vec![(0.0, 0.0); nr * cols];
+                for (i, r) in parsed.iter().enumerate() {
+                    for (j, x) in r.iter().enumerate() {
+                        items[j * nr + i] = *x;
+                    }
+                }
+                Ok(build(vec![nr, cols], items))
+            }
+            "tensor.eye" => {
+                let n = usize_of(&vals[0])?;
+                self.checked_len(&[n, n])?;
+                let mut items = vec![(0.0, 0.0); n * n];
+                for i in 0..n {
+                    items[i * n + i] = (1.0, 0.0);
+                }
+                Ok(build(vec![n, n], items))
+            }
+            "tensor.full" => {
+                let v = pair(self, &vals[0])?;
+                let mut dims = Vec::new();
+                for s in &vals[1..] {
+                    dims.push(usize_of(s)?);
+                }
+                let n = self.checked_len(&dims)?;
+                Ok(build(dims, vec![v; n]))
+            }
+            "tensor.linspace" => {
+                let (a, b) = (pair(self, &vals[0])?.0, pair(self, &vals[1])?.0);
+                let n = usize_of(&vals[2])?;
+                self.checked_len(&[n])?;
+                let items = (0..n)
+                    .map(|i| {
+                        let x = if n == 1 || i == 0 {
+                            a
+                        } else if i == n - 1 {
+                            b
+                        } else {
+                            a + (b - a) * (i as f64) / ((n - 1) as f64)
+                        };
+                        (round(single, x), 0.0)
+                    })
+                    .collect();
+                Ok(build(vec![n], items))
+            }
+            _ => {
+                let n = usize_of(&vals[0])?;
+                self.checked_len(&[n])?;
+                Ok(build(vec![n], (0..n).map(|i| (round(single, i as f64), 0.0)).collect()))
+            }
+        }
+    }
+
+    fn clone_deref(&self, v: &Value<'a>) -> Value<'a> {
+        let mut cur = v.clone();
+        while let Value::Ref(t) = &cur {
+            match self.load(t) {
+                Ok(n) => cur = n,
+                Err(_) => break,
+            }
+        }
+        cur
+    }
+
+    /// `sum`, `mean`, `min`, `max`, `shape`, `to_vec`, `map`, `reshape`, `transpose` of a tensor value.
+    fn tensor_method(&mut self, kind: &str, t: &Tensor, args: &'a [Expr], f: &Frame<'a>) -> R<'a, Value<'a>> {
+        let single = t.single;
+        let len = t.len();
+        let elem_value = |data: &TData, i: usize| -> Value<'a> {
+            match data {
+                TData::F(d) => Value::Float(d[i]),
+                TData::C(d) => Value::Complex(d[i].0, d[i].1),
+            }
+        };
+        match kind {
+            "tensor.sum" | "tensor.mean" => {
+                let mean = kind == "tensor.mean";
+                match &t.data {
+                    TData::F(d) => {
+                        let mut acc = 0.0f64;
+                        for x in d {
+                            acc += *x;
+                        }
+                        if mean {
+                            acc /= len as f64;
+                        }
+                        Ok(Value::Float(round(single, acc)))
+                    }
+                    TData::C(d) => {
+                        let (mut re, mut im) = (0.0f64, 0.0f64);
+                        for (a, b) in d {
+                            re += *a;
+                            im += *b;
+                        }
+                        if mean {
+                            re /= len as f64;
+                            im /= len as f64;
+                        }
+                        Ok(Value::Complex(round(single, re), round(single, im)))
+                    }
+                }
+            }
+            "tensor.min" | "tensor.max" => {
+                let TData::F(d) = &t.data else { return panic("min and max need a tensor of floats") };
+                let Some(&first) = d.first() else { return panic(format!("{} of an empty tensor", &kind[7..])) };
+                let mut m = first;
+                for &x in &d[1..] {
+                    if (kind == "tensor.min" && x < m) || (kind == "tensor.max" && x > m) {
+                        m = x;
+                    }
+                }
+                Ok(Value::Float(m))
+            }
+            "tensor.shape" => Ok(Value::vec(t.dims.iter().map(|&d| Value::Int(d as i128)).collect())),
+            "tensor.to_vec" => Ok(Value::vec((0..len).map(|i| elem_value(&t.data, i)).collect())),
+            "tensor.map" => {
+                let func = self.eval(&args[0], f)?;
+                let mut out_f = Vec::new();
+                let mut out_c = Vec::new();
+                for i in 0..len {
+                    let r = self.call_value(func.clone(), vec![elem_value(&t.data, i)])?;
+                    match (self.clone_deref(&r), &t.data) {
+                        (Value::Float(x), TData::F(_)) => out_f.push(round(single, x)),
+                        (Value::Complex(a, b), TData::C(_)) => out_c.push((round(single, a), round(single, b))),
+                        (other, _) => return panic(format!("`map` expected the function to return the element type, got a {}", other.type_name())),
+                    }
+                }
+                let data = if matches!(t.data, TData::C(_)) { TData::C(out_c) } else { TData::F(out_f) };
+                Ok(Self::make_tensor(t.dims.clone(), data, single))
+            }
+            "tensor.reshape" => {
+                let mut dims = Vec::new();
+                for a in args {
+                    match self.eval(a, f)? {
+                        Value::Int(n) if n >= 0 => dims.push(n as usize),
+                        _ => return panic("tensor sizes must be non-negative integers"),
+                    }
+                }
+                let n = dims.iter().try_fold(1usize, |a, &d| a.checked_mul(d));
+                if n != Some(len) {
+                    return panic(format!("cannot reshape {len} elements into {}", shape_text(&dims)));
+                }
+                Ok(Self::make_tensor(dims, t.data.clone(), single))
+            }
+            "tensor.transpose" => {
+                let (r, c) = (t.dims[0], t.dims[1]);
+                let data = match &t.data {
+                    TData::F(d) => {
+                        let mut o = vec![0.0; len];
+                        for i in 0..r {
+                            for j in 0..c {
+                                o[i * c + j] = d[j * r + i];
+                            }
+                        }
+                        TData::F(o)
+                    }
+                    TData::C(d) => {
+                        let mut o = vec![(0.0, 0.0); len];
+                        for i in 0..r {
+                            for j in 0..c {
+                                o[i * c + j] = d[j * r + i];
+                            }
+                        }
+                        TData::C(o)
+                    }
+                };
+                Ok(Self::make_tensor(vec![c, r], data, single))
+            }
+            other => panic(format!("unknown tensor operation `{other}`")),
+        }
+    }
+
     pub fn tensor_ctor(&mut self, kind: &str, e: &'a Expr, args: &'a [Expr], f: &Frame<'a>) -> R<'a, Value<'a>> {
         let Ty::Tensor(elem, dims) = self.ty_of(e, f) else {
             return panic("a tensor constructor needs a tensor type");

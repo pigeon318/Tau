@@ -725,3 +725,34 @@ mod format_specs {
         assert_eq!(errors(&main_with("print(\"{5:x} {2.5:.2}\")")), "");
     }
 }
+
+// ------------------------------------------------------------------ tensor constructors and methods
+
+mod tensor_api {
+    use super::{err, ok};
+
+    #[test]
+    fn the_new_constructors_and_methods_have_the_right_types() {
+        let r = ok("fn main() {\n let a = Tensor<f64, [_]>.from([1.0, 2.0])\n let m = Tensor<f64, [_, _]>.eye(2)\n let s = a.sum()\n let sh = a.shape()\n let v = a.to_vec()\n let r = m.reshape(4)\n let t = m.transpose()\n let b = a.map(|x| x + 1.0)\n let c = Tensor<c128, [_]>.from([1.0 + 0.0i])\n let z = c.sum()\n}\n");
+        assert_eq!(r.binding_ty("s").as_deref(), Some("f64"));
+        assert_eq!(r.binding_ty("sh").as_deref(), Some("Vec<usize>"));
+        assert_eq!(r.binding_ty("v").as_deref(), Some("Vec<f64>"));
+        assert_eq!(r.binding_ty("r").as_deref(), Some("Tensor<f64, [_]>"));
+        assert_eq!(r.binding_ty("t").as_deref(), Some("Tensor<f64, [_, _]>"));
+        assert_eq!(r.binding_ty("b").as_deref(), Some("Tensor<f64, [_]>"));
+        assert_eq!(r.binding_ty("z").as_deref(), Some("c128"));
+    }
+
+    #[test]
+    fn misuse_is_explained() {
+        err("fn main() {\n let a = Tensor<f64, [_, _]>.from([1.0])\n}\n", "makes a tensor of rank 1");
+        err("fn main() {\n let a = Tensor<f64, [_]>.eye(3)\n}\n", "makes a tensor of rank 2");
+        err("fn main() {\n let a = Tensor<f64, [_]>.arange(2, 3)\n}\n", "takes 1 argument");
+        err("fn main() {\n let a = Tensor<c128, [_]>.linspace(0.0, 1.0, 3)\n}\n", "needs a tensor of floats");
+        err("fn main() {\n let a = Tensor<c128, [_]>.arange(3)\n let b = a.min()\n}\n", "needs a tensor of floats");
+        err("fn main() {\n let a = Tensor<f64, [_]>.arange(3)\n let b = a.transpose()\n}\n", "rank 2");
+        err("fn main() {\n let a = Tensor<f64, [_]>.arange(3)\n let b = a.reshape()\n}\n", "needs the new sizes");
+        err("fn main() {\n let a = Tensor<f64, [_]>.arange(3)\n let b = a.map(|x: i64| x)\n}\n", "mismatched types");
+        err("fn main() {\n let a = Tensor<f64, [_]>.arange(3)\n let b = a.sum(1)\n}\n", "takes 0 arguments");
+    }
+}

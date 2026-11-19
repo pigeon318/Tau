@@ -1,20 +1,26 @@
-// Tensors: constructors, matrix product, elementwise ops, indexing.
-
-use math.linalg
+// Building tensors from data and summarising them.
 
 fn main() {
-    let a = Tensor<f64, [3, 3]>.zeros()
-    let b = Tensor<f64, [_, _]>.random(3, 3)
-    let c = a @ b
-    let d = c + b
-    let e = d * 2.0
-    let v = Tensor<f64, [_]>.ones(3)
-    let w = b @ v
-    let x = e[0, 1]
-    print(trace(d))
-    print(x)
-    // eigenvalues need a symmetric matrix
-    let sym = d + linalg.transpose(d)
-    let (vals, vecs) = linalg.eig(sym)
-    print(vals)
+    // from data
+    let signal = Tensor<f64, [_]>.from([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])
+    let mean = signal.mean()
+    let deviations = signal.map(|x| (x - mean) ^ 2)
+    let variance = deviations.mean()
+    print("mean = {mean}, standard deviation = {sqrt(variance)}")
+    print("range = {signal.min()} to {signal.max()}, {signal.shape()[0]} samples")
+
+    // a table of values of a function
+    let xs = Tensor<f64, [_]>.linspace(0.0, 1.0, 5)
+    let ys = xs.map(|x| x * x)
+    print("x  = {xs}")
+    print("x^2 = {ys}")
+    print("integral of x^2 on [0, 1] by the trapezoid rule = {(ys.sum() - 0.5 * (ys.min() + ys.max())) * 0.25}")
+
+    // matrices
+    let a = Tensor<f64, [_, _]>.from_rows(vec[vec[1.0, 2.0], vec[3.0, 4.0]])
+    let id = Tensor<f64, [_, _]>.eye(2)
+    print(a @ id)
+    print(a.transpose())
+    print(a.reshape(4))
+    print(Tensor<f64, [_, _]>.full(0.5, 2, 3))
 }

@@ -536,3 +536,8 @@ fn a_view_of_an_inner_variable_cannot_outlive_its_block() {
     ok_m("let r = {\n let v = vec[1, 2, 3]\n v[0..2].to_vec()\n}\nprint(r)");
     ok_m("let n = {\n let v = vec[1, 2, 3]\n v.len\n}\nprint(n)");
 }
+
+#[test]
+fn tensor_methods_only_read_the_tensor() {
+    ok_m("let a = Tensor<f64, [_]>.arange(4)\n let s = a.sum()\n let m = a.max()\n let b = a.map(|x| x + s)\n let r = a.reshape(2, 2)\n print(a)\n print(s + m)\n print(b)\n print(r)");
+}

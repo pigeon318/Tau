@@ -871,6 +871,8 @@ impl<'r> Lowerer<'r> {
                 (sig.self_mode, sig.params.iter().map(|p| p.mode).collect())
             }
             Some(Res::StructCtor(..)) | Some(Res::Variant(..)) => (None, vec![ParamMode::Own; args.len()]),
+            // `t.sum()`: the tensor is only read
+            Some(Res::Builtin(k)) if crate::check::tensor_builtin_has_receiver(k) => (Some(ParamMode::Borrow), vec![ParamMode::Borrow; args.len()]),
             _ => (None, vec![ParamMode::Borrow; args.len()]),
         };
         let mut ops = Vec::new();

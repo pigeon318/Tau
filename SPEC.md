@@ -96,6 +96,27 @@ let b = Tensor<f64, [_, _]>.random(100, 50)   // dynamic dimensions
 - One `Tensor` type. Each dimension is a fixed number or `_` (dynamic).
 - Column-major storage. Dense only in v1.
 - `a @ b` is matrix multiplication (BLAS-backed) and `a * b`, `a + b` and so on are elementwise.
+Building and summarising tensors (all deterministic, and identical on both backends):
+
+```
+let a = Tensor<f64, [_]>.from([1.0, 2.0, 3.0, 4.0])           // from an array, slice or Vec
+let m = Tensor<f64, [_, _]>.from_rows(vec[vec[1.0, 2.0], vec[3.0, 4.0]])
+let i = Tensor<f64, [_, _]>.eye(3)                              // identity
+let f = Tensor<f64, [_, _, _]>.full(7.5, 2, 3, 4)               // every element 7.5
+let x = Tensor<f64, [_]>.linspace(0.0, 1.0, 11)                 // n evenly spaced points, ends included
+let n = Tensor<f64, [_]>.arange(5)                              // 0.0, 1.0, 2.0, 3.0, 4.0
+
+a.sum()  a.mean()  a.min()  a.max()                             // reductions (min/max: floats only)
+a.shape()          // Vec<usize>, e.g. [2, 3]
+a.to_vec()         // Vec of the elements, in storage order
+a.map(|x| x * x)   // a new tensor
+m.reshape(4)       // a copy with another shape (the same number of elements)
+m.transpose()      // rank 2
+```
+
+- Elements are stored **column-major** (the first index varies fastest), so `to_vec` and `reshape` follow that order: reshaping `[[1, 2, 3], [4, 5, 6]]` to `(3, 2)` gives `[[1, 5], [4, 3], [2, 6]]`, as in Fortran and Julia.
+- `sum` adds in storage order starting from `0.0`, and `mean` is that sum divided by the number of elements (NaN for none). `min` and `max` panic on an empty tensor. `linspace(a, b, n)` is `a + (b - a) * i / (n - 1)`, with exactly `a` and `b` at the ends. For `f32` tensors every result is rounded to single precision.
+- The constructors need the rank to match (`from`, `linspace`, `arange` make rank 1; `from_rows` and `eye` rank 2; `full` any rank).
 - **v1:** shape mismatches are runtime panics with a clear message. **[post-v1]:** symbolic dimensions (`N`, `M`) and compile-time shape checking.
 
 ### Units [post-v1]

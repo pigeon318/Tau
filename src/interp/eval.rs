@@ -560,7 +560,7 @@ impl<'a> Interp<'a> {
             }
             Some(Res::Variant(adt, i, _)) => self.construct(*adt, Some(*i), args, f),
             Some(Res::StructCtor(adt, _)) => self.construct(*adt, None, args, f),
-            Some(Res::Builtin(kind)) => self.tensor_ctor(kind, e, args, f),
+            Some(Res::Builtin(kind)) => self.tensor_builtin(kind, e, recv, args, f),
             _ => panic("an unresolved method call reached the interpreter"),
         }
     }

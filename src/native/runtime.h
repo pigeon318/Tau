@@ -750,6 +750,99 @@ static size_t tau_t_flat(const tau_tensor *t, const size_t *idx, int n, int read
 
 static double tau_t_round(int single, double x) { return single ? (double)(float)x : x; }
 
+/* constructors and methods of tensors (src/interp/tensor.rs has the same, and the two must agree) */
+static double tau_t_rnd(double x, int single) { return single ? (double)(float)x : x; }
+
+static tau_tensor tau_t_eye(size_t n, int cplx, int single) {
+    size_t d[2] = { n, n };
+    tau_tensor t = tau_t_new(2, d, cplx, single);
+    for (size_t i = 0; i < n; i++) t.data[(cplx ? 2 : 1) * (i * n + i)] = 1.0;
+    return t;
+}
+
+static tau_tensor tau_t_full(int rank, const size_t *dims, double re, double im, int cplx, int single) {
+    tau_tensor t = tau_t_new(rank, dims, cplx, single);
+    size_t n = tau_t_len(&t);
+    re = tau_t_rnd(re, single);
+    im = tau_t_rnd(im, single);
+    for (size_t i = 0; i < n; i++) {
+        if (cplx) { t.data[2 * i] = re; t.data[2 * i + 1] = im; } else t.data[i] = re;
+    }
+    return t;
+}
+
+static tau_tensor tau_t_linspace(double a, double b, size_t n, int single) {
+    size_t d[1] = { n };
+    tau_tensor t = tau_t_new(1, d, 0, single);
+    a = tau_t_rnd(a, single);
+    b = tau_t_rnd(b, single);
+    for (size_t i = 0; i < n; i++) {
+        double x = (n == 1 || i == 0) ? a : (i == n - 1) ? b : a + (b - a) * (double)i / (double)(n - 1);
+        t.data[i] = tau_t_rnd(x, single);
+    }
+    return t;
+}
+
+static tau_tensor tau_t_arange(size_t n, int single) {
+    size_t d[1] = { n };
+    tau_tensor t = tau_t_new(1, d, 0, single);
+    for (size_t i = 0; i < n; i++) t.data[i] = tau_t_rnd((double)i, single);
+    return t;
+}
+
+static double tau_t_sum(const tau_tensor *t, int mean) {
+    size_t n = tau_t_len(t);
+    double acc = 0.0;
+    for (size_t i = 0; i < n; i++) acc += t->data[i];
+    if (mean) acc /= (double)n;
+    return tau_t_rnd(acc, t->single);
+}
+
+static void tau_t_sum_c(const tau_tensor *t, int mean, double *re, double *im) {
+    size_t n = tau_t_len(t);
+    double a = 0.0, b = 0.0;
+    for (size_t i = 0; i < n; i++) { a += t->data[2 * i]; b += t->data[2 * i + 1]; }
+    if (mean) { a /= (double)n; b /= (double)n; }
+    *re = tau_t_rnd(a, t->single);
+    *im = tau_t_rnd(b, t->single);
+}
+
+static double tau_t_minmax(const tau_tensor *t, int is_max) {
+    size_t n = tau_t_len(t);
+    if (n == 0) tau_panic_cstr(is_max ? "max of an empty tensor" : "min of an empty tensor");
+    double m = t->data[0];
+    for (size_t i = 1; i < n; i++) if (is_max ? t->data[i] > m : t->data[i] < m) m = t->data[i];
+    return m;
+}
+
+static tau_tensor tau_t_reshape(const tau_tensor *t, int rank, const size_t *dims) {
+    size_t want = tau_t_len(t), have = 1;
+    int overflow = 0;
+    for (int i = 0; i < rank; i++) if (__builtin_mul_overflow(have, dims[i], &have)) overflow = 1;
+    if (overflow || have != want) {
+        char m[600];
+        int k = snprintf(m, sizeof m, "cannot reshape %zu elements into [", want);
+        for (int i = 0; i < rank && k < 500; i++) k += snprintf(m + k, sizeof m - (size_t)k, i ? ", %zu" : "%zu", dims[i]);
+        snprintf(m + k, sizeof m - (size_t)k, "]");
+        tau_panic_cstr(m);
+    }
+    tau_tensor r = tau_t_clone(t);
+    r.rank = (uint8_t)rank;
+    memset(r.dims, 0, sizeof r.dims);
+    for (int i = 0; i < rank; i++) r.dims[i] = dims[i];
+    return r;
+}
+
+static tau_tensor tau_t_transpose(const tau_tensor *t) {
+    size_t rr = t->dims[0], cc = t->dims[1], w = t->cplx ? 2 : 1;
+    size_t d[2] = { cc, rr };
+    tau_tensor o = tau_t_new(2, d, t->cplx, t->single);
+    for (size_t i = 0; i < rr; i++)
+        for (size_t j = 0; j < cc; j++)
+            for (size_t k = 0; k < w; k++) o.data[(i * cc + j) * w + k] = t->data[(j * rr + i) * w + k];
+    return o;
+}
+
 static tau_tensor tau_t_binop(char op, tau_tensor a, tau_tensor b) {
     if (a.rank != b.rank || memcmp(a.dims, b.dims, sizeof(size_t) * a.rank) != 0) tau_t_shape_panic("shape mismatch: ", &a, &b);
     tau_tensor r = tau_t_new(a.rank, a.dims, a.cplx, a.single);

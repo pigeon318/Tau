@@ -945,6 +945,11 @@ impl<'a> Checker<'a> {
             }
             return Ty::Error;
         }
+        if let Ty::Tensor(elem, dims) = &st {
+            if let Some(t) = self.tensor_method(e, recv, name, args, elem, dims) {
+                return t;
+            }
+        }
         let Some(pick) = self.lookup_method(&st, &name.name, true, e.span) else {
             for a in args {
                 self.expr(a, None);
@@ -1008,6 +1013,132 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The tensor constructors beyond `zeros`, `ones` and `random`:
+    /// `from(xs)`, `from_rows(rows)`, `eye(n)`, `full(value, sizes...)`, `linspace(a, b, n)`, `arange(n)`.
+    fn tensor_constructor(&mut self, e: &'a Expr, ty: &Ty, elem: &Ty, dims: &[Dim], name: &Ident, args: &'a [Expr]) -> Option<Ty> {
+        let kind: &'static str = match name.name.as_str() {
+            "from" => "tensor.from",
+            "from_rows" => "tensor.from_rows",
+            "eye" => "tensor.eye",
+            "full" => "tensor.full",
+            "linspace" => "tensor.linspace",
+            "arange" => "tensor.arange",
+            _ => return None,
+        };
+        let rank = dims.len();
+        let want_rank = match kind {
+            "tensor.full" => None,
+            "tensor.from_rows" | "tensor.eye" => Some(2),
+            _ => Some(1),
+        };
+        if let Some(r) = want_rank {
+            if rank != r {
+                self.err_hint(
+                    e.span,
+                    format!("`{}` makes a tensor of rank {r}, but this type has rank {rank}", name.name),
+                    if r == 1 { "like `Tensor<f64, [_]>`" } else { "like `Tensor<f64, [_, _]>`" },
+                );
+            }
+        }
+        let float_only = matches!(kind, "tensor.linspace" | "tensor.arange");
+        if float_only && !matches!(elem, Ty::Float(_)) && !matches!(elem, Ty::Var(_) | Ty::Error) {
+            self.err(e.span, format!("`{}` needs a tensor of floats", name.name));
+        }
+        let usz = Ty::usize();
+        let slice = Ty::Slice(Box::new(elem.clone()));
+        let rows = self.adt_named("Vec").map(|v| Ty::Adt(v, vec![Ty::Adt(v, vec![elem.clone()])])).unwrap_or(Ty::Error);
+        let params: Vec<Ty> = match kind {
+            "tensor.from" => vec![slice],
+            "tensor.from_rows" => vec![rows],
+            "tensor.eye" | "tensor.arange" => vec![usz.clone()],
+            "tensor.linspace" => vec![elem.clone(), elem.clone(), usz.clone()],
+            _ => std::iter::once(elem.clone()).chain((0..rank).map(|_| usz.clone())).collect(),
+        };
+        if args.len() != params.len() {
+            let s = if params.len() == 1 { "" } else { "s" };
+            self.err(e.span, format!("`{}` takes {} argument{s}, but {} {} supplied", name.name, params.len(), args.len(), if args.len() == 1 { "was" } else { "were" }));
+        }
+        for (a, p) in args.iter().zip(&params) {
+            self.expr_coerce(a, p);
+        }
+        for a in args.iter().skip(params.len()) {
+            self.expr(a, None);
+        }
+        self.record_res(e, Res::Builtin(kind));
+        Some(ty.clone())
+    }
+
+    /// Methods of every tensor, whatever its rank: `sum`, `mean`, `min`, `max`, `shape`, `to_vec`, `map`,
+    /// `reshape(sizes...)` and `transpose`.
+    fn tensor_method(&mut self, e: &'a Expr, _recv: &'a Expr, name: &Ident, args: &'a [Expr], elem: &Ty, dims: &[Dim]) -> Option<Ty> {
+        let kind: &'static str = match name.name.as_str() {
+            "sum" => "tensor.sum",
+            "mean" => "tensor.mean",
+            "min" => "tensor.min",
+            "max" => "tensor.max",
+            "shape" => "tensor.shape",
+            "to_vec" => "tensor.to_vec",
+            "map" => "tensor.map",
+            "reshape" => "tensor.reshape",
+            "transpose" => "tensor.transpose",
+            _ => return None,
+        };
+        let arity: Option<usize> = match kind {
+            "tensor.map" => Some(1),
+            "tensor.reshape" => None,
+            _ => Some(0),
+        };
+        if let Some(n) = arity {
+            if args.len() != n {
+                let s = if n == 1 { "" } else { "s" };
+                self.err(e.span, format!("`{}` takes {n} argument{s}, but {} {} supplied", name.name, args.len(), if args.len() == 1 { "was" } else { "were" }));
+            }
+        }
+        let numeric = matches!(elem, Ty::Float(_) | Ty::Complex(_));
+        let real = matches!(elem, Ty::Float(_));
+        match kind {
+            "tensor.sum" | "tensor.mean" if !numeric => {
+                self.err(e.span, format!("`{}` needs a tensor of floats or complex numbers", name.name));
+            }
+            "tensor.min" | "tensor.max" if !real => {
+                self.err(e.span, format!("`{}` needs a tensor of floats (complex numbers have no order)", name.name));
+            }
+            "tensor.transpose" if dims.len() != 2 => {
+                self.err(e.span, "`transpose` needs a tensor of rank 2");
+            }
+            _ => {}
+        }
+        let result = match kind {
+            "tensor.sum" | "tensor.mean" | "tensor.min" | "tensor.max" => elem.clone(),
+            "tensor.shape" => self.adt_named("Vec").map(|v| Ty::Adt(v, vec![Ty::usize()])).unwrap_or(Ty::Error),
+            "tensor.to_vec" => self.adt_named("Vec").map(|v| Ty::Adt(v, vec![elem.clone()])).unwrap_or(Ty::Error),
+            "tensor.map" => {
+                let f = Ty::Fn(vec![elem.clone()], Box::new(elem.clone()));
+                for a in args {
+                    self.expr_coerce(a, &f);
+                }
+                Ty::Tensor(Box::new(elem.clone()), dims.to_vec())
+            }
+            "tensor.reshape" => {
+                if args.is_empty() {
+                    self.err_hint(e.span, "`reshape` needs the new sizes", "like `t.reshape(2, 3)`");
+                }
+                for a in args {
+                    self.expr_coerce(a, &Ty::usize());
+                }
+                Ty::Tensor(Box::new(elem.clone()), vec![Dim::Dyn; args.len().max(1)])
+            }
+            _ => Ty::Tensor(Box::new(elem.clone()), dims.iter().rev().cloned().collect()),
+        };
+        if !matches!(kind, "tensor.map" | "tensor.reshape") {
+            for a in args {
+                self.expr(a, None);
+            }
+        }
+        self.record_res(e, Res::Builtin(kind));
+        Some(result)
+    }
+
     /// `Type.function(args)`
     fn assoc_call(&mut self, e: &'a Expr, ty: Ty, name: &Ident, args: &'a [Expr]) -> Ty {
         if let Ty::Tensor(elem, dims) = &ty {
@@ -1032,6 +1163,9 @@ impl<'a> Checker<'a> {
                     _ => "tensor.random",
                 }));
                 return ty.clone();
+            }
+            if let Some(t) = self.tensor_constructor(e, &ty, elem, dims, name, args) {
+                return t;
             }
         }
         let Some(pick) = self.lookup_method(&ty, &name.name, false, e.span) else {
