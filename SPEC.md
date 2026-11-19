@@ -265,6 +265,38 @@ parameters, is not generic, and returns nothing or a `Result`.
 
 ---
 
+## 8c. Time (`std.time`)
+
+```
+use std.time.*
+
+let start = monotonic_ns()
+work()
+print("took {format_duration(monotonic_ns() - start)}")     // took 3.266 ms
+print(format_iso(unix_ns() / 1_000_000_000))                // 2026-11-19T08:07:53Z
+```
+
+Times are plain integers, so they need no new types and behave the same on both backends.
+
+| Function | |
+|---|---|
+| `monotonic_ns() -> i64` | A clock for timing: nanoseconds since an arbitrary moment. It never goes backwards; only differences mean anything. |
+| `unix_ns() -> i64` | The wall clock: nanoseconds since 1970-01-01 00:00:00 UTC. It can jump when the system clock is set. |
+| `sleep(secs: f64)` | Wait. Panics on a negative or NaN number, or more than 1e9 seconds. |
+| `civil(unix_secs) -> (year, month, day, hour, minute, second)` | The UTC date and time of a Unix time (`i64` values; month 1-12). |
+| `from_civil(year, month, day, hour, minute, second) -> i64` | The Unix time of a UTC date. Panics with `invalid date or time` for one that does not exist (month 13, 29 February in a common year, hour 24). Leap seconds are not represented. |
+| `weekday(unix_secs) -> i64` | 0 is Monday, 6 is Sunday. |
+| `format_iso(unix_secs) -> String` | `2026-11-19T07:13:02Z` (a year before 0 gets a minus sign). |
+| `format_duration(ns) -> String` | `950 ns`, `1.500 µs`, `12.345 ms`, `1.250 s`, `2m 05s`, `1h 02m 05s`; truncated, not rounded. |
+
+The calendar is the proleptic Gregorian calendar in UTC, with whole seconds (`civil` and the others take seconds, so
+divide `unix_ns()` by `1_000_000_000`). Local time zones are not supported yet. The clocks have the resolution of
+the operating system (nanoseconds on Linux, about 100 ns on Windows). They can be used in `par` regions and tasks;
+what they return is of course different on every run. A nicer `Instant`/`Duration`/`DateTime` layer is planned for
+when the standard library can be written in Tau itself.
+
+---
+
 ## 9. Modules and packages
 
 ```
