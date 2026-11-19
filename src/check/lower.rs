@@ -53,7 +53,7 @@ impl<'a> Checker<'a> {
         if segs.is_empty() {
             return None;
         }
-        if let Some(&m) = self.mod_by_path.get(&segs.join(".")) {
+        if let Some(m) = self.find_module(module, &segs.join(".")) {
             return Some(m);
         }
         let first = self.scopes[module].modules.get(segs[0]).copied()?;
@@ -132,11 +132,15 @@ impl<'a> Checker<'a> {
             self.err(span, format!("cannot find module `{}`", prefix.join(".")));
             return None;
         };
-        match self.scopes[m].types.get(last).copied() {
-            Some(TypeItem::Adt(a)) => Some(TyHead::Adt(a)),
-            Some(TypeItem::Alias(a)) => Some(TyHead::Alias(a)),
-            Some(TypeItem::Trait(t)) => Some(TyHead::Trait(t)),
-            None => {
+        match self.type_in(cx.module, m, last) {
+            Err(()) => {
+                self.private_item(span, last, m);
+                None
+            }
+            Ok(Some(TypeItem::Adt(a))) => Some(TyHead::Adt(a)),
+            Ok(Some(TypeItem::Alias(a))) => Some(TyHead::Alias(a)),
+            Ok(Some(TypeItem::Trait(t))) => Some(TyHead::Trait(t)),
+            Ok(None) => {
                 self.err(
                     span,
                     format!("module `{}` has no type `{last}`", prefix.join(".")),

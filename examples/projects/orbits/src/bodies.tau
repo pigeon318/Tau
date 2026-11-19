@@ -1,0 +1,4 @@
+pub struct Body { pub name: str, pub mass: f64 }
+
+pub const EARTH: Body = Body("Earth", 5.972e24)
+pub const MOON: Body = Body("Moon", 7.342e22)

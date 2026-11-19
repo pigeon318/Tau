@@ -35,7 +35,7 @@ const diagStore = new Map();
 const sent = [];
 const vscode = {
   Position, Range,
-  Uri: class Uri { static file(p) { const u = new Uri(); u.scheme = 'file'; u.fsPath = p; return u; } toString() { return 'file://' + this.fsPath; } },
+  Uri: class Uri { static file(p) { const u = new Uri(); u.scheme = 'file'; u.fsPath = p; return u; } static parse(s) { return Uri.file(s.replace('file://', '')); } toString() { return 'file://' + this.fsPath; } },
   Diagnostic: class { constructor(range, message, severity) { Object.assign(this, { range, message, severity }); } },
   DiagnosticRelatedInformation: class { constructor(location, message) { Object.assign(this, { location, message }); } },
   DiagnosticSeverity: { Error: 0, Warning: 1 },
@@ -137,6 +137,30 @@ test('a type error becomes a diagnostic at the right range', async () => {
   assert.strictEqual(list[0].range.start.line, 14);
   assert.strictEqual(list[0].source, 'tau');
   assert.strictEqual(list[0].range.start.character, 19);
+});
+
+test('a file that uses another file of its package is checked with the package', async () => {
+  const proj = path.join(tmp, 'proj');
+  fs.mkdirSync(path.join(proj, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(proj, 'tau.toml'), '[package]\nname = "p"\n');
+  const main = 'use util\n\nfn main() {\n    print(util.double(21))\n}\n';
+  fs.writeFileSync(path.join(proj, 'src', 'main.tau'), main);
+  fs.writeFileSync(path.join(proj, 'src', 'util.tau'), 'pub fn double(x: i64) -> i64 {\n    "oops"\n}\n');
+  const mainUri = vscode.Uri.file(path.join(proj, 'src', 'main.tau'));
+  const utilUri = vscode.Uri.file(path.join(proj, 'src', 'util.tau'));
+  await registered['tau.check'](mainUri);
+  await settle();
+  // no false "unresolved import" on main.tau, and the real error is shown on util.tau
+  assert.deepStrictEqual(diagStore.get(mainUri.toString()), []);
+  const onUtil = diagStore.get(utilUri.toString());
+  assert(onUtil && onUtil.length === 1, JSON.stringify(onUtil));
+  assert.match(onUtil[0].message, /mismatched types/);
+  assert.strictEqual(onUtil[0].range.start.line, 1);
+  // after the fix the error on util.tau goes away
+  fs.writeFileSync(path.join(proj, 'src', 'util.tau'), 'pub fn double(x: i64) -> i64 { x * 2 }\n');
+  await registered['tau.check'](mainUri);
+  await settle();
+  assert.deepStrictEqual(diagStore.get(utilUri.toString()) || [], []);
 });
 
 test('code lenses sit on main and on tests', async () => {

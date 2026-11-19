@@ -1,0 +1,2 @@
+Earth: 92.0 minutes at 6771.0 km
+Moon: 118.0 minutes at 1838.0 km

@@ -176,6 +176,18 @@ impl<'a> Checker<'a> {
             },
             _ => unreachable!(),
         };
+        if let ValueItem::StructCtor(a) = item {
+            if self.prog.adt(a).module != self.body.cx.module {
+                let private = match &self.prog.adt(a).kind {
+                    AdtKind::Struct(fs) => fs.iter().find(|f| !f.public).map(|f| f.name.clone()),
+                    _ => None,
+                };
+                if let Some(f) = private {
+                    let name = self.prog.adt(a).name.clone();
+                    self.err_hint(span, format!("cannot take `{name}` apart here: its field `{f}` is private"), "the field can be made `pub`");
+                }
+            }
+        }
         let gens = self.prog.adt(adt).generics.clone();
         let args = self.fresh_adt_args(adt, span);
         let subst: Vec<(GenericId, Ty)> = gens.into_iter().zip(args.clone()).collect();

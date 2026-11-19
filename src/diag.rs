@@ -55,7 +55,7 @@ impl Diagnostic {
 }
 
 /// A source line with a caret underline; `label` is printed after the carets.
-fn snippet(src: &str, filename: &str, span: Span, label: Option<&str>) -> String {
+pub(crate) fn snippet(src: &str, filename: &str, span: Span, label: Option<&str>) -> String {
     let mut start = span.start.min(src.len());
     while !src.is_char_boundary(start) {
         start -= 1;

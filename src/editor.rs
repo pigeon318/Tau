@@ -7,6 +7,7 @@
 use crate::ast::*;
 use crate::check::{CheckResult, NodeKey};
 use crate::diag::Diagnostic;
+use crate::source::SourceMap;
 use crate::span::Span;
 
 /// 0-based line and UTF-16 column of a byte offset.
@@ -53,13 +54,35 @@ fn range_json(src: &str, span: Span) -> String {
     format!("{{\"start\":{{\"line\":{sl},\"character\":{sc}}},\"end\":{{\"line\":{el},\"character\":{ec}}}}}")
 }
 
-fn diagnostic_json(src: &str, d: &Diagnostic) -> String {
-    let mut s = format!("{{\"severity\":\"error\",\"message\":{},\"range\":{}", json_str(&d.message), range_json(src, d.span));
+/// A diagnostic as JSON. `map` tells which file each span is in; with `paths`, a `file` field names the
+/// file (an absolute path). A span that is in no file of the map is placed at the start of `fallback`.
+fn diagnostic_json(map: &SourceMap, d: &Diagnostic, paths: bool, fallback: &str) -> String {
+    let place = |span: Span| -> (String, String) {
+        match map.locate(span) {
+            Some((f, local)) => {
+                let file = match (&f.path, paths) {
+                    (Some(p), true) => format!(",\"file\":{}", json_str(&crate::project::display_path(p))),
+                    _ => String::new(),
+                };
+                (range_json(&f.src, local), file)
+            }
+            None => (range_json(fallback, Span::new(0, 0)), String::new()),
+        }
+    };
+    let (range, file) = place(d.span);
+    let mut s = format!("{{\"severity\":\"error\",\"message\":{},\"range\":{}{}", json_str(&d.message), range, file);
     if let Some(h) = &d.hint {
         s.push_str(&format!(",\"hint\":{}", json_str(h)));
     }
     if !d.notes.is_empty() {
-        let notes: Vec<String> = d.notes.iter().map(|(sp, m)| format!("{{\"message\":{},\"range\":{}}}", json_str(m), range_json(src, *sp))).collect();
+        let notes: Vec<String> = d
+            .notes
+            .iter()
+            .map(|(sp, m)| {
+                let (r, f) = place(*sp);
+                format!("{{\"message\":{},\"range\":{}{}}}", json_str(m), r, f)
+            })
+            .collect();
         s.push_str(&format!(",\"related\":[{}]", notes.join(",")));
     }
     s.push('}');
@@ -287,31 +310,79 @@ impl<'a> Collector<'a> {
 /// Check `src` and describe the result as JSON for an editor:
 ///
 /// ```text
-/// {"ok": true, "diagnostics": [ {"severity", "message", "range", "hint"?, "related"?} ],
+/// {"ok": true, "diagnostics": [ {"severity", "message", "range", "file"?, "hint"?, "related"?} ],
 ///  "hovers": [ {"range", "text"} ]}
 /// ```
 pub fn check_json(src: &str) -> String {
-    let mut diags: Vec<String> = Vec::new();
-    let mut hovers: Vec<String> = Vec::new();
-    let user = match crate::parse_module(src) {
-        Ok(m) => Some(m),
+    match crate::Workspace::single("<main>", src) {
+        Ok(ws) => report(&ws, Some(0), false, src),
         Err(d) => {
-            diags.push(diagnostic_json(src, &d));
-            None
+            let mut map = SourceMap::new();
+            map.add("<main>", src.to_string());
+            format!("{{\"ok\":false,\"diagnostics\":[{}],\"hovers\":[]}}", diagnostic_json(&map, &d, false, src))
         }
+    }
+}
+
+/// Like `check_json` for the file `path`, whose current text (it may be unsaved) is `text`. The file is
+/// checked as part of its package: the other files are read from disk, and `use` works as it does for
+/// `tau check`. Diagnostics carry a `file` field (every file of the program can have errors), and the
+/// hovers are those of `path`.
+pub fn check_json_file(path: &std::path::Path, text: &str) -> String {
+    use crate::project::{self, LoadOptions};
+    let canon = match path.canonicalize() {
+        Ok(p) => p,
+        // a file that is not on disk yet: its folder, and the name
+        Err(_) => match (path.parent().and_then(|d| d.canonicalize().ok()), path.file_name()) {
+            (Some(d), Some(n)) => d.join(n),
+            _ => path.to_path_buf(),
+        },
     };
-    if let Some(user) = &user {
-        let lib = crate::prelude::load();
-        let result = crate::analyze(&lib, user);
-        for d in &result.diagnostics {
-            diags.push(diagnostic_json(src, d));
+    let in_project = project::project_of_file(&canon);
+    let entry = in_project.clone().unwrap_or_else(|| canon.clone());
+    if in_project.is_none() && !canon.is_file() {
+        // not saved and not in a package: a program of one file
+        return check_json(text);
+    }
+    let opts = LoadOptions { all_modules: in_project.is_some(), overrides: vec![(canon.clone(), text.to_string())], ..Default::default() };
+    match project::load(&entry, opts) {
+        Ok(ws) => {
+            let idx = ws.map.files.iter().position(|f| f.path.as_deref() == Some(canon.as_path()));
+            report(&ws, idx, true, text)
         }
+        Err(e) if !e.diags.is_empty() => {
+            let diags: Vec<String> = e.diags.iter().map(|d| diagnostic_json(&e.map, d, true, text)).collect();
+            format!("{{\"ok\":false,\"diagnostics\":[{}],\"hovers\":[]}}", diags.join(","))
+        }
+        Err(e) => {
+            // a problem with tau.toml or the dependencies: shown at the top of the file
+            let d = Diagnostic::new(e.message.clone(), Span::new(0, 0));
+            let mut map = SourceMap::new();
+            map.add("<file>", text.to_string());
+            let mut j = diagnostic_json(&map, &d, false, text);
+            j.insert_str(j.len() - 1, &format!(",\"file\":{}", json_str(&crate::project::display_path(&canon))));
+            format!("{{\"ok\":false,\"diagnostics\":[{j}],\"hovers\":[]}}")
+        }
+    }
+}
+
+/// Analyze a loaded program; hovers are collected for the module read from file number `edited`.
+fn report(ws: &crate::Workspace, edited: Option<usize>, paths: bool, edited_text: &str) -> String {
+    let result = ws.analyze();
+    let diags: Vec<String> = result.diagnostics.iter().map(|d| diagnostic_json(&ws.map, d, paths, edited_text)).collect();
+    let mut hovers: Vec<String> = Vec::new();
+    if let Some(file) = edited {
+        let base = ws.map.files[file].base;
+        let src = &ws.map.files[file].src;
         let mut c = Collector { res: &result, hovers: Vec::new() };
-        c.items(&user.items);
+        for m in ws.mods.iter().filter(|m| m.file == Some(file)) {
+            c.items(&m.module.items);
+        }
         c.hovers.sort_by_key(|h| (h.span.start, h.span.end));
         c.hovers.dedup_by(|a, b| a.span == b.span);
         for h in &c.hovers {
-            hovers.push(format!("{{\"range\":{},\"text\":{}}}", range_json(src, h.span), json_str(&h.text)));
+            let local = Span::new(h.span.start.saturating_sub(base), h.span.end.saturating_sub(base));
+            hovers.push(format!("{{\"range\":{},\"text\":{}}}", range_json(src, local), json_str(&h.text)));
         }
     }
     format!("{{\"ok\":{},\"diagnostics\":[{}],\"hovers\":[{}]}}", diags.is_empty(), diags.join(","), hovers.join(","))

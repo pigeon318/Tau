@@ -10,6 +10,8 @@ const path = require('path');
 let diagnostics;
 /** Last compiler answer per document URI: { version, hovers } */
 const lastResult = new Map();
+/** The other files each document's last check reported errors on (URIs), to clear them later. */
+const otherFiles = new Map();
 /** Pending (debounced) checks per document URI. */
 const timers = new Map();
 /** Running compiler processes per document URI, so a newer check cancels an older one. */
@@ -43,10 +45,11 @@ async function checkDocument(doc) {
   const prev = running.get(key);
   if (prev) prev.kill();
   const cwd = doc.uri.scheme === 'file' ? path.dirname(doc.uri.fsPath) : undefined;
+  const filePath = doc.uri.scheme === 'file' ? doc.uri.fsPath : undefined;
   const version = doc.version;
   let result;
   try {
-    result = await runCheckFor(key, doc.getText(), cwd);
+    result = await runCheckFor(key, doc.getText(), cwd, filePath);
   } catch (e) {
     if (e && e.message === 'cancelled') return;
     if (e && e.code === 'ENOENT') {
@@ -67,7 +70,12 @@ async function checkDocument(doc) {
   }
   // the text may have changed while the compiler ran; a newer check is on its way then
   if (doc.version !== version) return;
-  const list = (result.diagnostics || []).map((d) => {
+  // The compiler checks the whole package, so errors can be in other files. Errors in this file are
+  // shown on it; errors in other files are shown on those files unless they are open (an open file is
+  // checked by itself, with its own unsaved text).
+  const here = samePath(filePath);
+  const byFile = new Map(); // fsPath ('' for this document) -> diagnostics
+  for (const d of result.diagnostics || []) {
     const diag = new vscode.Diagnostic(
       toRange(d.range),
       d.hint ? `${d.message}\nhelp: ${d.hint}` : d.message,
@@ -75,22 +83,49 @@ async function checkDocument(doc) {
     );
     diag.source = 'tau';
     if (d.related && d.related.length) {
-      diag.relatedInformation = d.related.map(
-        (n) => new vscode.DiagnosticRelatedInformation(new vscode.Location(doc.uri, toRange(n.range)), n.message)
-      );
+      diag.relatedInformation = d.related.map((n) => {
+        const target = n.file && !here(n.file) ? vscode.Uri.file(n.file) : doc.uri;
+        return new vscode.DiagnosticRelatedInformation(new vscode.Location(target, toRange(n.range)), n.message);
+      });
     }
-    return diag;
-  });
-  diagnostics.set(doc.uri, list);
-  lastResult.set(key, { version, hovers: result.hovers || [] });
+    const where = !d.file || here(d.file) ? '' : d.file;
+    if (!byFile.has(where)) byFile.set(where, []);
+    byFile.get(where).push(diag);
+  }
+  diagnostics.set(doc.uri, byFile.get('') || []);
+  const open = new Set(vscode.workspace.textDocuments.map((t) => t.uri.toString()));
+  const touched = new Set();
+  for (const [file, list] of byFile) {
+    if (file === '') continue;
+    const uri = vscode.Uri.file(file);
+    if (open.has(uri.toString())) continue;
+    diagnostics.set(uri, list);
+    touched.add(uri.toString());
+  }
+  // files that this document's last check reported on and that are fine now
+  for (const old of otherFiles.get(key) || []) {
+    if (!touched.has(old) && !open.has(old)) diagnostics.delete(vscode.Uri.parse(old));
+  }
+  otherFiles.set(key, touched);
+  const elsewhere = [...byFile].filter(([f]) => f !== '').reduce((n, [, l]) => n + l.length, 0);
+  lastResult.set(key, { version, hovers: result.hovers || [], elsewhere });
   updateStatus(vscode.window.activeTextEditor);
 }
 
-function runCheckFor(key, text, cwd) {
+/** A function telling whether a path is the same file as `mine` (case-insensitive on Windows). */
+function samePath(mine) {
+  const norm = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+  const m = mine ? norm(mine) : undefined;
+  return (other) => m !== undefined && other !== undefined && norm(other) === m;
+}
+
+function runCheckFor(key, text, cwd, filePath) {
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = cp.spawn(tauPath(), ['check', '-', '--json'], { cwd, windowsHide: true });
+      // `--file` says which file the text is, so that it is checked as part of its package
+      const args = ['check', '-', '--json'].concat(filePath ? ['--file', filePath] : []);
+      child = cp.spawn(tauPath(), args, { cwd, windowsHide: true });
     } catch (e) {
       reject(e);
       return;
@@ -148,12 +183,17 @@ function updateStatus(editor) {
     return;
   }
   const list = diagnostics.get(editor.document.uri) || [];
-  if (!lastResult.has(editor.document.uri.toString())) {
+  const res = lastResult.get(editor.document.uri.toString());
+  const elsewhere = (res && res.elsewhere) || 0;
+  const other = elsewhere ? ` (+${elsewhere} in other files)` : '';
+  if (!res) {
     setStatus('$(sync~spin) Tau', 'Checking...');
-  } else if (list.length === 0) {
+  } else if (list.length === 0 && elsewhere === 0) {
     setStatus('$(check) Tau', 'No errors. Click to check again.');
+  } else if (list.length === 0) {
+    setStatus(`$(warning) Tau: ${elsewhere} in other files`, `No errors in this file, but ${elsewhere} in other files of the package. Click to check again.`);
   } else {
-    setStatus(`$(error) Tau: ${list.length}`, `${list.length} error(s). Click to check again.`);
+    setStatus(`$(error) Tau: ${list.length}${other}`, `${list.length} error(s) in this file${other}. Click to check again.`);
   }
 }
 

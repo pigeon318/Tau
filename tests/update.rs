@@ -67,6 +67,19 @@ fn serve(tag: &'static str, payload: Vec<u8>, sums: String, release_status: u16)
     Server { url, stop }
 }
 
+/// Run a command and collect its output. A program that was just written can be reported "text file
+/// busy" (Linux) when another test thread forks while the file is still open for writing; that passes
+/// in a moment, so it is tried again.
+fn output(cmd: &mut Command) -> std::process::Output {
+    for _ in 0..50 {
+        match cmd.output() {
+            Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            r => return r.unwrap(),
+        }
+    }
+    cmd.output().unwrap()
+}
+
 fn have_curl() -> bool {
     Command::new("curl").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -82,7 +95,7 @@ fn copy_of_tau(name: &str) -> PathBuf {
 }
 
 fn run(exe: &PathBuf, server: &Server, args: &[&str]) -> (bool, String, String) {
-    let o = Command::new(exe).arg("update").args(args).env("TAU_UPDATE_URL", &server.url).env("GITHUB_TOKEN", "test-token").output().unwrap();
+    let o = output(Command::new(exe).arg("update").args(args).env("TAU_UPDATE_URL", &server.url).env("GITHUB_TOKEN", "test-token"));
     (o.status.success(), String::from_utf8_lossy(&o.stdout).to_string(), String::from_utf8_lossy(&o.stderr).to_string())
 }
 
@@ -111,7 +124,7 @@ fn updates_itself_to_a_newer_release() {
     assert!(out.contains("updated tau") && out.contains("v99.0.0"), "{out}");
     assert_eq!(std::fs::read(&exe).unwrap(), payload, "the program was not replaced");
     // the updated program still works (and tidies up what was left behind)
-    let v = Command::new(&exe).arg("--version").output().unwrap();
+    let v = output(Command::new(&exe).arg("--version"));
     assert!(v.status.success() && String::from_utf8_lossy(&v.stdout).starts_with("tau "));
     let leftovers: Vec<_> = std::fs::read_dir(exe.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).filter(|n| n.contains(".tau-update") || n.ends_with(".old")).collect();
     assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
@@ -194,7 +207,7 @@ fn explains_a_private_repository() {
     let server = serve("v99.0.0", Vec::new(), String::new(), 404);
     let exe = copy_of_tau("private");
     // no token (unless the GitHub CLI on this machine is logged in): the message says how to give one
-    let o = Command::new(&exe).arg("update").env("TAU_UPDATE_URL", &server.url).env_remove("GITHUB_TOKEN").env_remove("GH_TOKEN").env_remove("TAU_GITHUB_TOKEN").output().unwrap();
+    let o = output(Command::new(&exe).arg("update").env("TAU_UPDATE_URL", &server.url).env_remove("GITHUB_TOKEN").env_remove("GH_TOKEN").env_remove("TAU_GITHUB_TOKEN"));
     let err = String::from_utf8_lossy(&o.stderr).to_string();
     assert!(!o.status.success() && err.contains("GitHub says there is nothing there"), "{err}");
     if !err.contains("There may be no release yet") {

@@ -111,6 +111,7 @@ impl<'a> Checker<'a> {
                     is_op: has_attr(&item.attrs, "op"),
                     builtin_rule: has_attr(&item.attrs, "builtin_trait"),
                     module: m,
+                    public: item.public,
                 });
                 self.trait_srcs.push(t);
                 self.trait_attrs.push(&item.attrs);
@@ -135,6 +136,7 @@ impl<'a> Checker<'a> {
                 self.aliases.push(AliasEntry {
                     decl: a,
                     module: m,
+                    public: item.public,
                     generics,
                     ty: None,
                     resolving: false,
@@ -170,6 +172,62 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Where an item was defined, and whether it is `pub`.
+    pub(crate) fn type_owner(&self, t: TypeItem) -> (usize, bool) {
+        match t {
+            TypeItem::Adt(id) => (self.prog.adt(id).module, self.prog.adt(id).public),
+            TypeItem::Trait(id) => (self.prog.trait_(id).module, self.prog.trait_(id).public),
+            TypeItem::Alias(i) => (self.aliases[i].module, self.aliases[i].public),
+        }
+    }
+
+    pub(crate) fn value_owner(&self, v: ValueItem) -> (usize, bool) {
+        match v {
+            ValueItem::Fn(id) => (self.prog.fn_(id).module, self.prog.fn_(id).public),
+            ValueItem::Const(id) => (self.prog.consts[id.idx()].module, self.prog.consts[id.idx()].public),
+            ValueItem::StructCtor(a) | ValueItem::Variant(a, _) => (self.prog.adt(a).module, self.prog.adt(a).public),
+        }
+    }
+
+    /// What `from` finds when it asks module `src` for the type `name`: nothing, something private
+    /// (`Err`), or the type. Names that `src` imported from elsewhere are not its own.
+    pub(crate) fn type_in(&self, from: usize, src: usize, name: &str) -> Result<Option<TypeItem>, ()> {
+        match self.scopes[src].types.get(name).copied() {
+            Some(t) => {
+                let (owner, public) = self.type_owner(t);
+                if owner != src {
+                    Ok(None)
+                } else if public || owner == from {
+                    Ok(Some(t))
+                } else {
+                    Err(())
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn value_in(&self, from: usize, src: usize, name: &str) -> Result<Option<ValueItem>, ()> {
+        match self.scopes[src].values.get(name).copied() {
+            Some(v) => {
+                let (owner, public) = self.value_owner(v);
+                if owner != src {
+                    Ok(None)
+                } else if public || owner == from {
+                    Ok(Some(v))
+                } else {
+                    Err(())
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn private_item(&mut self, span: Span, name: &str, module: usize) {
+        let path = self.mods[module].0.clone();
+        self.err_hint(span, format!("`{name}` is private to the module `{path}`"), "add `pub` to its declaration to use it from other modules");
+    }
+
     fn resolve_use(&mut self, m: usize, tree: &UseTree, prefix: &[String]) {
         let mut full: Vec<String> = prefix.to_vec();
         full.extend(tree.path.iter().map(|i| i.name.clone()));
@@ -180,15 +238,20 @@ impl<'a> Checker<'a> {
                     self.resolve_use(m, t, &full);
                 }
             }
-            UseKind::Glob => match self.mod_by_path.get(&joined).copied() {
+            UseKind::Glob => match self.find_module(m, &joined) {
                 Some(src) => {
-                    let types: Vec<_> = self.scopes[src].types.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                    let values: Vec<_> = self.scopes[src].values.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                    for (k, v) in types {
-                        self.scopes[m].types.entry(k).or_insert(v);
+                    // only what `src` defines itself and has made public
+                    let names: Vec<String> = self.scopes[src].types.keys().cloned().collect();
+                    for k in names {
+                        if let Ok(Some(t)) = self.type_in(m, src, &k) {
+                            self.scopes[m].types.entry(k).or_insert(t);
+                        }
                     }
-                    for (k, v) in values {
-                        self.scopes[m].values.entry(k).or_insert(v);
+                    let names: Vec<String> = self.scopes[src].values.keys().cloned().collect();
+                    for k in names {
+                        if let Ok(Some(v)) = self.value_in(m, src, &k) {
+                            self.scopes[m].values.entry(k).or_insert(v);
+                        }
                     }
                 }
                 None => self.unresolved_import(tree.span, &joined),
@@ -197,29 +260,54 @@ impl<'a> Checker<'a> {
                 let last = full.last().unwrap().clone();
                 let local = alias.as_ref().map(|a| a.name.clone()).unwrap_or(last.clone());
                 // a whole module
-                if let Some(src) = self.mod_by_path.get(&joined).copied() {
+                if let Some(src) = self.find_module(m, &joined) {
                     self.scopes[m].modules.insert(local, src);
                     return;
                 }
                 // an item inside a module
                 let parent = full[..full.len() - 1].join(".");
-                if let Some(src) = self.mod_by_path.get(&parent).copied() {
+                if let Some(src) = self.find_module(m, &parent) {
                     let mut found = false;
-                    if let Some(t) = self.scopes[src].types.get(&last).copied() {
-                        self.scopes[m].types.entry(local.clone()).or_insert(t);
-                        found = true;
+                    let mut private = false;
+                    match self.type_in(m, src, &last) {
+                        Ok(Some(t)) => {
+                            self.scopes[m].types.entry(local.clone()).or_insert(t);
+                            found = true;
+                        }
+                        Ok(None) => {}
+                        Err(()) => private = true,
                     }
-                    if let Some(v) = self.scopes[src].values.get(&last).copied() {
-                        self.scopes[m].values.entry(local.clone()).or_insert(v);
-                        found = true;
+                    match self.value_in(m, src, &last) {
+                        Ok(Some(v)) => {
+                            self.scopes[m].values.entry(local.clone()).or_insert(v);
+                            found = true;
+                        }
+                        Ok(None) => {}
+                        Err(()) => private = true,
                     }
                     if found {
+                        return;
+                    }
+                    if private {
+                        self.private_item(tree.span, &last, src);
                         return;
                     }
                 }
                 self.unresolved_import(tree.span, &joined);
             }
         }
+    }
+
+    /// The module a dotted path names, as seen from module `from`: first inside its own package
+    /// (`util` in the package `fastmath` is `fastmath.util`), then by its full path.
+    pub(crate) fn find_module(&self, from: usize, dotted: &str) -> Option<usize> {
+        let pkg = &self.mod_package[from];
+        if !pkg.is_empty() {
+            if let Some(&i) = self.mod_by_path.get(&format!("{pkg}{dotted}")) {
+                return Some(i);
+            }
+        }
+        self.mod_by_path.get(dotted).copied()
     }
 
     fn unresolved_import(&mut self, span: Span, path: &str) {
@@ -230,11 +318,14 @@ impl<'a> Checker<'a> {
             .filter(|p| *p != "prelude" && *p != "main")
             .collect();
         avail.sort();
-        self.err_hint(
-            span,
-            format!("unresolved import `{path}`"),
-            format!("available modules: {}", avail.join(", ")),
-        );
+        let mut hint = format!("available modules: {}", avail.join(", "));
+        let first = path.split('.').next().unwrap_or(path);
+        if !self.mods.iter().any(|(p, _)| p == first || p.starts_with(&format!("{first}."))) {
+            hint.push_str(&format!(
+                "\nto use another file, put `{first}.tau` (or `{first}/mod.tau`) next to the program, or add a package under [dependencies] in tau.toml; names are case-sensitive"
+            ));
+        }
+        self.err_hint(span, format!("unresolved import `{path}`"), hint);
     }
 
     // ------------------------------------------------------------ signatures

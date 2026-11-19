@@ -651,13 +651,35 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Field { base, name } => {
                 let Head::Module(m) = self.resolve_head(base)? else { return None };
-                if let Some(TypeItem::Adt(id)) = self.scopes[m].types.get(&name.name).copied() {
-                    return Some(self.adt_head(id, e.span));
+                let from = self.body.cx.module;
+                match self.type_in(from, m, &name.name) {
+                    Ok(Some(TypeItem::Adt(id))) => return Some(self.adt_head(id, e.span)),
+                    Err(()) => {
+                        self.private_item(name.span, &name.name, m);
+                        return Some(Head::Type(Ty::Error));
+                    }
+                    _ => {}
                 }
                 let path = format!("{}.{}", self.mods[m].0, name.name);
                 self.mod_by_path.get(&path).map(|&sub| Head::Module(sub))
             }
             _ => None,
+        }
+    }
+
+    /// `module.name` used as a value from the code being checked. `Err` when the item is private (the
+    /// error is reported, and `args`, if any, are still checked so that their own errors show).
+    fn module_value_or_private(&mut self, m: usize, name: &Ident, args: &'a [Expr]) -> Result<Option<ValueItem>, ()> {
+        let from = self.body.cx.module;
+        match self.value_in(from, m, &name.name) {
+            Err(()) => {
+                self.private_item(name.span, &name.name, m);
+                for a in args {
+                    self.expr(a, None);
+                }
+                Err(())
+            }
+            r => r,
         }
     }
 
@@ -798,6 +820,16 @@ impl<'a> Checker<'a> {
             }
             None => (self.struct_fields(adt, &targs), self.prog.adt(adt).name.clone()),
         };
+        if variant.is_none() && self.prog.adt(adt).module != self.body.cx.module {
+            // building a struct from outside needs every field to be public
+            let private = match &self.prog.adt(adt).kind {
+                AdtKind::Struct(fs) => fs.iter().find(|f| !f.public).map(|f| f.name.clone()),
+                _ => None,
+            };
+            if let Some(f) = private {
+                self.err_hint(span, format!("cannot build `{name}` here: its field `{f}` is private"), "the module that defines it can offer a `pub fn` that builds it, or the field can be made `pub`");
+            }
+        }
         let params: Vec<(String, ParamMode, Ty)> = fields
             .iter()
             .cloned()
@@ -928,6 +960,7 @@ impl<'a> Checker<'a> {
             return Ty::Error;
         };
         self.check_unsafe_call(pick.fn_id, e.span);
+        self.check_method_visible(pick.fn_id, name.span);
         let inst = self.instantiate(pick.fn_id, &pick.subst, None, e.span);
         if inst.self_mode == Some(ParamMode::Mut) {
             self.check_mutable_place(recv, "borrow as mutable");
@@ -941,13 +974,14 @@ impl<'a> Checker<'a> {
 
     fn head_call(&mut self, e: &'a Expr, head: Head, name: &Ident, args: &'a [Expr]) -> Ty {
         match head {
-            Head::Module(m) => match self.scopes[m].values.get(&name.name).copied() {
-                Some(ValueItem::Fn(fid)) => self.call_function(e, e.span, fid, &[], None, args, false),
-                Some(ValueItem::StructCtor(adt)) => {
+            Head::Module(m) => match self.module_value_or_private(m, name, args) {
+                Err(()) => Ty::Error,
+                Ok(Some(ValueItem::Fn(fid))) => self.call_function(e, e.span, fid, &[], None, args, false),
+                Ok(Some(ValueItem::StructCtor(adt))) => {
                     let targs = self.fresh_adt_args(adt, e.span);
                     self.call_ctor(e, e.span, adt, None, targs, args, false)
                 }
-                Some(ValueItem::Variant(adt, i)) => {
+                Ok(Some(ValueItem::Variant(adt, i))) => {
                     let targs = self.fresh_adt_args(adt, e.span);
                     self.call_ctor(e, e.span, adt, Some(i), targs, args, false)
                 }
@@ -1014,7 +1048,21 @@ impl<'a> Checker<'a> {
             }
             return Ty::Error;
         };
+        self.check_method_visible(pick.fn_id, name.span);
         self.call_function(e, e.span, pick.fn_id, &pick.subst, None, args, false)
+    }
+
+    /// A method of an inherent `impl` is usable from other modules only if it is `pub` (a method of a
+    /// trait is as visible as the trait).
+    fn check_method_visible(&mut self, fid: FnId, span: Span) {
+        let def = self.prog.fn_(fid);
+        let Parent::Impl(i) = def.parent else { return };
+        if self.prog.impl_(i).trait_ref.is_some() || def.public || def.module == self.body.cx.module {
+            return;
+        }
+        let (name, module) = (def.name.clone(), def.module);
+        let path = self.mods[module].0.clone();
+        self.err_hint(span, format!("the method `{name}` is private to the module `{path}`"), "add `pub` to the method to use it from other modules");
     }
 
     // ------------------------------------------------------------ field and index
@@ -1022,12 +1070,13 @@ impl<'a> Checker<'a> {
     fn field(&mut self, e: &'a Expr, base: &'a Expr, name: &Ident) -> Ty {
         if let Some(head) = self.resolve_head(base) {
             return match head {
-                Head::Module(m) => match self.scopes[m].values.get(&name.name).copied() {
-                    Some(ValueItem::Const(cid)) => {
+                Head::Module(m) => match self.module_value_or_private(m, name, &[]) {
+                    Err(()) => Ty::Error,
+                    Ok(Some(ValueItem::Const(cid))) => {
                         self.record_res(e, Res::Const(cid));
                         self.prog.consts[cid.idx()].ty.clone()
                     }
-                    Some(ValueItem::Fn(fid)) => {
+                    Ok(Some(ValueItem::Fn(fid))) => {
                         let inst = self.instantiate(fid, &[], None, e.span);
                         self.record_res(e, Res::Fn(fid, inst.subst.clone()));
                         Ty::Fn(inst.params.into_iter().map(|p| p.2).collect(), Box::new(inst.ret))
@@ -1063,7 +1112,12 @@ impl<'a> Checker<'a> {
                     if let Some(f) = fs.iter().find(|f| f.name == name.name) {
                         let subst: Vec<(GenericId, Ty)> =
                             self.prog.adt(*id).generics.iter().copied().zip(args.iter().cloned()).collect();
-                        return f.ty.subst(&subst);
+                        let (fty, public, owner) = (f.ty.subst(&subst), f.public, self.prog.adt(*id).module);
+                        if !public && owner != self.body.cx.module {
+                            let sname = self.prog.adt(*id).name.clone();
+                            self.err_hint(name.span, format!("the field `{}` of `{sname}` is private", name.name), "add `pub` to the field in its declaration");
+                        }
+                        return fty;
                     }
                 }
                 let t = self.show(&st);

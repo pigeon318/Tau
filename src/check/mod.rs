@@ -23,6 +23,7 @@ use crate::ast::*;
 use crate::diag::Diagnostic;
 use crate::infer::{Infer, VarKind};
 use crate::prelude::{self, ModuleSrc};
+use crate::unit::ModRef;
 use crate::program::*;
 use crate::span::Span;
 use crate::types::*;
@@ -135,8 +136,18 @@ pub fn check_source(src: &str) -> Result<CheckResult, Diagnostic> {
     Ok(check(&lib, &user))
 }
 
+/// Type-check `user` against the library modules `lib` (the module is called `main`).
 pub fn check(lib: &[ModuleSrc], user: &Module) -> CheckResult {
-    let mut c = Checker::new(lib, user);
+    let mut mods: Vec<ModRef> = lib.iter().map(|m| m.as_ref()).collect();
+    mods.push(ModRef { path: "main", module: user, builtin: false, package: "" });
+    let root = mods.len() - 1;
+    check_modules(&mods, root)
+}
+
+/// Type-check a whole program: every module (library modules first, `prelude` the very first),
+/// and the index of the entry module, which holds `main`.
+pub fn check_modules(mods: &[ModRef], root: usize) -> CheckResult {
+    let mut c = Checker::new(mods, root);
     c.run();
     CheckResult {
         program: c.prog,
@@ -179,6 +190,7 @@ pub(crate) enum AdtSrc<'a> {
 pub(crate) struct AliasEntry<'a> {
     pub decl: &'a TypeAliasDecl,
     pub module: usize,
+    pub public: bool,
     pub generics: Vec<(String, GenericId)>,
     pub ty: Option<Ty>,
     pub resolving: bool,
@@ -236,7 +248,10 @@ pub(crate) struct Body {
 
 pub(crate) struct Checker<'a> {
     pub mods: Vec<(String, &'a Module)>,
-    pub user: usize,
+    /// Library modules (functions may lack a body; no hovers, no bindings).
+    pub mod_builtin: Vec<bool>,
+    /// Each module's package prefix, for looking up its `use` paths.
+    pub mod_package: Vec<String>,
     pub prog: Program,
     pub infer: Infer,
     pub scopes: Vec<ModScope>,
@@ -259,20 +274,23 @@ pub(crate) struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    fn new(lib: &'a [ModuleSrc], user: &'a Module) -> Checker<'a> {
-        let mut mods: Vec<(String, &'a Module)> =
-            lib.iter().map(|m| (m.path.clone(), &m.module)).collect();
-        mods.push(("main".to_string(), user));
-        let user_idx = mods.len() - 1;
+    fn new(refs: &[ModRef<'a>], root: usize) -> Checker<'a> {
+        let mods: Vec<(String, &'a Module)> = refs.iter().map(|m| (m.path.to_string(), m.module)).collect();
+        let mod_builtin = refs.iter().map(|m| m.builtin).collect();
+        let mod_package = refs.iter().map(|m| m.package.to_string()).collect();
+        let _ = root; // the entry module is found by the later stages (it holds `main`)
+        // (the entry module is called `main`, but no module can import it by that name)
         let mod_by_path = mods
             .iter()
             .enumerate()
+            .filter(|(_, (p, _))| p != "main")
             .map(|(i, (p, _))| (p.clone(), i))
             .collect();
         let scopes = mods.iter().map(|_| ModScope::default()).collect();
         Checker {
             mods,
-            user: user_idx,
+            mod_builtin,
+            mod_package,
             prog: Program::default(),
             infer: Infer::default(),
             scopes,
@@ -323,8 +341,9 @@ impl<'a> Checker<'a> {
         self.infer.fresh(VarKind::General, span)
     }
 
+    /// Is this module part of the program (not the compiler's library)?
     pub fn is_user(&self, module: usize) -> bool {
-        module == self.user
+        !self.mod_builtin[module]
     }
 
     // ------------------------------------------------------------ locals
@@ -382,8 +401,9 @@ impl<'a> Checker<'a> {
 
     /// `#[test]` functions are run with no arguments; they return nothing, or a `Result`.
     fn check_test_functions(&mut self) {
-        let module: &'a Module = self.mods[self.user].1;
-        for item in &module.items {
+        let modules: Vec<&'a Module> = (0..self.mods.len()).filter(|&m| self.is_user(m)).map(|m| self.mods[m].1).collect();
+        for module in modules {
+          for item in &module.items {
             let ItemKind::Fn(f) = &item.kind else { continue };
             if !item.attrs.iter().any(|a| a.name.name == "test") {
                 continue;
@@ -407,15 +427,18 @@ impl<'a> Checker<'a> {
                     "a test returns nothing, or a `Result` that fails the test when it is `Err`",
                 );
             }
+          }
         }
     }
 
     fn check_bodies(&mut self) {
         self.check_test_functions();
-        // free functions, methods and trait defaults defined in the user's module
-        let user = self.user;
+        // free functions, methods and trait defaults of the program's modules (and library functions that have a body)
         let ids: Vec<FnId> = (0..self.prog.fns.len())
-            .filter(|&i| self.prog.fns[i].module == user && self.fn_decls[i].is_some())
+            .filter(|&i| match self.fn_decls[i] {
+                Some(d) => self.is_user(self.prog.fns[i].module) || d.body.is_some(),
+                None => false,
+            })
             .map(|i| FnId(i as u32))
             .collect();
         for id in ids {
@@ -427,7 +450,7 @@ impl<'a> Checker<'a> {
         }
         // constants
         let consts: Vec<usize> = (0..self.prog.consts.len())
-            .filter(|&i| self.prog.consts[i].module == user && self.const_srcs[i].is_some())
+            .filter(|&i| self.is_user(self.prog.consts[i].module) && self.const_srcs[i].is_some())
             .collect();
         for i in consts {
             self.check_const(ConstId(i as u32));
@@ -553,7 +576,7 @@ impl<'a> Checker<'a> {
             }
         }
         let lits = std::mem::take(&mut self.body.int_lits);
-        if self.body.cx.module == self.user {
+        if self.is_user(self.body.cx.module) {
             for (k, value, span, negated) in lits {
                 let Some(Ty::Int(it)) = self.results.expr_ty.get(&k).cloned() else { continue };
                 let (bits, signed) = int_shape(it);
@@ -587,7 +610,7 @@ impl<'a> Checker<'a> {
             if v.binding.is_none() && !reported.contains(&v.span) {
                 let span = v.span;
                 reported.push(span);
-                if self.body.cx.module == self.user {
+                if self.is_user(self.body.cx.module) {
                     self.err_hint(
                         span,
                         "cannot infer a type here",

@@ -299,33 +299,57 @@ when the standard library can be written in Tau itself.
 
 ## 9. Modules and packages
 
-```
-use math.linalg
-use math.fft.{fft, ifft}
-use mypkg.tools as t
+### Modules
 
-pub fn visible() { ... }        // exported
-fn hidden() { ... }             // private to the module
-```
-- One file is one module. A folder with `mod.tau` is a module with submodules.
-- Layers: `core` (no allocation), `std` (files, collections, threads, net), `math` (tensors, linear algebra, FFT, ODEs, stats, units).
+One file is one module; a folder with `mod.tau` is a module whose submodules are the files in it.
 
-### Manifest `tau.toml`
+```
+orbits/
+  tau.toml
+  src/
+    main.tau          the entry module of a program
+    bodies.tau        use bodies
+    geo/mod.tau       use geo
+    geo/shapes.tau    use geo.shapes
+```
+
+```
+use bodies                          // the module: bodies.EARTH, bodies.Body(...)
+use bodies.{Body, EARTH}            // names from it
+use bodies.Body as Planet           // renamed
+use geo.shapes.*                    // every public name
+use math.fft.{fft, ifft}            // the library: std, math
+
+pub fn visible() { ... }            // usable from other modules
+fn hidden() { ... }                 // private to this module
+```
+
+- **`use` paths start at the root of the package** (`src/`), never relative to the file they are in. The first name decides where to look: a module of this package, then a dependency from `tau.toml`, then the compiler's library (`std`, `math`). A name that is both a local module and a dependency is an error; names are case-sensitive on every system.
+- **Privacy.** Everything is private to its module unless it is `pub`: functions, structs, enums, traits, constants, type aliases, methods of an `impl` block (methods of a trait are as visible as the trait), and the fields of a struct. A struct whose fields are not all `pub` cannot be built or taken apart by `Name(...)` outside its module; the module can offer a `pub fn` that builds it. Enum variants are as visible as the enum.
+- **No re-exports yet.** `use` brings a name into the module that wrote it, and nothing else can import it from there; import it from where it is defined. (`pub use` is planned.)
+- A module may use any other module, including in a circle. A program is checked as a whole: all its modules are type-checked and borrow-checked together and run by both the interpreter and the native backend.
+- Errors name the file (`src/util.tau:12:5`). `#[test]` functions in any module of a package run with `tau test`; a test in a module other than the entry is named `module::test`.
+- A single `.tau` file with no `tau.toml` can still use the files next to it (`tau run main.tau` finds `util.tau` for `use util`).
+
+### Packages: `tau.toml`
+
 ```
 [package]
 name = "orbits"
 version = "0.1.0"
 
 [dependencies]
+kepler = { path = "../kepler" }
 fastmath = { git = "https://example.com/fastmath", tag = "v1.2" }
-localutil = { path = "../localutil" }
 
 [native]
-link = ["openblas"]
+link = ["openblas"]        # recorded; C interop is not available yet
 ```
-- `tau new`, `tau build`, `tau run`, `tau test`, `tau add <dep>`.
-- A `tau.lock` file pins exact versions for reproducible builds.
-- Users can ship native C/Fortran code through `[native]`.
+
+- A package is a folder with a `tau.toml` and a `src/` folder. A **program** has `src/main.tau` (with `fn main()`); a **library** has `src/lib.tau`, which is what `use name` gives to a program that depends on it (`use name.sub` is `src/sub.tau`). Inside a package its own `use` paths are looked up in that package first, so a library's modules do not clash with a program's.
+- Dependencies are `{ path = "..." }` (a folder, relative to the `tau.toml`) or `{ git = "URL" }` with at most one of `tag`, `branch`, `rev`. The name on the left is the name used in `use`; it must be an identifier. One name stands for one package in a whole program (two different packages with the same name are an error). A registry (`kepler = "1.2"`) comes later.
+- **Git dependencies** are fetched with the `git` command into `$TAU_HOME` (default `~/.tau`) and pinned in **`tau.lock`**, next to `tau.toml`: the exact commit, so a moved tag or branch does not change a build. Commit `tau.lock`. A branch (or a dependency without a reference) stays at its pinned commit until `tau fetch --update`.
+- Commands: `tau new name [--lib]`, `tau add name --path DIR | --git URL [--tag T | --branch B | --rev R]`, `tau fetch [--update]`, and `tau check | run | build | test [path]`, where `path` is a `.tau` file, a package folder, or nothing (the package in the current folder or above it). Editors use `tau check - --json --file PATH`.
 
 ---
 

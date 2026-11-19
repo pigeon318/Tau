@@ -38,6 +38,6 @@ code --install-extension tau-lang-0.1.0.vsix
 
 ## How it works
 
-For each check the extension runs `tau check - --json` with the file's text on standard input, so unsaved changes are checked too.
+For each check the extension runs `tau check - --json --file <path>` with the file's text on standard input, so unsaved changes are checked too, and the file is checked as part of its package (`use` of other files and dependencies works). Errors in other files of the package are shown on those files (unless they are open).
 The compiler answers with diagnostics (0-based lines, UTF-16 columns, ready for the editor) and a list of hover texts.
 The same data will be served by a language server later, for other editors and for Tau's own IDE.
