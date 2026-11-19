@@ -62,8 +62,9 @@ cargo build --release && ./target/release/tau run examples/run/nbody.tau   # muc
 
 Tau runs on Windows 10 and 11 (64-bit). There are two ways to get it:
 
-1. **A prebuilt `tau.exe`**: every push builds one in GitHub Actions (the `ci` workflow, artifact
-   `tau-windows-x86_64`).
+1. **A prebuilt `tau.exe`**: download `tau-windows-x86_64.exe` from the latest
+   [release](https://github.com/pigeon318/Tau/releases) (rename it `tau.exe` and put its folder on your `PATH`).
+   Every push also builds one in GitHub Actions (the `ci` workflow, artifact `tau-windows-x86_64`).
 2. **From source**: install Rust with `rustup` (the default MSVC toolchain, which needs the "Desktop
    development with C++" build tools), then `cargo build --release`; the program is
    `target\release\tau.exe`.
@@ -80,6 +81,18 @@ operating system (a missing file, say) are Windows's; a stack overflow inside a 
 program with the usual panic instead of being reported by `join`; and maths functions (`sin`, `exp`, `^` on
 floats) come from the system's C library, so their last digits can differ from Linux's. The interpreter and
 the native backend still agree with each other on the same machine.
+
+## Updating
+
+`tau update` replaces the program with the newest release: it downloads the file for your platform, checks it against
+the release's `SHA256SUMS`, runs it once, and only then swaps it in (a damaged or broken download changes nothing).
+`tau update --check` only says whether a newer version exists, and `tau update --force` installs the latest release
+even if you already have it. It needs `curl` (Windows 10 and later include it) and, while the repository is private, a
+GitHub token that can read it: set `GITHUB_TOKEN`, or install the GitHub CLI and run `gh auth login`. A `tau` built from
+source (in a `target` folder) is updated with `git pull` and `cargo build --release` instead.
+
+Releases are made by pushing a tag that matches the version in `Cargo.toml` (`git tag v0.1.0 && git push origin v0.1.0`);
+the `release` workflow builds Windows and Linux programs and attaches them.
 
 ## Editor support
 

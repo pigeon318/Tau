@@ -33,6 +33,7 @@ jobs:
     needs: [windows, linux]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -40,7 +41,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # the tag must match the version in Cargo.toml, because `tau update` compares them
+          want="v$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)"
+          if [ "$want" != "${GITHUB_REF_NAME}" ]; then
+            echo "the tag is ${GITHUB_REF_NAME} but Cargo.toml says $want"
+            exit 1
+          fi
           cd dist
-          zip -j tau-windows-x86_64.zip tau-windows-x86_64/tau.exe
-          tar -C tau-linux-x86_64 -czf tau-linux-x86_64.tar.gz tau
-          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --title "Tau ${GITHUB_REF_NAME}" --generate-notes tau-windows-x86_64.zip tau-linux-x86_64.tar.gz
+          cp tau-windows-x86_64/tau.exe tau-windows-x86_64.exe
+          cp tau-linux-x86_64/tau tau-linux-x86_64
+          chmod +x tau-linux-x86_64
+          # the file names and SHA256SUMS are what `tau update` looks for
+          sha256sum tau-windows-x86_64.exe tau-linux-x86_64 > SHA256SUMS
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --title "Tau ${GITHUB_REF_NAME}" --generate-notes tau-windows-x86_64.exe tau-linux-x86_64 SHA256SUMS
