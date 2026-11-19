@@ -632,6 +632,8 @@ impl<'a> Interp<'a> {
                 Ok(i) if i < slot.borrow().len() => Ok(slot.borrow()[i].clone()),
                 _ => panic(format!("no field `{name}` on a tuple")),
             },
+            Value::Range(a, _) if name == "start" => Ok(Value::Int(*a)),
+            Value::Range(_, b) if name == "end" => Ok(Value::Int(*b)),
             Value::Vec(s) | Value::Array(s) if name == "len" => Ok(Value::Int(s.borrow().len() as i128)),
             Value::Slice(_, a, b) if name == "len" => Ok(Value::Int((b - a) as i128)),
             Value::Str(s) if name == "len" => Ok(Value::Int(s.len() as i128)),
@@ -981,6 +983,32 @@ impl<'a> Interp<'a> {
             _ => (iter, false),
         };
         let it = self.eval(inner, f)?;
+        if let Some((nfid, nsubst)) = self.res.for_next.get(&NodeKey::of(iter)).cloned() {
+            // a value with a `next` method: call it until it gives `None`
+            let sub = self.substitute(&nsubst, f);
+            loop {
+                let r = self.call_fn(nfid, sub.clone(), vec![it.clone()])?;
+                let item = match self.deref(r)? {
+                    Value::Variant(_, _, s) if !s.borrow().is_empty() => s.borrow()[0].clone(),
+                    _ => break,
+                };
+                let fr = f.child();
+                if !self.bind(pat, &item, &fr, &fr.env)? {
+                    return panic("loop pattern did not match");
+                }
+                if let Some(g) = guard {
+                    if !self.cond(g, &fr)? {
+                        continue;
+                    }
+                }
+                match self.eval_block(body, &fr) {
+                    Ok(_) | Err(Ctl::Continue) => {}
+                    Err(Ctl::Break(_)) => break,
+                    Err(other) => return Err(other),
+                }
+            }
+            return Ok(());
+        }
         // elements of a `mut` loop (and of `par_chunks`) are references into the collection
         let by_ref = mut_iter;
         match it {

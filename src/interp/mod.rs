@@ -599,6 +599,24 @@ impl<'a> Interp<'a> {
                 let inner = s.borrow()[0].clone();
                 self.display_ty(&inner, &args[0])
             }
+            (Value::Variant(adt, idx, s), Ty::Adt(id, args)) if adt == id && self.prog.adt(*id).module == 0 && matches!(self.prog.adt(*id).name.as_str(), "Option" | "Result") => {
+                let is_option = self.prog.adt(*id).name == "Option";
+                let name = match (is_option, *idx) {
+                    (true, 0) => "Some",
+                    (true, _) => "None",
+                    (false, 0) => "Ok",
+                    (false, _) => "Err",
+                };
+                let payload = s.borrow().first().cloned();
+                match payload {
+                    Some(x) => {
+                        let t = args.get(if is_option { 0 } else { *idx }).cloned().unwrap_or(Ty::Error);
+                        let inner = self.display_ty(&x, &t)?;
+                        Ok(format!("{name}({inner})"))
+                    }
+                    None => Ok(name.to_string()),
+                }
+            }
             (Value::Tuple(s), Ty::Tuple(ts)) if s.borrow().len() == ts.len() => {
                 let items = s.borrow().clone();
                 let mut parts = Vec::new();

@@ -103,6 +103,9 @@ pub struct Results {
     /// on a box; an argument passed to a borrowed parameter of type `T`): how many `Box` layers to look
     /// through. The interpreter does not need it (a box is the value it holds); native code does.
     pub derefs: NodeMap<u32>,
+    /// For a `for` loop over a value with a `next` method (an `Iterator`): the `next` function and the
+    /// types its generics stand for, keyed by the loop's iterable.
+    pub for_next: NodeMap<(FnId, Vec<(GenericId, Ty)>)>,
 }
 
 pub struct CheckResult {
@@ -220,6 +223,7 @@ pub(crate) struct Local {
     pub mutable: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct Obligation {
     pub ty: Ty,
     pub trait_: TraitId,
@@ -247,6 +251,7 @@ pub(crate) struct Body {
     pub obligations: Vec<Obligation>,
     pub touched: Vec<NodeKey>,
     pub touched_pats: Vec<NodeKey>,
+    pub touched_nexts: Vec<NodeKey>,
     /// The type of every interpolation that has a format spec, checked against it once types are known.
     pub fmt_checks: Vec<(Ty, crate::fmtspec::Fmt)>,
     /// Integer literals (node, value, span, directly negated?), checked against their final
@@ -541,6 +546,7 @@ impl<'a> Checker<'a> {
     /// Default literal types, check deferred trait obligations, and write resolved
     /// types back into the results.
     fn finish_body(&mut self) {
+        self.solve_bound_args();
         self.infer.apply_defaults();
         let fmt_checks = std::mem::take(&mut self.body.fmt_checks);
         for (ty, fmt) in fmt_checks {
@@ -618,6 +624,12 @@ impl<'a> Checker<'a> {
                     };
                     self.err_hint(span, format!("the literal `{value}` does not fit in `{}`", it.name()), format!("`{}` holds {range}", it.name()));
                 }
+            }
+        }
+        for k in std::mem::take(&mut self.body.touched_nexts) {
+            if let Some((f, args)) = self.results.for_next.get(&k).cloned() {
+                let args = args.iter().map(|(g, a)| (*g, self.infer.zonk(a))).collect();
+                self.results.for_next.insert(k, (f, args));
             }
         }
         let pats = std::mem::take(&mut self.body.touched_pats);

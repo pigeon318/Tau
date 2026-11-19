@@ -1161,9 +1161,11 @@ impl<'r> Lowerer<'r> {
         let op = self.lower(inner);
         let is_collection = matches!(iter_ty, Ty::Array(..) | Ty::Slice(_))
             || matches!(&iter_ty, Ty::Adt(..) if self.is_vec(&iter_ty));
+        // an iterator is used up by the loop (`for x in mut it` only borrows it); the items it gives are owned
+        let is_iterator = self.res.for_next.contains_key(&NodeKey::of(iter));
         let (srcs, borrowed) = match op {
-            Operand::Place(p, _) if mut_iter => (vec![self.make_loan(p, true, iter.span)], true),
-            Operand::Place(p, ty) if !self.is_copy(&ty) => (vec![self.make_loan(p, false, iter.span)], true),
+            Operand::Place(p, _) if mut_iter => (vec![self.make_loan(p, true, iter.span)], !is_iterator),
+            Operand::Place(p, ty) if !is_iterator && !self.is_copy(&ty) => (vec![self.make_loan(p, false, iter.span)], true),
             op => (self.consume_value(op, iter.span), is_collection),
         };
         let it = self.temp(iter_ty, iter.span);

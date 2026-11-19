@@ -1,0 +1,84 @@
+// Iterators: loop over a sequence, and combine steps without making vectors in between.
+//
+//   v.iter()                  the items of a vector, an array or a slice
+//   (a..b).iter()             the numbers of a range
+//   .map(f) .filter(f) .enumerate() .zip(other) .take(n) .skip(n) .step_by(n)
+//   .chain(other) .take_while(f) .skip_while(f)      adapters: they give another iterator
+//   .sum() .product() .min() .max() .count() .fold(init, f) .collect()
+//   .any(f) .all(f) .find(f) .position(f) .last() .nth(n)    consumers: they use it up
+//
+// Nothing runs until a consumer (or a `for` loop) asks for items, and each item goes through the
+// whole chain before the next one starts.
+
+// Anything with a `next` method can be used the same way.
+struct Collatz { n: u64 }
+
+impl Iterator<u64> for Collatz {
+    fn next(mut self) -> Option<u64> {
+        if self.n == 1 {
+            return None
+        }
+        self.n = if self.n % 2 == 0 { self.n / 2 } else { 3 * self.n + 1 }
+        Some(self.n)
+    }
+}
+
+// The Leibniz series: pi / 4 = 1 - 1/3 + 1/5 - ...
+fn leibniz(terms: i64) -> f64 {
+    4.0 * (0..terms).iter().map(|k| {
+        let sign = if k % 2 == 0 { 1.0 } else { -1.0 }
+        sign / (2 * k + 1) as f64
+    }).sum()
+}
+
+fn is_prime(n: i64) -> bool {
+    n > 1 && (2..n).iter().take_while(|d| d * d <= n).all(|d| n % d != 0)
+}
+
+// The mean of every `k` neighbouring values.
+fn moving_average(xs: [f64], k: usize) -> Vec<f64> {
+    let mut out = Vec.new()
+    for i in 0..xs.len - k + 1 {
+        out.push(xs[i..i + k].iter().sum() / k as f64)
+    }
+    out
+}
+
+fn main() {
+    print("pi is about {leibniz(100000):.6}")
+
+    let primes = (1..50).iter().filter(|n| is_prime(n)).collect()
+    print("primes below 50: {primes}")
+
+    let squares_of_odds = (1..=9).iter().filter(|n| n % 2 == 1).map(|n| n * n).sum()
+    print("squares of the odd numbers up to 9: {squares_of_odds}")
+
+    let temps = vec[12.5, 14.0, 13.5, 17.0, 19.5, 18.0]
+    print("moving average: {moving_average(temps, 3)}")
+
+    // differences between neighbours: zip a sequence with itself, shifted by one
+    let steps = temps.iter().zip(temps.iter().skip(1)).map(|p| p.1 - p.0).collect()
+    print("changes: {steps}")
+    match temps.iter().max() {
+        Some(m) => print("hottest: {m}")
+        None => print("no data")
+    }
+    print("first above 15: {temps.iter().position(|t| t > 15.0)}")
+
+    // numbering things
+    for (i, name) in vec["ann", "bob", "cy"].iter().enumerate() {
+        print("{i + 1}. {name}")
+    }
+
+    // your own iterator
+    let steps = Collatz(27).count()
+    let peak = Collatz(27).max()
+    print("27 takes {steps} steps to reach 1, climbing to {peak}")
+
+    // `for ... in mut it` keeps the iterator afterwards
+    let mut c = Collatz(6)
+    for x in mut c {
+        if x < 6 { break }
+    }
+    print("after the loop, the next value is {c.next()}")
+}

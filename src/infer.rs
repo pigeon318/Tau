@@ -27,6 +27,15 @@ pub struct VarState {
 #[derive(Clone, Default, Debug)]
 pub struct Infer {
     pub vars: Vec<VarState>,
+    /// What each change to a variable replaced, so that `rollback` can undo it without copying
+    /// every variable (probing impls takes a snapshot for each candidate).
+    log: Vec<(usize, VarKind, Option<Ty>)>,
+}
+
+/// A point to go back to: see `Infer::snapshot`.
+pub struct Snapshot {
+    log_len: usize,
+    vars_len: usize,
 }
 
 impl Infer {
@@ -80,12 +89,29 @@ impl Infer {
         })
     }
 
-    pub fn snapshot(&self) -> Vec<VarState> {
-        self.vars.clone()
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot { log_len: self.log.len(), vars_len: self.vars.len() }
     }
 
-    pub fn rollback(&mut self, snap: Vec<VarState>) {
-        self.vars = snap;
+    pub fn rollback(&mut self, snap: Snapshot) {
+        while self.log.len() > snap.log_len {
+            let (i, kind, binding) = self.log.pop().unwrap();
+            self.vars[i].kind = kind;
+            self.vars[i].binding = binding;
+        }
+        self.vars.truncate(snap.vars_len);
+    }
+
+    /// Change a variable's binding and/or kind, remembering the old state.
+    fn set(&mut self, v: TyVar, kind: Option<VarKind>, binding: Option<Option<Ty>>) {
+        let i = v.idx();
+        self.log.push((i, self.vars[i].kind, self.vars[i].binding.clone()));
+        if let Some(k) = kind {
+            self.vars[i].kind = k;
+        }
+        if let Some(b) = binding {
+            self.vars[i].binding = b;
+        }
     }
 
     /// Unify two types, returning false on mismatch. May leave partial bindings on
@@ -97,7 +123,7 @@ impl Infer {
             // An error type poisons a variable instead of leaving it unresolved, so one
             // mistake does not also produce a "cannot infer" error.
             (Ty::Error, Ty::Var(v)) | (Ty::Var(v), Ty::Error) => {
-                self.vars[v.idx()].binding = Some(Ty::Error);
+                self.set(*v, None, Some(Some(Ty::Error)));
                 true
             }
             (Ty::Error, _) | (_, Ty::Error) => true,
@@ -112,8 +138,8 @@ impl Infer {
                     (VarKind::Int, VarKind::Int) => VarKind::Int,
                     _ => VarKind::Float, // int-literal meets float-literal
                 };
-                self.vars[y.idx()].kind = k;
-                self.vars[x.idx()].binding = Some(Ty::Var(*y));
+                self.set(*y, Some(k), None);
+                self.set(*x, None, Some(Some(Ty::Var(*y))));
                 true
             }
             (Ty::Var(v), t) | (t, Ty::Var(v)) => self.bind(*v, t),
@@ -162,7 +188,7 @@ impl Infer {
                 }
             }
         }
-        self.vars[v.idx()].binding = Some(t.clone());
+        self.set(v, None, Some(Some(t.clone())));
         true
     }
 
