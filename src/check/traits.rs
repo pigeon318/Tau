@@ -105,7 +105,6 @@ impl<'a> Checker<'a> {
                 _ => continue,
             }
             let imp = self.prog.impls[i].clone();
-            let Some(tref) = &imp.trait_ref else { continue };
             let snap = self.infer.snapshot();
             let subst = self.fresh_subst(&imp.generics, Span::default());
             let ok = self.infer.unify(&imp.self_ty.subst(&subst), ty) && self.generic_bounds_hold(&imp.generics, &subst, 0);

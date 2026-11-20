@@ -106,7 +106,7 @@ let f = Tensor<f64, [_, _, _]>.full(7.5, 2, 3, 4)               // every element
 let x = Tensor<f64, [_]>.linspace(0.0, 1.0, 11)                 // n evenly spaced points, ends included
 let n = Tensor<f64, [_]>.arange(5)                              // 0.0, 1.0, 2.0, 3.0, 4.0
 
-a.sum()  a.mean()  a.min()  a.max()                             // reductions (min/max: floats only)
+a.sum()  a.mean()  a.min()  a.max()                             // reductions (mean: floats and complex; min/max: floats and integers)
 a.shape()          // Vec<usize>, e.g. [2, 3]
 a.to_vec()         // Vec of the elements, in storage order
 a.map(|x| x * x)   // a new tensor
@@ -116,6 +116,27 @@ m.transpose()      // rank 2
 
 - Elements are stored **column-major** (the first index varies fastest), so `to_vec` and `reshape` follow that order: reshaping `[[1, 2, 3], [4, 5, 6]]` to `(3, 2)` gives `[[1, 5], [4, 3], [2, 6]]`, as in Fortran and Julia.
 - `sum` adds in storage order starting from `0.0`, and `mean` is that sum divided by the number of elements (NaN for none). `min` and `max` panic on an empty tensor. `linspace(a, b, n)` is `a + (b - a) * i / (n - 1)`, with exactly `a` and `b` at the ends. For `f32` tensors every result is rounded to single precision.
+Tensors of integers and of `bool`:
+
+```
+let a = Tensor<i64, [_]>.from([3, 1, 4, 1, 5])      // any integer type of up to 64 bits: i8 .. i64, u8 .. u64, isize, usize
+let n = Tensor<u8, [_]>.arange(5)                    // 0, 1, 2, 3, 4  (arange also works for integers)
+let z = Tensor<i32, [_, _]>.zeros(2, 3)              // zeros, ones, full, eye, from, from_rows, reshape, transpose, slices: as for floats
+let m = a > 2                                        // a tensor of bool: [true, false, true, false, true]
+a == b   a != b   a < 2   2 <= a                     // every comparison is element by element, with a tensor or a number
+m & n   m | n   m ^^ n   !m                          // combining masks
+m.count()   m.any()   m.all()                        // how many are true; whether any / all are
+a.select(m)                                          // the elements where the mask is true, as a rank-1 tensor
+a.to_f64()   a.to_i64()                              // another element type (floats are cut towards zero and saturate)
+a + b   a - b   a * 2   a / 2   a % 3   -a   a & 3   a | b   a ^^ 1   a @ b   a.sum()   a.min()   a.max()
+```
+
+- An integer tensor keeps its integer type, and **every result is checked against its range**, exactly like the same operation on single integers: `Tensor<u8, [_]>.full(250, 3) + 10` panics with `integer overflow: 260 does not fit in u8`, `t / 0` with `division by zero`. The same holds for `sum`, `-a`, `a @ b`, `arange` and `to_i64`. `mean` needs floats (write `a.to_f64().mean()`); `min` and `max` work on integers and floats and panic on an empty tensor.
+- **Comparisons give a tensor, not a `bool`**, so `if a == b { .. }` is a type error: write `if (a == b).all() { .. }`. Tensors of different shapes cannot be compared (a panic with both shapes), and complex tensors only have `==` and `!=`. `bool` tensors have no `+` or `<`; use `&`, `|`, `^^` and `!`, or convert with `to_i64()` or `to_f64()`.
+- `select(mask)` needs a mask of exactly the tensor's shape, and works for every element type. The result is in storage order (column-major).
+- Elements of `i128`, `u128`, `char`, strings and other types are not allowed in tensors. `random` makes floats only, and `linspace` too.
+- **v1:** an integer or `bool` element takes 8 bytes in native code (the same storage as `f64`), so a `Tensor<u8, ..>` is not smaller than a `Tensor<f64, ..>`; packed storage is a later optimisation. `a += b` on whole tensors means `a = a + b` (a new tensor replaces the old one).
+
 Parts of a tensor:
 
 ```

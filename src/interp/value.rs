@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::{ClosureParam, Expr};
-use crate::types::{AdtId, FnId, GenericId, Ty};
+use crate::types::{AdtId, FnId, GenericId, IntTy, Ty};
 
 pub type Slot<'a> = Rc<RefCell<Vec<Value<'a>>>>;
 pub type Subst = Rc<Vec<(GenericId, Ty)>>;
@@ -172,6 +172,9 @@ pub struct MapVal<'a> {
 pub enum TData {
     F(Vec<f64>),
     C(Vec<(f64, f64)>),
+    /// Integers of the given type (the type decides the range, which every result is checked against).
+    I(IntTy, Vec<i128>),
+    B(Vec<bool>),
 }
 
 /// A dense tensor, stored column-major (the first index varies fastest).

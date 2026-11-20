@@ -1143,9 +1143,12 @@ impl<'a> Checker<'a> {
                 );
             }
         }
-        let float_only = matches!(kind, "tensor.linspace" | "tensor.arange");
+        let float_only = kind == "tensor.linspace";
         if float_only && !matches!(elem, Ty::Float(_)) && !matches!(elem, Ty::Var(_) | Ty::Error) {
             self.err(e.span, format!("`{}` needs a tensor of floats", name.name));
+        }
+        if kind == "tensor.arange" && !matches!(elem, Ty::Float(_) | Ty::Int(_) | Ty::Var(_) | Ty::Error) {
+            self.err(e.span, "`arange` needs a tensor of floats or integers");
         }
         let usz = Ty::usize();
         let slice = Ty::Slice(Box::new(elem.clone()));
@@ -1172,7 +1175,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Methods of every tensor, whatever its rank: `sum`, `mean`, `min`, `max`, `shape`, `to_vec`, `map`,
-    /// `reshape(sizes...)` and `transpose`.
+    /// `reshape(sizes...)`, `transpose`; for `bool` tensors `count`, `any`, `all`; `select(mask)`,
+    /// `to_f64` and `to_i64`.
     fn tensor_method(&mut self, e: &'a Expr, _recv: &'a Expr, name: &Ident, args: &'a [Expr], elem: &Ty, dims: &[Dim]) -> Option<Ty> {
         let kind: &'static str = match name.name.as_str() {
             "sum" => "tensor.sum",
@@ -1184,10 +1188,16 @@ impl<'a> Checker<'a> {
             "map" => "tensor.map",
             "reshape" => "tensor.reshape",
             "transpose" => "tensor.transpose",
+            "count" => "tensor.count",
+            "any" => "tensor.any",
+            "all" => "tensor.all",
+            "select" => "tensor.select",
+            "to_f64" => "tensor.to_f64",
+            "to_i64" => "tensor.to_i64",
             _ => return None,
         };
         let arity: Option<usize> = match kind {
-            "tensor.map" => Some(1),
+            "tensor.map" | "tensor.select" => Some(1),
             "tensor.reshape" => None,
             _ => Some(0),
         };
@@ -1197,14 +1207,29 @@ impl<'a> Checker<'a> {
                 self.err(e.span, format!("`{}` takes {n} argument{s}, but {} {} supplied", name.name, args.len(), if args.len() == 1 { "was" } else { "were" }));
             }
         }
-        let numeric = matches!(elem, Ty::Float(_) | Ty::Complex(_));
-        let real = matches!(elem, Ty::Float(_));
+        let unknown = matches!(elem, Ty::Var(_) | Ty::Error | Ty::Param(_));
+        let is_float = matches!(elem, Ty::Float(_));
+        let is_int = matches!(elem, Ty::Int(_));
+        let is_bool = matches!(elem, Ty::Bool);
+        let is_complex = matches!(elem, Ty::Complex(_));
         match kind {
-            "tensor.sum" | "tensor.mean" if !numeric => {
-                self.err(e.span, format!("`{}` needs a tensor of floats or complex numbers", name.name));
+            "tensor.sum" if !unknown && !(is_float || is_complex || is_int) => {
+                self.err_hint(e.span, "`sum` needs a tensor of numbers", "for a `bool` tensor, `count()` gives the number of `true`s");
             }
-            "tensor.min" | "tensor.max" if !real => {
-                self.err(e.span, format!("`{}` needs a tensor of floats (complex numbers have no order)", name.name));
+            "tensor.mean" if !unknown && !(is_float || is_complex) => {
+                self.err_hint(e.span, "`mean` needs a tensor of floats or complex numbers", "convert an integer tensor first: `t.to_f64().mean()`");
+            }
+            "tensor.min" | "tensor.max" if !unknown && !(is_float || is_int) => {
+                self.err(e.span, format!("`{}` needs a tensor of floats or integers (complex numbers and `bool` have no order here)", name.name));
+            }
+            "tensor.count" | "tensor.any" | "tensor.all" if !unknown && !is_bool => {
+                self.err_hint(e.span, format!("`{}` needs a tensor of `bool`", name.name), "make one by comparing: `t > 0`");
+            }
+            "tensor.to_f64" if !unknown && is_complex => {
+                self.err(e.span, "a complex tensor cannot be converted to `f64`");
+            }
+            "tensor.to_i64" if !unknown && is_complex => {
+                self.err(e.span, "a complex tensor cannot be converted to `i64`");
             }
             "tensor.transpose" if dims.len() != 2 => {
                 self.err(e.span, "`transpose` needs a tensor of rank 2");
@@ -1213,14 +1238,35 @@ impl<'a> Checker<'a> {
         }
         let result = match kind {
             "tensor.sum" | "tensor.mean" | "tensor.min" | "tensor.max" => elem.clone(),
+            "tensor.count" => Ty::usize(),
+            "tensor.any" | "tensor.all" => Ty::Bool,
             "tensor.shape" => self.adt_named("Vec").map(|v| Ty::Adt(v, vec![Ty::usize()])).unwrap_or(Ty::Error),
             "tensor.to_vec" => self.adt_named("Vec").map(|v| Ty::Adt(v, vec![elem.clone()])).unwrap_or(Ty::Error),
+            "tensor.to_f64" => Ty::Tensor(Box::new(Ty::f64()), dims.to_vec()),
+            "tensor.to_i64" => Ty::Tensor(Box::new(Ty::Int(IntTy::I64)), dims.to_vec()),
             "tensor.map" => {
                 let f = Ty::Fn(vec![elem.clone()], Box::new(elem.clone()));
                 for a in args {
                     self.expr_coerce(a, &f);
                 }
                 Ty::Tensor(Box::new(elem.clone()), dims.to_vec())
+            }
+            "tensor.select" => {
+                // the mask has the shape of the tensor; the result is the chosen elements as a vector
+                let mask = Ty::Tensor(Box::new(Ty::Bool), dims.to_vec());
+                for a in args {
+                    let t = self.expr(a, Some(&mask));
+                    let st = self.infer.shallow(&t);
+                    match &st {
+                        Ty::Tensor(me, _) if matches!(self.infer.shallow(me), Ty::Bool | Ty::Var(_) | Ty::Error) => {}
+                        Ty::Error => {}
+                        other => {
+                            let shown = self.show(other);
+                            self.err_hint(a.span, format!("`select` needs a mask: a tensor of `bool`, found `{shown}`"), "make one by comparing: `t.select(t > 0)`");
+                        }
+                    }
+                }
+                Ty::Tensor(Box::new(elem.clone()), vec![Dim::Dyn])
             }
             "tensor.reshape" => {
                 if args.is_empty() {
@@ -1233,7 +1279,7 @@ impl<'a> Checker<'a> {
             }
             _ => Ty::Tensor(Box::new(elem.clone()), dims.iter().rev().cloned().collect()),
         };
-        if !matches!(kind, "tensor.map" | "tensor.reshape") {
+        if !matches!(kind, "tensor.map" | "tensor.reshape" | "tensor.select") {
             for a in args {
                 self.expr(a, None);
             }
@@ -1259,7 +1305,9 @@ impl<'a> Checker<'a> {
                 for a in args {
                     self.expr_coerce(a, &Ty::usize());
                 }
-                let _ = elem;
+                if name.name == "random" && !matches!(**elem, Ty::Float(_) | Ty::Var(_) | Ty::Error) {
+                    self.err_hint(e.span, "`random` needs a tensor of floats", "make integers with `arange` or `zeros`, or convert a float tensor");
+                }
                 self.record_res(e, Res::Builtin(match name.name.as_str() {
                     "zeros" => "tensor.zeros",
                     "ones" => "tensor.ones",
@@ -1789,6 +1837,11 @@ impl<'a> Checker<'a> {
         let st = self.infer.shallow(&t);
         match op {
             UnOp::Not => {
+                if let Ty::Tensor(el, _) = &st {
+                    if matches!(self.infer.shallow(el), Ty::Bool | Ty::Var(_) | Ty::Error) {
+                        return st;
+                    }
+                }
                 self.coerce(&st, &Ty::Bool, inner.span);
                 Ty::Bool
             }
@@ -1801,6 +1854,9 @@ impl<'a> Checker<'a> {
             }
             UnOp::Neg => match &st {
                 t if self.is_numeric_like(t) => st,
+                Ty::Tensor(el, _) if matches!(self.infer.shallow(el), Ty::Bool) => {
+                    return self.err_ty(e.span, "cannot negate a tensor of `bool`; use `!` for the opposite");
+                }
                 Ty::Tensor(..) | Ty::Error => st,
                 Ty::Adt(..) | Ty::Param(_) => match self.lookup_op("Neg", &st, None, e.span) {
                     Some((fid, inst)) => {
@@ -1846,6 +1902,31 @@ impl<'a> Checker<'a> {
             return self.err_ty(lspan, "cannot apply this operator: the type of the left operand is not known yet; add a type annotation");
         }
 
+        // comparing tensors is element by element and gives a tensor of `bool`
+        if comparison {
+            let tensor_dims = |t: &Ty| if let Ty::Tensor(_, d) = t { Some(d.clone()) } else { None };
+            if let Some(dims) = tensor_dims(&l).or_else(|| tensor_dims(&r)) {
+                let elem_of = |t: &Ty| if let Ty::Tensor(e, _) = t { (**e).clone() } else { t.clone() };
+                let (le, re) = (elem_of(&l), elem_of(&r));
+                if !self.infer.unify(&le, &re) {
+                    self.mismatch(rspan, &le, &re);
+                    return Ty::Tensor(Box::new(Ty::Bool), dims);
+                }
+                let is_eq = matches!(op, BinOp::Eq | BinOp::Ne);
+                let e_ = self.infer.shallow(&le);
+                if !is_eq && matches!(e_, Ty::Complex(_) | Ty::Bool) {
+                    let shown = self.show(&e_);
+                    self.err(e.span, format!("`{}` cannot compare tensors of `{shown}` (only `==` and `!=`)", op.symbol()));
+                }
+                if matches!(e_, Ty::Tensor(..)) {
+                    return self.err_ty(e.span, "cannot compare tensors of tensors");
+                }
+                if let (Ty::Tensor(_, ld), Ty::Tensor(_, rd)) = (&l, &r) {
+                    let _ = (ld, rd); // shapes are checked when it runs
+                }
+                return Ty::Tensor(Box::new(Ty::Bool), dims);
+            }
+        }
         if comparison {
             let is_eq = matches!(op, BinOp::Eq | BinOp::Ne);
             let overloaded = matches!(&l, Ty::Adt(..)) && !self.is_string(&l) && self.is_vec(&l).is_none() && self.box_inner(&l).is_none();
@@ -1874,9 +1955,21 @@ impl<'a> Checker<'a> {
 
         // tensors
         if let Ty::Tensor(le, ld) = &l {
+            let el = self.infer.shallow(le);
+            let arith = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
+            let logic = matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor);
+            let int_only = matches!(op, BinOp::Rem);
+            if matches!(el, Ty::Bool) && (arith || int_only) {
+                self.err_hint(e.span, format!("`{}` does not work on tensors of `bool`", op.symbol()), "use `&`, `|` or `^`, or convert with `to_i64()` or `to_f64()`");
+                return Ty::Error;
+            }
+            if (logic || int_only) && !matches!(el, Ty::Int(_) | Ty::Bool | Ty::Var(_) | Ty::Error | Ty::Param(_)) {
+                let shown = self.show(&el);
+                return self.err_ty(e.span, format!("`{}` only works on tensors of integers{}, not `{shown}`", op.symbol(), if logic { " and `bool`" } else { "" }));
+            }
             match op {
                 BinOp::MatMul => return self.matmul(e, &l, &r),
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
                     return match &r {
                         Ty::Tensor(..) => {
                             if !self.infer.unify(&l, &r) {
@@ -1896,7 +1989,7 @@ impl<'a> Checker<'a> {
             }
         }
         if self.is_numeric_like(&l) {
-            if let (Ty::Tensor(re, rd), BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) = (&r, op) {
+            if let (Ty::Tensor(re, rd), BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) = (&r, op) {
                 if !self.infer.unify(&l, re) {
                     self.mismatch(lspan, re, &l);
                 }

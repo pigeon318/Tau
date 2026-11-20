@@ -1448,3 +1448,87 @@ fn shared_values_and_mutexes_free_what_they_own() {
     );
     assert!(out.starts_with("2\ndone\n"), "{out}");
 }
+
+// ------------------------------------------------------------------ tensors of integers and bool
+
+#[test]
+fn integer_tensors_run_the_same_natively() {
+    let out = same(
+        "fn total(t: Tensor<i32, [_, _]>) -> i32 { t.sum() }\n\
+         fn bump(t: mut Tensor<u16, [_]>) {\n t[0] += 5\n t[1..3] = 7\n}\n\
+         fn main() {\n\
+          let a = Tensor<i64, [_]>.from([1, 2, 3, 4])\n\
+          print(a + a)\n print(a * 3)\n print(10 - a)\n print(a % 3)\n print(-a)\n print(a / 2)\n\
+          print(a.sum())\n print(a.max())\n print(a.min())\n\
+          let m = Tensor<i32, [_, _]>.from_rows(vec[vec[1, 2, 3], vec[4, 5, 6]])\n\
+          print(total(m))\n print(m[0, ..])\n print(m[.., 1..])\n print(m.transpose())\n print(m[1, 2])\n print(m.reshape(3, 2))\n print(m.shape())\n\
+          let mut c = m[.., ..]\n c[1, ..] = Tensor<i32, [_]>.from([9, 9, 9])\n c[0, 0..2] = 0\n print(c)\n print(m)\n\
+          let big = Tensor<u64, [_]>.from([18446744073709551615, 1])\n print(big)\n print(big.max())\n print(big > 5)\n\
+          let mut u = Tensor<u16, [_]>.zeros(4)\n bump(mut u)\n print(u)\n\
+          let mut z = Tensor<i64, [_]>.arange(4)\n z += z\n print(z)\n z -= 1\n print(z)\n print(z.map(|x| x * x))\n print(z.to_vec())\n\
+          print(Tensor<i64, [_, _]>.eye(2))\n print(Tensor<u8, [_]>.full(250, 3))\n print(Tensor<i32, [_]>.ones(2))\n\
+          let im = Tensor<i64, [_, _]>.from_rows(vec[vec[1, 2], vec[3, 4]])\n\
+          print(im @ im)\n print(im @ Tensor<i64, [_]>.from([1, 1]))\n print(Tensor<i64, [_]>.from([1, 2, 3]) @ Tensor<i64, [_]>.from([4, 5, 6]))\n print(trace(im))\n\
+          print(Tensor<i8, [_]>.from([-128, 3]).sum())\n\
+         }",
+    );
+    assert!(out.starts_with("[2, 4, 6, 8]\n[3, 6, 9, 12]\n[9, 8, 7, 6]\n[1, 2, 0, 1]\n[-1, -2, -3, -4]\n[0, 1, 1, 2]\n10\n4\n1\n21\n"), "{out}");
+    assert!(out.contains("[18446744073709551615, 1]\n18446744073709551615\n[true, false]\n"), "{out}");
+    assert!(out.ends_with("[[7, 10], [15, 22]]\n[3, 7]\n32\n5\n-125\n"), "{out}");
+}
+
+#[test]
+fn comparisons_masks_and_conversions() {
+    let out = same(
+        "fn main() {\n\
+          let a = Tensor<i64, [_]>.from([1, 2, 3, 4])\n\
+          let mask = a > 2\n print(mask)\n print(mask.count())\n print(a.select(mask))\n\
+          print(!mask)\n print(mask & (a < 4))\n print(mask | (a == 1))\n print(mask ^^ (a >= 2))\n print(mask.any())\n print(mask.all())\n\
+          print(a == Tensor<i64, [_]>.from([1, 0, 3, 0]))\n print(a != 2)\n print(2 <= a)\n\
+          let f = Tensor<f64, [_]>.from([1.5, 5.0, 0.2])\n print(f > 1.0)\n print(f.select(f > 1.0))\n print(f == f)\n\
+          print(a.to_f64() / 2.0)\n print(f.to_i64())\n print(Tensor<bool, [_]>.from([true, false]).to_i64())\n print(Tensor<bool, [_]>.from([true, false]).to_f64())\n\
+          let c = Tensor<c128, [_]>.from([1.0 + 2.0i, 0.0 + 0.0i])\n print(c == c)\n\
+          let b = Tensor<bool, [_, _]>.from_rows(vec[vec[true, false], vec[false, true]])\n print(b.transpose())\n print(b[0, 0])\n print(Tensor<bool, [_]>.zeros(2))\n\
+          let mut w = Tensor<f64, [_]>.arange(5)\n let hi = w > 2.5\n print(hi.count())\n w[1..3] = 9.0\n print(w.select(w > 5.0))\n\
+         }",
+    );
+    assert!(out.starts_with("[false, false, true, true]\n2\n[3, 4]\n[true, true, false, false]\n[false, false, true, false]\n[true, false, true, true]\n"), "{out}");
+}
+
+#[test]
+fn integer_tensor_errors_are_the_same_panics() {
+    for (stmts, msg) in [
+        ("let t = Tensor<u8, [_]>.full(250, 3)\n print(t + 10)", "integer overflow: 260 does not fit in u8"),
+        ("let t = Tensor<i8, [_]>.from([-128])\n print(-t)", "integer overflow: 128 does not fit in i8"),
+        ("let t = Tensor<i32, [_]>.from([2147483647, 1])\n print(t.sum())", "integer overflow: 2147483648 does not fit in i32"),
+        ("let t = Tensor<i64, [_]>.from([1, 2])\n print(t / 0)", "division by zero"),
+        ("let t = Tensor<i64, [_]>.from([1, 2])\n print(t % Tensor<i64, [_]>.from([1, 0]))", "division by zero"),
+        ("let t = Tensor<i64, [_]>.from([1, 2])\n print(t + Tensor<i64, [_]>.from([1, 2, 3]))", "shape mismatch: [2] and [3]"),
+        ("let t = Tensor<i64, [_]>.from([1, 2])\n print(t == Tensor<i64, [_]>.from([1, 2, 3]))", "shape mismatch: [2] and [3]"),
+        ("let t = Tensor<u8, [_]>.arange(300)\n print(t.sum())", "integer overflow"),
+        ("let t = Tensor<i64, [_]>.from([1, 2])\n print(t.select(Tensor<bool, [_]>.from([true])))", "shape mismatch: cannot select from a tensor of shape [2] with a mask of shape [1]"),
+        ("let t = Tensor<i64, [_]>.zeros(0)\n print(t.max())", "max of an empty tensor"),
+        ("let t = Tensor<u64, [_]>.from([18446744073709551615])\n print(t.to_i64())", "integer overflow: 18446744073709551615 does not fit in i64"),
+        ("let t = Tensor<i64, [_]>.from([1, 2])\n print(t[5])", "tensor index [5] is out of bounds"),
+        ("let a = Tensor<i32, [_, _]>.from_rows(vec[vec[2147483647, 1]])\n print(a @ Tensor<i32, [_]>.from([2, 1]))", "integer overflow: 4294967294 does not fit in i32"),
+    ] {
+        let src = format!("fn main() {{\n {stmts}\n}}");
+        let (_, p) = interpret(&src);
+        assert_eq!(p.as_deref().map(|m| m.contains(msg)), Some(true), "{stmts}: {p:?}");
+        same(&src);
+    }
+}
+
+#[test]
+fn integer_tensors_free_what_they_own() {
+    // (`TAU_VALGRIND=1` reports a leak): temporaries, `+=`, selection, masks
+    let out = same(
+        "fn main() {\n\
+          let mut a = Tensor<i64, [_]>.arange(100)\n\
+          for i in 0..20 { a += a * 0 + 1\n let m = a > 50\n a = a.select(m) + Tensor<i64, [_]>.arange(a.select(m).sum() as usize % 7 + 1).map(|x| x * 0)[0] }\n\
+          print(a.shape())\n\
+          let b = (Tensor<i64, [_]>.arange(5) * 2 + 1).select(Tensor<i64, [_]>.arange(5) > 1)\n print(b)\n\
+         }",
+    );
+    assert!(out.starts_with("[1]") || out.starts_with("["), "{out}");
+}

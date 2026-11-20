@@ -135,7 +135,7 @@ fn cache_dir() -> PathBuf {
 ///  * `-fno-optimize-sibling-calls`: infinite recursion overflows the stack (and panics) instead
 ///    of being quietly turned into a loop;
 ///  * `-fwrapv`: nothing in generated code relies on signed overflow being undefined.
-const CFLAGS: &[&str] = &["-O2", "-std=gnu11", "-ffp-contract=off", "-fno-optimize-sibling-calls", "-fwrapv", "-w"];
+const CFLAGS: &[&str] = &["-O2", "-std=gnu11", "-ffp-contract=off", "-fno-optimize-sibling-calls", "-fwrapv", "-fno-strict-aliasing", "-w"];
 
 /// Extra flags on Windows (MinGW-w64): C99 `printf`/`strtod`, and no dependence on the compiler's DLLs.
 #[cfg(windows)]

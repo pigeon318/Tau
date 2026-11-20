@@ -867,15 +867,27 @@ impl<'a> Cg<'a> {
         Ok(name)
     }
 
-    /// (is complex, is single precision) for a tensor element type; only floats and complex
-    /// numbers can be tensor elements.
+    /// (is complex, is single precision) for a tensor element type: floats, complex numbers, integers
+    /// of up to 64 bits and `bool` (the last two are described by `tensor_ik`).
     fn tensor_elem(&self, el: &Ty) -> CgResult<(bool, bool)> {
         match el {
             Ty::Float(FloatTy::F64) => Ok((false, false)),
             Ty::Float(FloatTy::F32) => Ok((false, true)),
             Ty::Complex(FloatTy::F64) => Ok((true, false)),
             Ty::Complex(FloatTy::F32) => Ok((true, true)),
+            Ty::Int(it) if it.bits() <= 64 => Ok((false, false)),
+            Ty::Bool => Ok((false, false)),
             other => unsupported(format!("a tensor of {}", self.describe(other))),
+        }
+    }
+
+    /// For a tensor of integers or `bool`: the runtime's kind (1 integer, 2 bool) and the integer type's
+    /// number (the order of `IntTy`, which the runtime's tables follow).
+    fn tensor_ik(&self, el: &Ty) -> Option<(u8, u8)> {
+        match el {
+            Ty::Int(it) => Some((1, IntTy::ALL.iter().position(|t| t == it).unwrap() as u8)),
+            Ty::Bool => Some((2, 0)),
+            _ => None,
         }
     }
 
@@ -2156,9 +2168,16 @@ impl<'a> Cg<'a> {
                 _ => format!("(({ct})((__int128)1 << 127))"),
             });
         }
-        if let (UnOp::Neg, Ty::Tensor(..)) = (op, ty) {
+        if let (UnOp::Neg, Ty::Tensor(el, _)) = (op, ty) {
             let v = self.borrow(inner)?;
+            if self.tensor_ik(el).is_some() {
+                return Ok(format!("tau_ti_neg({v})"));
+            }
             return Ok(format!("tau_t_scalar('*', {v}, -1.0, 0)"));
+        }
+        if let (UnOp::Not, Ty::Tensor(..)) = (op, ty) {
+            let v = self.borrow(inner)?;
+            return Ok(format!("tau_ti_not({v})"));
         }
         let v = self.expr(inner)?;
         Ok(match (op, ty) {
@@ -2300,6 +2319,15 @@ impl<'a> Cg<'a> {
                 let (target, _) = self.assign_target(lhs)?;
                 let drop = self.drop_stmt(&format!("*{ptr}"), &lt)?;
                 Ok(format!("({{ {lct} {rv} = {r}; {lct} *{ptr} = &{target}; {drop}*{ptr} = {rv}; ((tau_unit)0); }})"))
+            }
+            Some(bop) if matches!(lt, Ty::Tensor(..)) => {
+                // `a += b` on tensors is `a = a + b`: the new tensor replaces (and frees) the old one
+                let rt = self.cty(&rty)?;
+                let r = if matches!(rty, Ty::Tensor(..)) { self.borrow(rhs)? } else { self.expr(rhs)? };
+                let (target, _) = self.assign_target(lhs)?;
+                let value = self.tensor_binary(bop, &format!("(*{ptr})"), &lt, &rv, &rty)?;
+                let drop = self.drop_stmt("old_", &lt)?;
+                Ok(format!("({{ {rt} {rv} = {r}; {lct} *{ptr} = &{target}; {lct} old_ = *{ptr}; {lct} nv_ = {value}; *{ptr} = nv_; {drop}((tau_unit)0); }})"))
             }
             Some(bop) => {
                 let rt = self.cty(&rty)?;
@@ -3351,17 +3379,65 @@ static {vect} {top}({mt} *m, uint64_t n) {{
 
     /// `l op r` where at least one side is a tensor (the operands are already C values).
     fn tensor_binary(&mut self, op: BinOp, l: &str, lt: &Ty, r: &str, rt: &Ty) -> CgResult<String> {
+        // comparing is element by element and gives a tensor of bool
+        let cmp = match op {
+            BinOp::Eq => Some(0),
+            BinOp::Ne => Some(1),
+            BinOp::Lt => Some(2),
+            BinOp::Le => Some(3),
+            BinOp::Gt => Some(4),
+            BinOp::Ge => Some(5),
+            _ => None,
+        };
+        if let Some(code) = cmp {
+            return match (lt, rt) {
+                (Ty::Tensor(el, _), Ty::Tensor(..)) => {
+                    self.tensor_elem(el)?;
+                    Ok(format!("tau_t_cmp({code}, {l}, {r})"))
+                }
+                (Ty::Tensor(el, _), s) | (s, Ty::Tensor(el, _)) => {
+                    self.tensor_elem(el)?;
+                    let left = !matches!(lt, Ty::Tensor(..));
+                    let (t, k) = if left { (r, l) } else { (l, r) };
+                    let sct = self.cty(s)?;
+                    Ok(match &**el {
+                        Ty::Float(_) => format!("tau_t_cmp_f({code}, {t}, (double)({k}), {})", left as u8),
+                        Ty::Complex(_) => format!("({{ {sct} z_ = {k}; tau_t_cmp_c({code}, {t}, (double)z_.re, (double)z_.im, {}); }})", left as u8),
+                        _ => format!("tau_t_cmp_i({code}, {t}, (int64_t)({k}), {})", left as u8),
+                    })
+                }
+                _ => unsupported("this tensor comparison"),
+            };
+        }
         let sym = match op {
             BinOp::Add => '+',
             BinOp::Sub => '-',
             BinOp::Mul => '*',
             BinOp::Div => '/',
+            BinOp::Rem => '%',
+            BinOp::BitAnd => '&',
+            BinOp::BitOr => '|',
+            BinOp::BitXor => '^',
             BinOp::MatMul => 'm',
             _ => return unsupported(format!("`{}` on tensors", op.symbol())),
         };
         match (lt, rt) {
             (Ty::Tensor(el, ld), Ty::Tensor(_, rd)) => {
                 self.tensor_elem(el)?;
+                if self.tensor_ik(el).is_some() {
+                    if sym == 'm' {
+                        let ect = self.cty(el)?;
+                        return Ok(match (ld.len(), rd.len()) {
+                            (2, 2) | (2, 1) => format!("tau_ti_matmul({l}, {r})"),
+                            (1, 1) => format!("(({ect})tau_ti_dot({l}, {r}))"),
+                            _ => return unsupported("`@` on tensors of this rank"),
+                        });
+                    }
+                    return Ok(format!("tau_ti_binop('{sym}', {l}, {r})"));
+                }
+                if !matches!(sym, '+' | '-' | '*' | '/' | 'm') {
+                    return unsupported(format!("`{}` on tensors of this type", op.symbol()));
+                }
                 if sym == 'm' {
                     return Ok(match (ld.len(), rd.len()) {
                         (2, 2) | (2, 1) => format!("tau_t_matmul({l}, {r})"),
@@ -3384,11 +3460,17 @@ static {vect} {top}({mt} *m, uint64_t n) {{
                 if sym == 'm' {
                     return unsupported("`@` with a number");
                 }
+                let left = !matches!(lt, Ty::Tensor(..));
+                let (t, k) = if left { (r, l) } else { (l, r) };
+                if self.tensor_ik(el).is_some() {
+                    return Ok(format!("tau_ti_scalar('{sym}', {t}, (int64_t)({k}), {})", left as u8));
+                }
+                if !matches!(sym, '+' | '-' | '*' | '/') {
+                    return unsupported(format!("`{}` on tensors of this type", op.symbol()));
+                }
                 if !matches!(s, Ty::Float(_) | Ty::Int(_)) {
                     return unsupported("arithmetic between a tensor and a complex number");
                 }
-                let left = !matches!(lt, Ty::Tensor(..));
-                let (t, k) = if left { (r, l) } else { (l, r) };
                 Ok(format!("tau_t_scalar('{sym}', {t}, (double)({k}), {})", if left { 1 } else { 0 }))
             }
             _ => unsupported("this tensor operation"),
@@ -3408,6 +3490,7 @@ static {vect} {top}({mt} *m, uint64_t n) {{
             _ => 2,
         };
         let n = dims.len();
+        let ik = self.tensor_ik(&el);
         let (decls, sizes): (String, Vec<String>) = if args.is_empty() {
             let mut out = Vec::new();
             for d in &dims {
@@ -3422,6 +3505,9 @@ static {vect} {top}({mt} *m, uint64_t n) {{
             let usz = vec![Ty::usize(); args.len()];
             self.ordered_with(&refs, Some(&usz), true)?
         };
+        if let Some((ik, ity)) = ik {
+            return Ok(Self::wrap(decls, format!("({{ size_t d_[{}] = {{ {} }}; tau_ti_fill({k}, {n}, d_, {ik}, {ity}); }})", n.max(1), sizes.join(", "))));
+        }
         Ok(Self::wrap(
             decls,
             format!("({{ size_t d_[{}] = {{ {} }}; tau_t_fill({k}, {n}, d_, {}, {}); }})", n.max(1), sizes.join(", "), cplx as u8, single as u8),
@@ -3435,6 +3521,40 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         let refs: Vec<&'a Expr> = args.iter().collect();
         let usz = Ty::usize();
         let (c, s) = (cplx as u8, single as u8);
+        if let Some((ik, ity)) = self.tensor_ik(&el) {
+            return match kind {
+                "tensor.from" => {
+                    let v = self.borrowed_as(&args[0], &Ty::Slice(el.clone()))?;
+                    let st = self.cty(&Ty::Slice(el.clone()))?;
+                    Ok(format!("({{ {st} s_ = {v}; size_t d_[1] = {{ s_.len }}; tau_tensor t_ = tau_ti_new(1, d_, {ik}, {ity}); for (size_t i_ = 0; i_ < s_.len; i_++) TAU_WORDS(&t_)[i_] = (uint64_t)(int64_t)s_.ptr[i_]; t_; }})"))
+                }
+                "tensor.from_rows" => {
+                    let vv = Ty::Adt(self.vec_adt()?, vec![Ty::Adt(self.vec_adt()?, vec![(*el).clone()])]);
+                    let v = self.borrowed_as(&args[0], &vv)?;
+                    let vt = self.cty(&vv)?;
+                    Ok(format!(
+                        "({{ {vt} r_ = {v}; size_t nr_ = r_.len, nc_ = nr_ ? r_.ptr[0].len : 0; for (size_t i_ = 0; i_ < nr_; i_++) if (r_.ptr[i_].len != nc_) tau_panic_cstr(\"`from_rows` needs rows of the same length\"); size_t d_[2] = {{ nr_, nc_ }}; tau_tensor t_ = tau_ti_new(2, d_, {ik}, {ity}); for (size_t i_ = 0; i_ < nr_; i_++) for (size_t j_ = 0; j_ < nc_; j_++) TAU_WORDS(&t_)[j_ * nr_ + i_] = (uint64_t)(int64_t)r_.ptr[i_].ptr[j_]; t_; }})"
+                    ))
+                }
+                "tensor.eye" => {
+                    let (decls, n) = self.ordered_with(&refs, Some(&[usz]), true)?;
+                    Ok(Self::wrap(decls, format!("tau_ti_eye({}, {ik}, {ity})", n[0])))
+                }
+                "tensor.arange" => {
+                    let (decls, n) = self.ordered_with(&refs, Some(&[usz]), true)?;
+                    Ok(Self::wrap(decls, format!("tau_ti_arange({}, {ity})", n[0])))
+                }
+                _ => {
+                    let mut tys = vec![(*el).clone()];
+                    tys.extend(std::iter::repeat(usz).take(dims.len()));
+                    let (decls, n) = self.ordered_with(&refs, Some(&tys), true)?;
+                    Ok(Self::wrap(
+                        decls,
+                        format!("({{ size_t d_[{}] = {{ {} }}; tau_ti_full({}, d_, (int64_t)({}), {ik}, {ity}); }})", dims.len().max(1), n[1..].join(", "), dims.len(), n[0]),
+                    ))
+                }
+            };
+        }
         match kind {
             "tensor.from" => {
                 let v = self.borrowed_as(&args[0], &Ty::Slice(el.clone()))?;
@@ -3494,7 +3614,35 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         let t = self.borrowed_as(recv, &rty)?;
         let ect = self.cty(&el)?;
         let refs: Vec<&'a Expr> = args.iter().collect();
+        let ik = self.tensor_ik(&el);
         match kind {
+            "tensor.count" => return Ok(format!("((uint64_t)tau_tb_count(&({t})))")),
+            "tensor.any" => return Ok(format!("tau_tb_any(&({t}))")),
+            "tensor.all" => return Ok(format!("tau_tb_all(&({t}))")),
+            "tensor.to_f64" => return Ok(format!("({{ tau_tensor t0_ = {t}; tau_t_to_f64(&t0_); }})")),
+            "tensor.to_i64" => return Ok(format!("({{ tau_tensor t0_ = {t}; tau_t_to_i64(&t0_); }})")),
+            "tensor.select" => {
+                let mty = Ty::Tensor(Box::new(Ty::Bool), vec![crate::types::Dim::Dyn; self.tensor_rank(&rty)]);
+                let m = self.borrowed_as(&args[0], &mty)?;
+                return Ok(format!("({{ tau_tensor t0_ = {t}; tau_tensor m_ = {m}; tau_t_select(&t0_, &m_); }})"));
+            }
+            "tensor.sum" if ik.is_some() => return Ok(format!("(({ect})tau_ti_sum(&({t})))")),
+            "tensor.min" | "tensor.max" if ik.is_some() => return Ok(format!("(({ect})tau_ti_minmax(&({t}), {}))", (kind == "tensor.max") as u8)),
+            "tensor.to_vec" if ik.is_some() => {
+                let rt = self.ty_of(e);
+                let vt = self.cty(&rt)?;
+                return Ok(format!(
+                    "({{ tau_tensor *t_ = &({t}); size_t n_ = tau_t_len(t_); {vt} r_ = {{0}}; if (n_) {{ r_.ptr = ({ect} *)malloc(n_ * sizeof({ect})); r_.cap = n_; r_.len = n_; for (size_t i_ = 0; i_ < n_; i_++) r_.ptr[i_] = ({ect})(int64_t)TAU_WORDS(t_)[i_]; }} r_; }})"
+                ));
+            }
+            "tensor.map" if ik.is_some() => {
+                let fty = Ty::Fn(vec![(*el).clone()], Box::new((*el).clone()));
+                let fct = self.cty(&fty)?;
+                let f = self.borrowed_as(&args[0], &fty)?;
+                return Ok(format!(
+                    "({{ tau_tensor src_ = {t}; {fct} f_ = {f}; tau_tensor t_ = tau_t_clone(&src_); size_t n_ = tau_t_len(&t_); for (size_t i_ = 0; i_ < n_; i_++) TAU_WORDS(&t_)[i_] = (uint64_t)(int64_t)f_.call(f_.env, ({ect})(int64_t)TAU_WORDS(&t_)[i_]); t_; }})"
+                ));
+            }
             "tensor.sum" | "tensor.mean" => {
                 let mean = (kind == "tensor.mean") as u8;
                 if cplx {
@@ -3560,7 +3708,32 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         Ok((pre, (*el).clone()))
     }
 
+    /// The C type of an integer or `bool` element.
+    fn int_elem_ctype(el: &Ty) -> &'static str {
+        match el {
+            Ty::Bool => "bool",
+            Ty::Int(IntTy::I8) => "int8_t",
+            Ty::Int(IntTy::I16) => "int16_t",
+            Ty::Int(IntTy::I32) => "int32_t",
+            Ty::Int(IntTy::I64 | IntTy::Isize) => "int64_t",
+            Ty::Int(IntTy::U8) => "uint8_t",
+            Ty::Int(IntTy::U16) => "uint16_t",
+            Ty::Int(IntTy::U32) => "uint32_t",
+            _ => "uint64_t",
+        }
+    }
+
+    fn tensor_rank(&self, t: &Ty) -> usize {
+        match t {
+            Ty::Tensor(_, d) => d.len(),
+            _ => 1,
+        }
+    }
+
     fn tensor_get(&self, el: &Ty) -> String {
+        if self.tensor_ik(el).is_some() {
+            return format!("(({})(int64_t)TAU_WORDS(t_)[f_])", Self::int_elem_ctype(el));
+        }
         match el {
             Ty::Float(FloatTy::F32) => "((float)t_->data[f_])".to_string(),
             Ty::Float(_) => "t_->data[f_]".to_string(),
@@ -3570,6 +3743,9 @@ static {vect} {top}({mt} *m, uint64_t n) {{
     }
 
     fn tensor_set(&self, el: &Ty, v: &str) -> String {
+        if self.tensor_ik(el).is_some() {
+            return format!("TAU_WORDS(t_)[f_] = (uint64_t)(int64_t)({v});");
+        }
         match el {
             Ty::Float(FloatTy::F32) => format!("t_->data[f_] = (double)(float)({v});"),
             Ty::Float(_) => format!("t_->data[f_] = {v};"),
@@ -3623,6 +3799,10 @@ static {vect} {top}({mt} *m, uint64_t n) {{
             // the elements are copied in; the value itself is only read (a computed one is freed with the statement)
             let r = self.borrow(rhs)?;
             Ok(format!("({{ tau_tensor *src_ = &({r}); {init}tau_t_slice_set(t_, {n}, sl_, src_, 0.0, 0.0); ((tau_unit)0); }})"))
+        } else if self.tensor_ik(&el).is_some() {
+            let r = self.expr(rhs)?;
+            let ect = self.cty(&el)?;
+            Ok(format!("({{ {ect} rv_ = {r}; {init}tau_ti_slice_fill(t_, {n}, sl_, (int64_t)rv_); ((tau_unit)0); }})"))
         } else {
             let r = self.expr(rhs)?;
             let ect = self.cty(&el)?;
@@ -3661,6 +3841,10 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         let f64_only = |t: &Option<Ty>| matches!(t, Some(Ty::Float(FloatTy::F64)));
         let v = match name {
             "trace" => match targ {
+                Some(t @ Ty::Int(_)) if self.tensor_ik(t).is_some() => {
+                    let ect = self.cty(t)?;
+                    format!("(({ect})tau_ti_trace({a}))")
+                }
                 Some(Ty::Float(FloatTy::F64)) => format!("tau_t_trace({a})"),
                 Some(Ty::Complex(FloatTy::F64)) => format!("tau_t_trace_c({a})"),
                 Some(Ty::Complex(FloatTy::F32)) => format!("({{ tau_c128 z_ = tau_t_trace_c({a}); (tau_c64){{ z_.re, z_.im }}; }})"),
