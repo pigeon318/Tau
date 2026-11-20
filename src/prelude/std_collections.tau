@@ -1,0 +1,255 @@
+// Collections written in Tau: `Set`, `Deque` and `Heap`.
+//
+//   use std.collections.Set
+//   use std.collections.Deque
+//   use std.collections.Heap
+
+use std.map.Map
+
+// ---- Set -----------------------------------------------------------------------------------------------------
+
+// A set of distinct values (numbers, `bool`, `char`, `str`, `String` and tuples of those, like the keys of a `Map`).
+// It remembers the order in which values were first added.
+pub struct Set<T> {
+    items: Map<T, bool>
+    pub len: usize
+}
+
+impl<T> Set<T> {
+    pub fn new() -> Set<T> {
+        Set(Map.new(), 0)
+    }
+    // Add `x`; true if it was not in the set yet.
+    pub fn insert(mut self, own x: T) -> bool {
+        if self.items.contains(x) { return false }
+        self.items[x] = true
+        self.len += 1
+        true
+    }
+    pub fn contains(self, x: T) -> bool {
+        self.items.contains(x)
+    }
+    // Take `x` out; true if it was in the set. (The others keep their order; this is O(n).)
+    pub fn remove(mut self, x: T) -> bool {
+        match self.items.remove(x) {
+            Some(_) => {
+                self.len -= 1
+                true
+            }
+            None => false
+        }
+    }
+    pub fn is_empty(self) -> bool { self.len == 0 }
+    pub fn clear(mut self) {
+        self.items.clear()
+        self.len = 0
+    }
+}
+
+impl<T: Clone> Set<T> {
+    // The values, in the order they were first added (a copy).
+    pub fn to_vec(self) -> Vec<T> {
+        self.items.keys()
+    }
+    // A new set of the values of both.
+    pub fn union(self, other: Set<T>) -> Set<T> {
+        let mut out = Set.new()
+        for x in self.to_vec() { out.insert(x.clone()) }
+        for x in other.to_vec() { out.insert(x.clone()) }
+        out
+    }
+    // The values that are in both.
+    pub fn intersection(self, other: Set<T>) -> Set<T> {
+        let mut out = Set.new()
+        for x in self.to_vec() {
+            if other.contains(x.clone()) { out.insert(x.clone()) }
+        }
+        out
+    }
+    // The values of `self` that are not in `other`.
+    pub fn difference(self, other: Set<T>) -> Set<T> {
+        let mut out = Set.new()
+        for x in self.to_vec() {
+            if !other.contains(x.clone()) { out.insert(x.clone()) }
+        }
+        out
+    }
+    // Is every value of `self` in `other`?
+    pub fn is_subset(self, other: Set<T>) -> bool {
+        for x in self.to_vec() {
+            if !other.contains(x.clone()) { return false }
+        }
+        true
+    }
+}
+
+// ---- Deque ---------------------------------------------------------------------------------------------------
+
+// A queue that can be added to and taken from at both ends. Two vectors: `front` holds the front part
+// reversed, `back` the rest. Adding is O(1); taking is O(1) too, except when one side is empty: then the other
+// is moved over (O(n), once per n takes). A program that only takes from one end never pays more than O(1) per take.
+pub struct Deque<T> {
+    front: Vec<T>
+    back: Vec<T>
+    pub len: usize
+}
+
+impl<T> Deque<T> {
+    pub fn new() -> Deque<T> {
+        Deque(Vec.new(), Vec.new(), 0)
+    }
+    pub fn push_back(mut self, own x: T) {
+        self.back.push(x)
+        self.len += 1
+    }
+    pub fn push_front(mut self, own x: T) {
+        self.front.push(x)
+        self.len += 1
+    }
+    pub fn pop_front(mut self) -> Option<T> {
+        if self.front.len == 0 {
+            // the back, turned around, becomes the front
+            while self.back.len > 0 {
+                match self.back.pop() {
+                    Some(x) => self.front.push(x)
+                    None => {}
+                }
+            }
+        }
+        match self.front.pop() {
+            Some(x) => {
+                self.len -= 1
+                Some(x)
+            }
+            None => None
+        }
+    }
+    pub fn pop_back(mut self) -> Option<T> {
+        if self.back.len == 0 {
+            while self.front.len > 0 {
+                match self.front.pop() {
+                    Some(x) => self.back.push(x)
+                    None => {}
+                }
+            }
+        }
+        match self.back.pop() {
+            Some(x) => {
+                self.len -= 1
+                Some(x)
+            }
+            None => None
+        }
+    }
+    pub fn is_empty(self) -> bool { self.len == 0 }
+    pub fn clear(mut self) {
+        self.front.clear()
+        self.back.clear()
+        self.len = 0
+    }
+}
+
+impl<T: Clone> Deque<T> {
+    // A copy of the element at position `i` from the front, or `None`.
+    pub fn get(self, i: usize) -> Option<T> {
+        if i >= self.len { return None }
+        if i < self.front.len {
+            Some(self.front[self.front.len - 1 - i].clone())
+        } else {
+            Some(self.back[i - self.front.len].clone())
+        }
+    }
+    pub fn front(self) -> Option<T> { self.get(0) }
+    pub fn back(self) -> Option<T> {
+        if self.len == 0 { None } else { self.get(self.len - 1) }
+    }
+    // The elements from the front to the back (a copy).
+    pub fn to_vec(self) -> Vec<T> {
+        let mut out: Vec<T> = Vec.new()
+        let mut i = self.front.len
+        while i > 0 {
+            i -= 1
+            out.push(self.front[i].clone())
+        }
+        let mut j = 0
+        while j < self.back.len {
+            out.push(self.back[j].clone())
+            j += 1
+        }
+        out
+    }
+}
+
+// ---- Heap ----------------------------------------------------------------------------------------------------
+
+// A priority queue: `pop` gives the largest element (or the smallest, for `Heap.new_min()`, or the first
+// according to your own `Heap.with_order(|a, b| ...)`, where `before(a, b)` says `a` comes out before `b`).
+pub struct Heap<T> {
+    items: Vec<T>
+    before: fn(T, T) -> bool
+    pub len: usize
+}
+
+impl<T: Ord> Heap<T> {
+    // The largest comes out first.
+    pub fn new() -> Heap<T> {
+        Heap(Vec.new(), |a: T, b: T| a > b, 0)
+    }
+    // The smallest comes out first.
+    pub fn new_min() -> Heap<T> {
+        Heap(Vec.new(), |a: T, b: T| a < b, 0)
+    }
+}
+
+impl<T> Heap<T> {
+    pub fn with_order(own before: fn(T, T) -> bool) -> Heap<T> {
+        Heap(Vec.new(), before, 0)
+    }
+    pub fn push(mut self, own x: T) {
+        self.items.push(x)
+        self.len += 1
+        let mut i = self.items.len - 1
+        while i > 0 {
+            let parent = (i - 1) / 2
+            if (self.before)(self.items[i], self.items[parent]) {
+                self.items.swap(i, parent)
+                i = parent
+            } else {
+                break
+            }
+        }
+    }
+    // Take out the element that comes first.
+    pub fn pop(mut self) -> Option<T> {
+        if self.items.len == 0 { return None }
+        let last = self.items.len - 1
+        self.items.swap(0, last)
+        let top = self.items.pop()
+        self.len -= 1
+        let n = self.items.len
+        let mut i = 0
+        loop {
+            let l = 2 * i + 1
+            let r = l + 1
+            let mut best = i
+            if l < n && (self.before)(self.items[l], self.items[best]) { best = l }
+            if r < n && (self.before)(self.items[r], self.items[best]) { best = r }
+            if best == i { break }
+            self.items.swap(i, best)
+            i = best
+        }
+        top
+    }
+    pub fn is_empty(self) -> bool { self.len == 0 }
+    pub fn clear(mut self) {
+        self.items.clear()
+        self.len = 0
+    }
+}
+
+impl<T: Clone> Heap<T> {
+    // A copy of the element that would come out next.
+    pub fn peek(self) -> Option<T> {
+        if self.items.len == 0 { None } else { Some(self.items[0].clone()) }
+    }
+}
