@@ -103,7 +103,7 @@ with a dependency.
 `tau update` replaces the program with the newest release: it downloads the file for your platform, checks it against
 the release's `SHA256SUMS`, runs it once, and only then swaps it in (a damaged or broken download changes nothing).
 `tau update --check` only says whether a newer version exists, and `tau update --force` installs the latest release
-even if you already have it. It needs `curl` (Windows 10 and later include it) and, while the repository is private, a
+even if you already have it. It needs `curl` (Windows 10 and later include it). If the repository is private it also needs a
 GitHub token that can read it: set `GITHUB_TOKEN`, or install the GitHub CLI and run `gh auth login`. A `tau` built from
 source (in a `target` folder) is updated with `git pull` and `cargo build --release` instead.
 
@@ -158,3 +158,12 @@ Releases are built by the `release` workflow (one run per release, started by pu
 | `examples/run/` | Programs that run, each with a `.expected` output from an independent Python port (`reference.py`) |
 | `examples/borrow_errors/` | One program per kind of borrow mistake; each must be rejected with the stated error |
 | `tests/` | Parser, type-checker and borrow-checker tests, error-message tests, and no-panic fuzzing |
+
+## Licence
+
+Tau is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you say otherwise, any contribution you submit for inclusion in Tau is licensed as above, without any additional terms or conditions.
