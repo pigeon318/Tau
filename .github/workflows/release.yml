@@ -126,11 +126,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
         run: |
-          cd dist
-          cp tau-windows-x86_64/tau.exe tau-windows-x86_64.exe
-          cp tau-linux-x86_64/tau tau-linux-x86_64
-          chmod +x tau-linux-x86_64
-          cp tau-vscode-extension/*.vsix tau-vscode-extension.vsix
+          # the downloaded artifacts are folders (dist/tau-linux-x86_64/tau); the release files go in a separate folder
+          mkdir out
+          cp dist/tau-windows-x86_64/tau.exe out/tau-windows-x86_64.exe
+          cp dist/tau-linux-x86_64/tau out/tau-linux-x86_64
+          chmod +x out/tau-linux-x86_64
+          cp dist/tau-vscode-extension/*.vsix out/tau-vscode-extension.vsix
+          cd out
           # the file names and SHA256SUMS are what `tau update` looks for
           sha256sum tau-windows-x86_64.exe tau-linux-x86_64 tau-vscode-extension.vsix > SHA256SUMS
           cat SHA256SUMS
