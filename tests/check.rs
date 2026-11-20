@@ -1051,3 +1051,25 @@ mod string_basics {
         ok("fn read(s: str) -> Result<i64, String> {\n let n = s.parse_i64()?\n Ok(n * 2)\n}\nfn main() { print(read(\"4\")) }\n");
     }
 }
+
+mod map_basics {
+    use super::*;
+
+    #[test]
+    fn types_of_the_map_methods() {
+        let r = ok("use std.map.Map\nfn main() {\n let mut m: Map<str, i64> = Map.new()\n m.insert(\"a\", 1)\n let n = m.len\n let g = m.get(\"a\")\n let r = m.remove(\"a\")\n let k = m.keys()\n let v = m.values()\n let e = m.entries()\n let b = m.is_empty()\n m.clear()\n}\n");
+        assert_eq!(r.binding_ty("n").as_deref(), Some("usize"));
+        assert_eq!(r.binding_ty("g").as_deref(), Some("Option<i64>"));
+        assert_eq!(r.binding_ty("r").as_deref(), Some("Option<i64>"));
+        assert_eq!(r.binding_ty("k").as_deref(), Some("Vec<str>"));
+        assert_eq!(r.binding_ty("v").as_deref(), Some("Vec<i64>"));
+        assert_eq!(r.binding_ty("e").as_deref(), Some("Vec<(str, i64)>"));
+    }
+
+    #[test]
+    fn what_a_map_method_needs() {
+        err("use std.map.Map\nfn main() {\n let m: Map<str, i64> = Map.new()\n m.insert(\"a\", 1)\n}\n", "not declared `mut`");
+        err("use std.map.Map\nfn main() {\n let mut m: Map<str, i64> = Map.new()\n m.remove(5)\n}\n", "mismatched types");
+        err("use std.map.Map\nfn main() {\n let m: Map<str, i64> = Map.new()\n m.len = 3\n}\n", "cannot assign");
+    }
+}
