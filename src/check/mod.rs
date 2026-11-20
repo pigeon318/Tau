@@ -138,7 +138,7 @@ impl CheckResult {
 
 /// Is this tensor builtin a method of a tensor value (`t.sum()`), rather than a constructor (`Type.zeros(2)`)?
 pub fn tensor_builtin_has_receiver(kind: &str) -> bool {
-    matches!(kind, "tensor.sum" | "tensor.mean" | "tensor.min" | "tensor.max" | "tensor.shape" | "tensor.to_vec" | "tensor.map" | "tensor.reshape" | "tensor.transpose")
+    matches!(kind, "tensor.sum" | "tensor.mean" | "tensor.min" | "tensor.max" | "tensor.shape" | "tensor.to_vec" | "tensor.map" | "tensor.reshape" | "tensor.transpose" | "tensor.count" | "tensor.any" | "tensor.all" | "tensor.select" | "tensor.to_f64" | "tensor.to_i64")
 }
 
 /// Parse `src` and check it against the built-in library.

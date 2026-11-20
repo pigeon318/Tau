@@ -8,6 +8,7 @@ mod builtins;
 mod clock;
 mod eval;
 mod tensor;
+mod tensor_int;
 pub mod value;
 
 use std::collections::HashMap;
@@ -20,6 +21,7 @@ use crate::program::*;
 use crate::unit::ModRef;
 use crate::types::*;
 use crate::types::Dim;
+use tensor_int::ElemKind;
 use value::*;
 
 /// Non-local control flow.
@@ -341,6 +343,8 @@ impl<'a> Interp<'a> {
                 match &t.data {
                     TData::F(d) => Value::Float(d[*i]),
                     TData::C(d) => Value::Complex(d[*i].0, d[*i].1),
+                    TData::I(_, d) => Value::Int(d[*i]),
+                    TData::B(d) => Value::Bool(d[*i]),
                 }
             }
         })
@@ -369,6 +373,8 @@ impl<'a> Interp<'a> {
                     (TData::F(d), Value::Float(x)) => d[*i] = if single { x as f32 as f64 } else { x },
                     (TData::F(d), Value::Int(x)) => d[*i] = x as f64,
                     (TData::C(d), Value::Complex(a, b)) => d[*i] = (a, b),
+                    (TData::I(_, d), Value::Int(x)) => d[*i] = x,
+                    (TData::B(d), Value::Bool(x)) => d[*i] = x,
                     _ => return panic("cannot store this value in a tensor"),
                 }
             }

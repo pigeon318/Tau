@@ -13,7 +13,7 @@ generics, operators and mutability, then checks ownership (use after move, confl
 views that outlive their data, race-free `spawn` and `par for`), and an interpreter runs what is
 accepted. A **native backend** (Tau to C, compiled by the system `clang` or `gcc`) runs
 everything except `on` blocks and a few corner cases: scalars, structs, enums, generics, traits, closures,
-`Vec`/`String`/arrays/slices/`Map`, tensors, complex numbers, linear algebra, FFT, files, clocks and dates (`std.time`), `Box<T>` and recursive types, iterators (`v.iter().map(..).sum()`, `for x in my_iterator`), ownership, checked
+`Vec`/`String`/arrays/slices/`Map`, tensors, complex numbers, linear algebra, FFT, files, clocks and dates (`std.time`), `Box<T>` and recursive types, iterators (`v.iter().map(..).sum()`, `for x in my_iterator`), integer and bool tensors with masks, ownership, checked
 arithmetic, and `par for`/`par sum`/`spawn` on a thread pool whose results never depend on the number of
 cores. It is typically 10 to 200 times faster than the interpreter, which remains the reference and the
 fallback (used automatically when a program needs something native cannot do, or no C compiler is installed).
