@@ -1532,3 +1532,52 @@ fn integer_tensors_free_what_they_own() {
     );
     assert!(out.starts_with("[1]") || out.starts_with("["), "{out}");
 }
+
+// ------------------------------------------------------------------ M9: vector basics
+
+#[test]
+fn vector_and_slice_methods_run_the_same_natively() {
+    let out = same(
+        "fn main() {\n\
+          let mut v = vec[5, 3, 9, 1, 7]\n v.sort()\n print(v)\n v.reverse()\n print(v)\n\
+          v.insert(2, 100)\n print(v)\n print(v.remove(0))\n print(v)\n print(v.contains(100))\n print(v.contains(4))\n print(v.position_of(3))\n\
+          v.retain(|x| x > 3)\n print(v)\n print(v.first())\n print(v.last())\n print(v.get(1))\n print(v.get(99))\n\
+          v.truncate(1)\n print(v)\n v.extend([8, 9, 10])\n print(v)\n print(v.swap_remove(0))\n print(v)\n v.clear()\n print(v.len)\n\
+          let mut words = vec[String.from(\"pear\"), String.from(\"apple\"), String.from(\"fig\")]\n words.sort()\n print(words)\n words.sort_by(|a, b| a.len < b.len)\n print(words)\n\
+          let mut f = vec[2.5, -1.0, 9.75, 0.0]\n f.sort()\n print(f)\n print(f.is_sorted())\n\
+          let mut z = vec[0, 0, 0]\n z.fill(7)\n print(z)\n\
+          let mut part = vec[9, 8, 7, 6, 5]\n part[1..4].sort()\n print(part)\n part[..2].reverse()\n print(part)\n\
+          let mut arr = [4, 2, 3]\n arr.sort()\n arr.swap(0, 2)\n print(arr)\n\
+          let mut e: Vec<i64> = Vec.new()\n e.sort()\n e.reverse()\n print(e)\n print(e.first())\n\
+         }",
+    );
+    assert!(out.starts_with("[1, 3, 5, 7, 9]\n[9, 7, 5, 3, 1]\n[9, 7, 100, 5, 3, 1]\n9\n"), "{out}");
+    assert!(out.ends_with("[9, 6, 7, 8, 5]\n[6, 9, 7, 8, 5]\n[4, 3, 2]\n[]\nNone\n"), "{out}");
+}
+
+#[test]
+fn vector_method_panics_are_the_same() {
+    for (stmts, msg) in [
+        ("let mut v = vec[1, 2]\n v.insert(5, 0)", "insert: the index is greater than the length"),
+        ("let mut v = vec[1, 2]\n print(v.remove(2))", "remove: the index is not less than the length"),
+        ("let mut v = vec[1, 2]\n print(v.swap_remove(7))", "swap_remove: the index is not less than the length"),
+        ("let mut v = vec[1, 2]\n v.swap(0, 2)", "index out of bounds: the length is 2 but the index is 2"),
+        ("let mut v = vec[1, 2, 3]\n v[1..].swap(0, 2)", "index out of bounds: the length is 2 but the index is 2"),
+    ] {
+        let src = format!("fn main() {{\n {stmts}\n}}");
+        let (_, p) = interpret(&src);
+        assert_eq!(p.as_deref().map(|m| m.contains(msg)), Some(true), "{stmts}: {p:?}");
+        same(&src);
+    }
+}
+
+#[test]
+fn sorting_moves_owned_elements_without_leaking() {
+    // (`TAU_VALGRIND=1` reports a leak) strings and vectors are moved around by `swap`, never copied
+    let out = same(
+        "fn main() {\n let mut names = vec[String.from(\"delta\"), String.from(\"alpha\"), String.from(\"charlie\"), String.from(\"bravo\")]\n names.sort()\n print(names)\n\
+         let mut rows = vec[vec[3, 1], vec[1, 2], vec[2, 0]]\n rows.sort_by(|a, b| a[0] < b[0])\n print(rows)\n\
+         names.retain(|s| s.len > 5)\n print(names)\n let gone = names.remove(0)\n print(gone)\n names.insert(0, String.from(\"zulu\"))\n print(names)\n}",
+    );
+    assert_eq!(out, "[alpha, bravo, charlie, delta]\n[[1, 2], [2, 0], [3, 1]]\n[charlie]\ncharlie\n[zulu]\n");
+}

@@ -2740,6 +2740,13 @@ impl<'a> Cg<'a> {
                 let add = self.arith(BinOp::Add, "acc_", "s_.ptr[i_]", &t)?;
                 Ok(format!("({{ {st} s_ = {v}; {ct} acc_ = {init}; for (size_t i_ = 0; i_ < s_.len; i_++) acc_ = {add}; acc_; }})"))
             }
+            "slice::swap" => {
+                let Ty::Slice(el) = &ops[0].2 else { return unsupported("this `swap`") };
+                let (st, et) = (self.cty(&ops[0].2)?, self.cty(el)?);
+                let v = self.borrowed_as(ops[0].0, &ops[0].2)?;
+                let (decls, n) = self.ordered(&[ops[1].0, ops[2].0])?;
+                Ok(Self::wrap(decls, format!("({{ {st} s_ = {v}; uint64_t i_ = (uint64_t)({}), j_ = (uint64_t)({}); if (i_ >= s_.len) tau_oob(s_.len, (__int128)i_); if (j_ >= s_.len) tau_oob(s_.len, (__int128)j_); {et} t_ = s_.ptr[i_]; s_.ptr[i_] = s_.ptr[j_]; s_.ptr[j_] = t_; ((tau_unit)0); }})", n[0], n[1])))
+            }
             "slice::map" | "slice::filter" => {
                 let Ty::Slice(el) = &ops[0].2 else { return unsupported("this `map`/`filter`") };
                 let Ty::Adt(_, rargs) = ret else { return unsupported("this `map`/`filter`") };

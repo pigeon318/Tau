@@ -247,6 +247,20 @@ impl<'a> Interp<'a> {
                 let items: Vec<Value<'a>> = s.borrow()[lo..hi].iter().map(|v| v.copy_shell()).collect();
                 Ok(Value::vec(items))
             }
+            "slice::swap" => {
+                let (s, lo, hi) = self.slice_of(&a[0])?;
+                let len = hi - lo;
+                let idx = |v: &Value<'a>| -> R<'a, usize> {
+                    match v {
+                        Value::Int(i) if *i >= 0 && (*i as usize) < len => Ok(lo + *i as usize),
+                        Value::Int(i) => panic(format!("index out of bounds: the length is {len} but the index is {i}")),
+                        _ => panic("swap needs integer positions"),
+                    }
+                };
+                let (i, j) = (idx(&a[1])?, idx(&a[2])?);
+                s.borrow_mut().swap(i, j);
+                Ok(Value::Unit)
+            }
             "slice::is_empty" => {
                 let (_, lo, hi) = self.slice_of(&a[0])?;
                 Ok(Value::Bool(lo == hi))
