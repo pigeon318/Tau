@@ -104,6 +104,21 @@ v.contains(x)   v.position_of(x)   v.first()   v.last()   v.get(i)   v.is_sorted
 - `insert(i, x)` takes `i` up to and including the length; `remove(i)` and `swap_remove(i)` need `i` less than the length (otherwise a panic that says so). `swap(i, j)` panics with `index out of bounds` like indexing. `swap_remove` is O(1) but moves the last element into the gap. `retain` keeps the order.
 - `first`, `last`, `get` and `extend` copy elements with `clone`, so the elements must be `Clone`; `contains` and `position_of` need `Eq`; `sort` and `is_sorted` need `Ord`. A method whose bound is not met says which one: "`sort` needs `P: Ord`".
 
+### Maps
+
+```
+use std.map.Map
+let mut m: Map<str, i64> = Map.new()
+m["b"] = 2     m.insert("a", 1)     m["a"] += 10          // `m[k] += x` starts a missing entry at zero
+m.len   m.is_empty()   m.contains("a")   m.get("a")   m.remove("b")   m.clear()
+m.keys()   m.values()   m.entries()   m.top(3)
+```
+
+- Entries keep the order their keys were first added; `keys()`, `values()` and `entries()` give **copies** in that order (`entries` is a `Vec<(K, V)>`, so `for (k, v) in m.entries() { ... }` walks the map). They need `K` and `V` to be `Clone`.
+- `m[k]` panics when the key is missing; `m.get(k)` gives an `Option`. `m.remove(k)` takes the entry out and returns its value (`None` if there was none); the other entries keep their order, and removing is O(n) (the table is rebuilt), so it is for occasional use. `m.insert(k, v)` is `m[k] = v`.
+- A key must have exactly the key type: a `Map<String, T>` is indexed with a `String`, a `Map<str, T>` with a `str`.
+- A `Map` is not iterated in place or cloned yet.
+
 ### Strings
 
 ```

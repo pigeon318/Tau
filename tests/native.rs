@@ -1661,3 +1661,44 @@ fn a_loop_body_that_ends_with_an_owned_value_frees_it() {
     );
     assert_eq!(out, "[a]\n2\n");
 }
+
+// ------------------------------------------------------------------ M9: maps
+
+#[test]
+fn map_methods_run_the_same_natively() {
+    let out = same(
+        "use std.map.Map\nfn main() {\n\
+          let mut m: Map<str, i64> = Map.new()\n m[\"b\"] = 2\n m[\"a\"] = 1\n m.insert(\"c\", 3)\n m[\"a\"] += 10\n\
+          print(m.len)\n print(m.get(\"a\"))\n print(m.get(\"zz\"))\n print(m.contains(\"b\"))\n print(m.keys())\n print(m.values())\n print(m.entries())\n\
+          print(m.remove(\"b\"))\n print(m.remove(\"b\"))\n print(m.keys())\n print(m.len)\n m[\"d\"] = 4\n print(m.entries())\n\
+          for (k, v) in m.entries() { print(\"{k}={v}\") }\n m.clear()\n print(m.len)\n print(m.is_empty())\n\
+          let mut nums: Map<i64, Vec<String>> = Map.new()\n nums[1] = vec[String.from(\"x\")]\n nums[2] = vec[String.from(\"y\"), String.from(\"z\")]\n print(nums.get(2))\n print(nums.remove(1))\n print(nums.values())\n\
+          let mut owned: Map<String, String> = Map.new()\n owned[String.from(\"k\")] = String.from(\"v\")\n owned.insert(String.from(\"j\"), String.from(\"w\"))\n print(owned.get(String.from(\"k\")))\n print(owned.remove(String.from(\"k\")))\n print(owned.keys())\n\
+          let mut counts: Map<str, i64> = Map.new()\n for w in \"a b a c b a\".split(\" \") { counts[w] += 1 }\n print(counts.top(2))\n print(counts.entries())\n\
+         }",
+    );
+    assert!(out.starts_with("3\nSome(11)\nNone\ntrue\n[b, a, c]\n[2, 11, 3]\n[(b, 2), (a, 11), (c, 3)]\nSome(2)\nNone\n[a, c]\n2\n[(a, 11), (c, 3), (d, 4)]\n"), "{out}");
+}
+
+#[test]
+fn removing_from_a_large_map_keeps_it_consistent() {
+    // 2000 inserts, then removing every third key and every key above 1800 (the numbers were checked against Python)
+    let out = same(
+        "use std.map.Map\nfn main() {\n let mut m: Map<i64, i64> = Map.new()\n for i in 0..2000 { m[i] = i * 2 }\n\
+         let mut gone = 0\n for i in 0..2000 { if i % 3 == 0 || i > 1800 { match m.remove(i) {\n Some(v) => gone += v\n None => print(\"missing\")\n }\n } }\n\
+         print(m.len)\n print(gone)\n print(m.contains(3))\n print(m.contains(4))\n print(m.get(4))\n print(m.get(1801))\n\
+         let ks = m.keys()\n print(ks.len)\n print(ks[0])\n print(ks[ks.len - 1])\n let mut total = 0\n for k in ks { total += m[k] }\n print(total)\n\
+         m[3] = 9\n print(m.keys()[m.len - 1])\n print(m.remove(3000))\n}",
+    );
+    assert_eq!(out, "1200\n1838000\nfalse\ntrue\nSome(8)\nNone\n1200\n1\n1799\n2160000\n3\nNone\n");
+}
+
+#[test]
+fn maps_free_what_they_own() {
+    // (`TAU_VALGRIND=1` reports a leak) owned keys and values: removed, replaced, cleared, listed
+    let out = same(
+        "use std.map.Map\nfn main() {\n let mut m: Map<String, Vec<String>> = Map.new()\n for w in [\"alpha\", \"beta\", \"gamma\", \"delta\"] {\n m[w.to_string()] = vec[w.to_string(), w.uppercase()]\n }\n\
+         print(m.get(\"beta\".to_string()))\n let gone = m.remove(\"alpha\".to_string())\n print(gone)\n print(m.remove(\"nope\".to_string()))\n print(m.keys())\n print(m.entries().len)\n m[\"beta\".to_string()] = vec[String.from(\"new\")]\n print(m.values())\n m.clear()\n print(m.len)\n}",
+    );
+    assert!(out.starts_with("Some([beta, BETA])\nSome([alpha, ALPHA])\nNone\n"), "{out}");
+}

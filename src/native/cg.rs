@@ -2152,6 +2152,10 @@ impl<'a> Cg<'a> {
             let b = self.borrow(base)?;
             return Ok(format!("((uint64_t)tau_t_len(&({b})))"));
         }
+        if name == "len" && self.map_kv(&bt).is_some() {
+            let b = self.borrow(base)?;
+            return Ok(format!("((uint64_t)({b}).len)"));
+        }
         if name == "len" && (self.seq_elem(&bt).is_some() || self.is_string(&bt) || matches!(bt, Ty::Str)) {
             let b = self.borrow(base)?;
             return Ok(match &bt {
@@ -2984,6 +2988,48 @@ impl<'a> Cg<'a> {
                 let mt = self.cty(ret)?;
                 Ok(format!("(({mt}){{0}})"))
             }
+            "Map::get" | "Map::remove" | "Map::keys" | "Map::values" => {
+                let self_ty = ops[0].2.clone();
+                let Some((kt, vt)) = self.map_kv(&self_ty) else { return unsupported("this map operation") };
+                let mt = self.cty(&self_ty)?;
+                // make sure the helpers exist
+                self.map_helper(&self_ty, "find")?;
+                let mh = self.mangle(&self_ty)?;
+                let find = format!("tau_map_find_{mh}");
+                let (kct, vct) = (self.cty(&kt)?, self.cty(&vt)?);
+                match name {
+                    "Map::get" => {
+                        let m = self.borrow(ops[0].0)?;
+                        let k = self.borrowed_as(ops[1].0, &kt)?;
+                        let oct = self.cty(ret)?;
+                        let copy = match self.clone_fn(&vt)? {
+                            Some(c) => format!("{c}(&m_->vals[i_])"),
+                            None => "m_->vals[i_]".to_string(),
+                        };
+                        Ok(format!("({{ {mt} *m_ = &({m}); {kct} k_ = {k}; int64_t i_ = {find}(m_, k_); {oct} r_; if (i_ >= 0) r_ = ({oct}){{ .tag = 0, .u.v0 = {{ {copy} }} }}; else r_ = ({oct}){{ .tag = 1 }}; r_; }})"))
+                    }
+                    "Map::remove" => {
+                        let p = self.mut_ptr(ops[0].0)?;
+                        let k = self.borrowed_as(ops[1].0, &kt)?;
+                        let oct = self.cty(ret)?;
+                        let rm = format!("tau_map_remove_{mh}");
+                        Ok(format!("({{ {mt} *m_ = {p}; {kct} k_ = {k}; {vct} v_; {oct} r_; if ({rm}(m_, k_, &v_)) r_ = ({oct}){{ .tag = 0, .u.v0 = {{ v_ }} }}; else r_ = ({oct}){{ .tag = 1 }}; r_; }})"))
+                    }
+                    _ => {
+                        let keys = name == "Map::keys";
+                        let m = self.borrow(ops[0].0)?;
+                        let (et, ety) = if keys { (kct.clone(), kt.clone()) } else { (vct.clone(), vt.clone()) };
+                        let vect = self.cty(ret)?;
+                        let push = self.vec_helper(&ety, "push")?;
+                        let copy = match self.clone_fn(&ety)? {
+                            Some(c) => format!("{c}(&m_->{}[i_])", if keys { "keys" } else { "vals" }),
+                            None => format!("m_->{}[i_]", if keys { "keys" } else { "vals" }),
+                        };
+                        let _ = et;
+                        Ok(format!("({{ {mt} *m_ = &({m}); {vect} r_ = {{0}}; for (size_t i_ = 0; i_ < m_->len; i_++) {push}(&r_, {copy}); r_; }})"))
+                    }
+                }
+            }
             "Map::contains" | "Map::index" | "Map::top" => {
                 let self_ty = ops[0].2.clone();
                 let Some((kt, _)) = self.map_kv(&self_ty) else { return unsupported("this map operation") };
@@ -3171,8 +3217,9 @@ impl<'a> Cg<'a> {
             let eq = self.eq_expr("m->keys[i]", "k", &k)?;
             let kdrop = self.drop_stmt("k", &k)?;
             let (find, get, slot, rehash) = (name("find"), name("get"), name("slot"), name("rehash"));
+            let (remove, entry_kdrop) = (name("remove"), self.drop_stmt("m->keys[i]", &k)?);
             self.protos.push_str(&format!(
-                "static int64_t {find}({mt} *m, {kt} k);\nstatic {vt} *{get}({mt} *m, {kt} k);\nstatic {vt} *{slot}({mt} *m, {kt} k);\nstatic void {rehash}({mt} *m, size_t ncap);\n"
+                "static int64_t {find}({mt} *m, {kt} k);\nstatic {vt} *{get}({mt} *m, {kt} k);\nstatic {vt} *{slot}({mt} *m, {kt} k);\nstatic void {rehash}({mt} *m, size_t ncap);\nstatic int {remove}({mt} *m, {kt} k, {vt} *out);\n"
             ));
             self.bodies.push_str(&format!(
                 "static int64_t {find}({mt} *m, {kt} k) {{
@@ -3197,6 +3244,18 @@ static {vt} *{get}({mt} *m, {kt} k) {{
   int64_t i = {find}(m, k);
   if (i < 0) tau_panic_cstr(\"key not found in map\");
   return &m->vals[i];
+}}
+/* take the entry out: the other entries keep their order; the value is moved to `out` */
+static int {remove}({mt} *m, {kt} k, {vt} *out) {{
+  int64_t i = {find}(m, k);
+  if (i < 0) return 0;
+  {entry_kdrop}*out = m->vals[i];
+  size_t n = m->len - (size_t)i - 1;
+  memmove(&m->keys[i], &m->keys[i + 1], n * sizeof({kt}));
+  memmove(&m->vals[i], &m->vals[i + 1], n * sizeof({vt}));
+  m->len--;
+  {rehash}(m, m->tabcap);
+  return 1;
 }}
 static {vt} *{slot}({mt} *m, {kt} k) {{
   int64_t i = {find}(m, k);
