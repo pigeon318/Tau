@@ -24,9 +24,9 @@ USAGE:
     tau tokens <file>          print the token stream
     tau parse <file>           check that a file parses (--ast prints the tree, --sexp the function bodies)
     tau clean                  delete the cache of compiled programs
-    tau update                 replace this tau with the newest release (needs curl and a GitHub token for now)
+    tau update                 replace this tau with the newest release (needs curl; a private repository needs a GitHub token)
     tau update --check         only say whether a newer release exists
-    tau --version              show the version and which C compiler the native backend would use
+    tau --version              show the version, the commit it was built from, and the C compiler the native backend would use
 
 `path` is a .tau file, or a package folder (one with a tau.toml); without it the package in the
 current folder (or above it) is used. A program may use other files and packages: see SPEC.md, section 9.
@@ -71,7 +71,7 @@ fn real_main() -> ExitCode {
         }
         Some("--version") | Some("version") => {
             let cc = tau::native::find_cc();
-            println!("tau {} (native backend: {})", env!("CARGO_PKG_VERSION"), cc.as_deref().unwrap_or("no C compiler found, interpreter only"));
+            println!("tau {} (commit {}; native backend: {})", env!("CARGO_PKG_VERSION"), env!("TAU_BUILD_REV"), cc.as_deref().unwrap_or("no C compiler found, interpreter only"));
             return ExitCode::SUCCESS;
         }
         Some("new") => return cmd_new(&args[1..]),
