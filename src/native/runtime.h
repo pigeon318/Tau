@@ -674,7 +674,15 @@ static void tau_fmt_complex_spec(tau_buf *b, double re, double im, int single, t
 
 /* Dense, column-major (the first index varies fastest). Elements are stored as doubles (pairs
  * for complex); `single` tensors round every result to float, as the interpreter does. */
-typedef struct { uint8_t rank, single, cplx; size_t dims[8]; double *data; } tau_tensor;
+typedef struct { uint8_t rank, single, cplx, ik, ity; size_t dims[8]; double *data; } tau_tensor;
+/* Integer and bool tensors (`ik` 1 and 2) keep one 8-byte word per element in the same buffer: an
+ * int64_t (an unsigned value is stored as its bit pattern), or 0/1 for bool. `ity` is the integer
+ * type, in the order of the compiler's `IntTy` (i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize). */
+static const char *const tau_ity_name[12] = { "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize" };
+static const uint8_t tau_ity_bits[12] = { 8, 16, 32, 64, 128, 64, 8, 16, 32, 64, 128, 64 };
+#define TAU_ITY_SIGNED(t) ((t) < 6)
+#define TAU_WORDS(t) ((uint64_t *)(t)->data)
+#define TAU_CWORDS(t) ((const uint64_t *)(t)->data)
 
 static uint64_t tau_rng = 0x9E3779B97F4A7C15ULL;
 static double tau_next_random(void) {
@@ -708,6 +716,7 @@ static tau_tensor tau_t_new(int rank, const size_t *dims, int cplx, int single) 
 static void tau_t_free(tau_tensor *t) { free(t->data); memset(t, 0, sizeof *t); }
 static tau_tensor tau_t_clone(const tau_tensor *t) {
     tau_tensor r = tau_t_new(t->rank, t->dims, t->cplx, t->single);
+    r.ik = t->ik; r.ity = t->ity;
     memcpy(r.data, t->data, tau_t_len(t) * (t->cplx ? 2 : 1) * sizeof(double));
     return r;
 }
@@ -844,9 +853,10 @@ static tau_tensor tau_t_transpose(const tau_tensor *t) {
     size_t rr = t->dims[0], cc = t->dims[1], w = t->cplx ? 2 : 1;
     size_t d[2] = { cc, rr };
     tau_tensor o = tau_t_new(2, d, t->cplx, t->single);
+    o.ik = t->ik; o.ity = t->ity;
     for (size_t i = 0; i < rr; i++)
         for (size_t j = 0; j < cc; j++)
-            for (size_t k = 0; k < w; k++) o.data[(i * cc + j) * w + k] = t->data[(j * rr + i) * w + k];
+            for (size_t k = 0; k < w; k++) TAU_WORDS(&o)[(i * cc + j) * w + k] = TAU_CWORDS(t)[(j * rr + i) * w + k];
     return o;
 }
 
@@ -907,8 +917,9 @@ static tau_tensor tau_t_slice(const tau_tensor *t, int n, const tau_sl *s) {
     tau_t_slice_plan(t, n, s, first, count);
     for (int d = 0; d < n; d++) if (s[d].range) rd[ra++] = count[d];
     tau_tensor r = tau_t_new(ra, rd, t->cplx, t->single);
+    r.ik = t->ik; r.ity = t->ity;
     size_t total = tau_t_len(&r), w = t->cplx ? 2 : 1;
-    TAU_T_SLICE_LOOP(t, n, s, first, count, total, { for (size_t j = 0; j < w; j++) r.data[k * w + j] = t->data[flat * w + j]; });
+    TAU_T_SLICE_LOOP(t, n, s, first, count, total, { for (size_t j = 0; j < w; j++) TAU_WORDS(&r)[k * w + j] = TAU_CWORDS(t)[flat * w + j]; });
     return r;
 }
 
@@ -937,7 +948,7 @@ static void tau_t_slice_set(tau_tensor *t, int n, const tau_sl *s, const tau_ten
             tau_t_dims_text(&m, rd, ra);
             tau_panic((const char *)m.ptr, m.len);
         }
-        TAU_T_SLICE_LOOP(t, n, s, first, count, total, { for (size_t j = 0; j < w; j++) t->data[flat * w + j] = src->data[k * w + j]; });
+        TAU_T_SLICE_LOOP(t, n, s, first, count, total, { for (size_t j = 0; j < w; j++) TAU_WORDS(t)[flat * w + j] = TAU_CWORDS(src)[k * w + j]; });
     } else {
         re = tau_t_rnd(re, t->single);
         im = tau_t_rnd(im, t->single);
@@ -1020,11 +1031,266 @@ static tau_c128 tau_t_trace_c(tau_tensor a) {
     return (tau_c128){ re, im };
 }
 
+
+/* ---- tensors of integers and of bool (src/interp/tensor_int.rs has the same, and the two must agree) */
+
+static __int128 tau_ti_get(const tau_tensor *t, size_t i) {
+    uint64_t w = TAU_CWORDS(t)[i];
+    return TAU_ITY_SIGNED(t->ity) ? (__int128)(int64_t)w : (__int128)w;
+}
+static void tau_ti_put(tau_tensor *t, size_t i, __int128 v) { TAU_WORDS(t)[i] = (uint64_t)v; }
+/* a result checked against the type's range */
+static __int128 tau_ti_fit(int ity, __int128 v) {
+    int bits = tau_ity_bits[ity];
+    __int128 lo, hi;
+    if (TAU_ITY_SIGNED(ity)) { lo = -((__int128)1 << (bits - 1)); hi = ((__int128)1 << (bits - 1)) - 1; }
+    else { lo = 0; hi = ((__int128)1 << bits) - 1; }
+    if (v < lo || v > hi) tau_ovf_wide(tau_ity_name[ity], v);
+    return v;
+}
+static __int128 tau_ti_op(char op, __int128 a, __int128 b, int ity) {
+    __int128 r;
+    switch (op) {
+        case '+': r = a + b; break;
+        case '-': r = a - b; break;
+        case '*': r = a * b; break;
+        case '/': if (b == 0) tau_panic_cstr("division by zero"); r = a / b; break;
+        case '%': if (b == 0) tau_panic_cstr("division by zero"); r = a % b; break;
+        case '&': r = a & b; break;
+        case '|': r = a | b; break;
+        default: r = a ^ b; break;
+    }
+    return tau_ti_fit(ity, r);
+}
+static tau_tensor tau_ti_new(int rank, const size_t *dims, int ik, int ity) {
+    tau_tensor t = tau_t_new(rank, dims, 0, 0);
+    t.ik = (uint8_t)ik; t.ity = (uint8_t)ity;
+    return t;
+}
+/* kind: 0 zeros, 1 ones */
+static tau_tensor tau_ti_fill(int kind, int rank, const size_t *dims, int ik, int ity) {
+    tau_tensor t = tau_ti_new(rank, dims, ik, ity);
+    size_t n = tau_t_len(&t);
+    for (size_t i = 0; i < n; i++) TAU_WORDS(&t)[i] = (uint64_t)kind;
+    return t;
+}
+static tau_tensor tau_ti_eye(size_t n, int ik, int ity) {
+    size_t d[2] = { n, n };
+    tau_tensor t = tau_ti_new(2, d, ik, ity);
+    for (size_t i = 0; i < n; i++) TAU_WORDS(&t)[i * n + i] = 1;
+    return t;
+}
+static tau_tensor tau_ti_full(int rank, const size_t *dims, int64_t v, int ik, int ity) {
+    tau_tensor t = tau_ti_new(rank, dims, ik, ity);
+    size_t n = tau_t_len(&t);
+    for (size_t i = 0; i < n; i++) TAU_WORDS(&t)[i] = (uint64_t)v;
+    return t;
+}
+static tau_tensor tau_ti_arange(size_t n, int ity) {
+    int bits = tau_ity_bits[ity];
+    __int128 hi = TAU_ITY_SIGNED(ity) ? ((__int128)1 << (bits - 1)) - 1 : ((__int128)1 << bits) - 1;
+    if (n > 0 && (__int128)(n - 1) > hi) tau_ovf_wide(tau_ity_name[ity], hi + 1);
+    size_t d[1] = { n };
+    tau_tensor t = tau_ti_new(1, d, 1, ity);
+    for (size_t i = 0; i < n; i++) TAU_WORDS(&t)[i] = (uint64_t)i;
+    return t;
+}
+
+/* + - * / % & | ^ element by element (bool tensors: only & | ^) */
+static tau_tensor tau_ti_binop(char op, tau_tensor a, tau_tensor b) {
+    if (a.rank != b.rank || memcmp(a.dims, b.dims, sizeof(size_t) * a.rank) != 0) tau_t_shape_panic("shape mismatch: ", &a, &b);
+    tau_tensor r = tau_ti_new(a.rank, a.dims, a.ik, a.ity);
+    size_t n = tau_t_len(&a);
+    if (a.ik == 2) {
+        for (size_t i = 0; i < n; i++) {
+            uint64_t x = TAU_WORDS(&a)[i], y = TAU_WORDS(&b)[i];
+            TAU_WORDS(&r)[i] = op == '&' ? (x & y) : op == '|' ? (x | y) : (x ^ y);
+        }
+    } else {
+        for (size_t i = 0; i < n; i++) tau_ti_put(&r, i, tau_ti_op(op, tau_ti_get(&a, i), tau_ti_get(&b, i), a.ity));
+    }
+    return r;
+}
+static tau_tensor tau_ti_scalar(char op, tau_tensor a, int64_t k, int scalar_on_left) {
+    tau_tensor r = tau_ti_new(a.rank, a.dims, a.ik, a.ity);
+    size_t n = tau_t_len(&a);
+    if (a.ik == 2) {
+        for (size_t i = 0; i < n; i++) {
+            uint64_t x = scalar_on_left ? (uint64_t)k : TAU_WORDS(&a)[i], y = scalar_on_left ? TAU_WORDS(&a)[i] : (uint64_t)k;
+            TAU_WORDS(&r)[i] = op == '&' ? (x & y) : op == '|' ? (x | y) : (x ^ y);
+        }
+    } else {
+        __int128 kv = TAU_ITY_SIGNED(a.ity) ? (__int128)k : (__int128)(uint64_t)k;
+        for (size_t i = 0; i < n; i++) {
+            __int128 x = tau_ti_get(&a, i);
+            tau_ti_put(&r, i, scalar_on_left ? tau_ti_op(op, kv, x, a.ity) : tau_ti_op(op, x, kv, a.ity));
+        }
+    }
+    return r;
+}
+static tau_tensor tau_ti_neg(tau_tensor a) {
+    tau_tensor r = tau_ti_new(a.rank, a.dims, a.ik, a.ity);
+    size_t n = tau_t_len(&a);
+    for (size_t i = 0; i < n; i++) tau_ti_put(&r, i, tau_ti_fit(a.ity, -tau_ti_get(&a, i)));
+    return r;
+}
+static tau_tensor tau_ti_not(tau_tensor a) {
+    tau_tensor r = tau_ti_new(a.rank, a.dims, a.ik, a.ity);
+    size_t n = tau_t_len(&a);
+    for (size_t i = 0; i < n; i++) TAU_WORDS(&r)[i] = !TAU_WORDS(&a)[i];
+    return r;
+}
+
+/* comparisons give a tensor of bool; op: 0 == 1 != 2 < 3 <= 4 > 5 >= */
+#define TAU_CMP(op, x, y) ((op) == 0 ? (x) == (y) : (op) == 1 ? (x) != (y) : (op) == 2 ? (x) < (y) : (op) == 3 ? (x) <= (y) : (op) == 4 ? (x) > (y) : (x) >= (y))
+static tau_tensor tau_t_cmp_new(const tau_tensor *a) { return tau_ti_new(a->rank, a->dims, 2, 0); }
+static tau_tensor tau_t_cmp(int op, tau_tensor a, tau_tensor b) {
+    if (a.rank != b.rank || memcmp(a.dims, b.dims, sizeof(size_t) * a.rank) != 0) tau_t_shape_panic("shape mismatch: ", &a, &b);
+    tau_tensor r = tau_t_cmp_new(&a);
+    size_t n = tau_t_len(&a);
+    for (size_t i = 0; i < n; i++) {
+        int v;
+        if (a.cplx) { int e = a.data[2 * i] == b.data[2 * i] && a.data[2 * i + 1] == b.data[2 * i + 1]; v = op == 0 ? e : !e; }
+        else if (a.ik == 1) { __int128 x = tau_ti_get(&a, i), y = tau_ti_get(&b, i); v = TAU_CMP(op, x, y); }
+        else if (a.ik == 2) { uint64_t x = TAU_WORDS(&a)[i], y = TAU_WORDS(&b)[i]; v = TAU_CMP(op, x, y); }
+        else { double x = a.data[i], y = b.data[i]; v = TAU_CMP(op, x, y); }
+        TAU_WORDS(&r)[i] = (uint64_t)v;
+    }
+    return r;
+}
+static tau_tensor tau_t_cmp_f(int op, tau_tensor a, double k, int left) {
+    tau_tensor r = tau_t_cmp_new(&a);
+    size_t n = tau_t_len(&a);
+    for (size_t i = 0; i < n; i++) { double x = left ? k : a.data[i], y = left ? a.data[i] : k; TAU_WORDS(&r)[i] = (uint64_t)(TAU_CMP(op, x, y)); }
+    return r;
+}
+static tau_tensor tau_t_cmp_c(int op, tau_tensor a, double re, double im, int left) {
+    (void)left;
+    tau_tensor r = tau_t_cmp_new(&a);
+    size_t n = tau_t_len(&a);
+    for (size_t i = 0; i < n; i++) { int e = a.data[2 * i] == re && a.data[2 * i + 1] == im; TAU_WORDS(&r)[i] = (uint64_t)(op == 0 ? e : !e); }
+    return r;
+}
+static tau_tensor tau_t_cmp_i(int op, tau_tensor a, int64_t k, int left) {
+    tau_tensor r = tau_t_cmp_new(&a);
+    size_t n = tau_t_len(&a);
+    if (a.ik == 2) {
+        for (size_t i = 0; i < n; i++) { uint64_t x = left ? (uint64_t)k : TAU_WORDS(&a)[i], y = left ? TAU_WORDS(&a)[i] : (uint64_t)k; TAU_WORDS(&r)[i] = (uint64_t)(TAU_CMP(op, x, y)); }
+    } else {
+        __int128 kv = TAU_ITY_SIGNED(a.ity) ? (__int128)k : (__int128)(uint64_t)k;
+        for (size_t i = 0; i < n; i++) { __int128 e = tau_ti_get(&a, i), x = left ? kv : e, y = left ? e : kv; TAU_WORDS(&r)[i] = (uint64_t)(TAU_CMP(op, x, y)); }
+    }
+    return r;
+}
+
+static int64_t tau_ti_sum(const tau_tensor *t) {
+    size_t n = tau_t_len(t);
+    __int128 acc = 0;
+    for (size_t i = 0; i < n; i++) acc = tau_ti_op('+', acc, tau_ti_get(t, i), t->ity);
+    return (int64_t)acc;
+}
+static int64_t tau_ti_minmax(const tau_tensor *t, int is_max) {
+    size_t n = tau_t_len(t);
+    if (n == 0) tau_panic_cstr(is_max ? "max of an empty tensor" : "min of an empty tensor");
+    __int128 m = tau_ti_get(t, 0);
+    for (size_t i = 1; i < n; i++) { __int128 x = tau_ti_get(t, i); if (is_max ? x > m : x < m) m = x; }
+    return (int64_t)m;
+}
+static size_t tau_tb_count(const tau_tensor *t) {
+    size_t n = tau_t_len(t), c = 0;
+    for (size_t i = 0; i < n; i++) c += TAU_CWORDS(t)[i] != 0;
+    return c;
+}
+static bool tau_tb_any(const tau_tensor *t) { return tau_tb_count(t) > 0; }
+static bool tau_tb_all(const tau_tensor *t) { return tau_tb_count(t) == tau_t_len(t); }
+
+/* the elements where the mask is true, as a vector (storage order) */
+static tau_tensor tau_t_select(const tau_tensor *t, const tau_tensor *mask) {
+    if (t->rank != mask->rank || memcmp(t->dims, mask->dims, sizeof(size_t) * t->rank) != 0) {
+        tau_buf m = {0};
+        tau_buf_cstr(&m, "shape mismatch: cannot select from a tensor of shape ");
+        tau_t_dims_text(&m, t->dims, t->rank);
+        tau_buf_cstr(&m, " with a mask of shape ");
+        tau_t_dims_text(&m, mask->dims, mask->rank);
+        tau_panic((const char *)m.ptr, m.len);
+    }
+    size_t n = tau_t_len(t), k = 0, w = t->cplx ? 2 : 1;
+    for (size_t i = 0; i < n; i++) k += TAU_CWORDS(mask)[i] != 0;
+    size_t d[1] = { k };
+    tau_tensor r = tau_t_new(1, d, t->cplx, t->single);
+    r.ik = t->ik; r.ity = t->ity;
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++)
+        if (TAU_CWORDS(mask)[i]) { for (size_t j = 0; j < w; j++) TAU_WORDS(&r)[o * w + j] = TAU_CWORDS(t)[i * w + j]; o++; }
+    return r;
+}
+static tau_tensor tau_t_to_f64(const tau_tensor *t) {
+    if (t->cplx) tau_panic_cstr("a complex tensor cannot be converted to f64");
+    tau_tensor r = tau_t_new(t->rank, t->dims, 0, 0);
+    size_t n = tau_t_len(t);
+    for (size_t i = 0; i < n; i++) r.data[i] = t->ik == 1 ? (double)tau_ti_get(t, i) : t->ik == 2 ? (double)TAU_CWORDS(t)[i] : t->data[i];
+    return r;
+}
+static tau_tensor tau_t_to_i64(const tau_tensor *t) {
+    if (t->cplx) tau_panic_cstr("a complex tensor cannot be converted to i64");
+    tau_tensor r = tau_ti_new(t->rank, t->dims, 1, 3);
+    size_t n = tau_t_len(t);
+    for (size_t i = 0; i < n; i++) {
+        int64_t v;
+        if (t->ik == 1) { __int128 x = tau_ti_get(t, i); if (x < INT64_MIN || x > INT64_MAX) tau_ovf_wide("i64", x); v = (int64_t)x; }
+        else if (t->ik == 2) v = (int64_t)TAU_CWORDS(t)[i];
+        else { double x = t->data[i]; v = x != x ? 0 : x >= 9223372036854775808.0 ? INT64_MAX : x <= -9223372036854775808.0 ? INT64_MIN : (int64_t)x; }
+        TAU_WORDS(&r)[i] = (uint64_t)v;
+    }
+    return r;
+}
+/* t[a..b, j] = value for an integer or bool tensor */
+static void tau_ti_slice_fill(tau_tensor *t, int n, const tau_sl *s, int64_t v) {
+    size_t first[8], count[8], rd[8];
+    int ra = 0;
+    tau_t_slice_plan(t, n, s, first, count);
+    for (int d = 0; d < n; d++) if (s[d].range) rd[ra++] = count[d];
+    size_t total = 1;
+    for (int i = 0; i < ra; i++) total *= rd[i];
+    TAU_T_SLICE_LOOP(t, n, s, first, count, total, { TAU_WORDS(t)[flat] = (uint64_t)v; });
+}
+/* a @ b for integer tensors: the same loops as for floats, with checked arithmetic */
+static tau_tensor tau_ti_matmul(tau_tensor a, tau_tensor b) {
+    size_t m = a.dims[0], k = a.dims[1];
+    size_t k2 = b.dims[0], n = b.rank == 2 ? b.dims[1] : 1;
+    if (k != k2) tau_t_shape_panic("shape mismatch for `@`: ", &a, &b);
+    size_t odims[2] = { m, n };
+    tau_tensor c = tau_ti_new(b.rank == 2 ? 2 : 1, odims, 1, a.ity);
+    for (size_t j = 0; j < n; j++)
+        for (size_t p = 0; p < k; p++) {
+            __int128 bkj = tau_ti_get(&b, p + j * k);
+            for (size_t i = 0; i < m; i++) {
+                __int128 prod = tau_ti_op('*', tau_ti_get(&a, p * m + i), bkj, a.ity);
+                tau_ti_put(&c, j * m + i, tau_ti_op('+', tau_ti_get(&c, j * m + i), prod, a.ity));
+            }
+        }
+    return c;
+}
+static int64_t tau_ti_dot(tau_tensor a, tau_tensor b) {
+    if (a.dims[0] != b.dims[0]) tau_t_shape_panic("shape mismatch for `@`: ", &a, &b);
+    __int128 acc = 0;
+    for (size_t i = 0; i < a.dims[0]; i++) acc = tau_ti_op('+', acc, tau_ti_op('*', tau_ti_get(&a, i), tau_ti_get(&b, i), a.ity), a.ity);
+    return (int64_t)acc;
+}
+static int64_t tau_ti_trace(tau_tensor a) {
+    size_t m = a.dims[0], k = m < a.dims[1] ? m : a.dims[1];
+    __int128 acc = 0;
+    for (size_t i = 0; i < k; i++) acc = tau_ti_op('+', acc, tau_ti_get(&a, i + i * m), a.ity);
+    return (int64_t)acc;
+}
+
 static void tau_t_fmt(tau_buf *b, tau_tensor t) {
 #define TAU_CELL(i) do { \
         if (t.cplx) { double re = t.data[2 * (i)], im = t.data[2 * (i) + 1]; \
             tau_fmt_f64(b, re); if (im < 0) { tau_buf_char(b, '-'); tau_fmt_f64(b, -im); } else { tau_buf_char(b, '+'); tau_fmt_f64(b, im); } \
             tau_buf_char(b, 'i'); } \
+        else if (t.ik == 1) { if (TAU_ITY_SIGNED(t.ity)) tau_fmt_i64(b, (int64_t)TAU_WORDS(&t)[i]); else tau_fmt_u64(b, TAU_WORDS(&t)[i]); } \
+        else if (t.ik == 2) tau_buf_cstr(b, TAU_WORDS(&t)[i] ? "true" : "false"); \
         else if (t.single) tau_fmt_f32(b, (float)t.data[i]); else tau_fmt_f64(b, t.data[i]); } while (0)
     if (t.rank == 1) {
         tau_buf_char(b, '[');

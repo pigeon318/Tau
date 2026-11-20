@@ -1,0 +1,53 @@
+// Tensors of integers and of `bool`: counting, masks, and picking elements by a condition.
+//
+// A comparison of tensors is element by element and gives a tensor of `bool` (a "mask"):
+// `data > 3.0`, `a == b`. Masks combine with `&`, `|`, `^^` and `!`, count with `count()`,
+// and choose elements with `select(mask)`.
+
+// Sieve of Eratosthenes: `prime[i]` says whether `i` is prime.
+fn sieve(n: usize) -> Tensor<bool, [_]> {
+    let mut prime = Tensor<bool, [_]>.ones(n + 1)
+    prime[0] = false
+    prime[1] = false
+    let mut i = 2
+    while i * i <= n {
+        if prime[i] {
+            let mut j = i * i
+            while j <= n {
+                prime[j] = false
+                j += i
+            }
+        }
+        i += 1
+    }
+    prime
+}
+
+fn main() {
+    let prime = sieve(50)
+    let numbers = Tensor<i64, [_]>.arange(51)
+    print("primes up to 50: {numbers.select(prime)}")
+    print("how many: {prime.count()}")
+
+    // measurements: which are in range, and what is their mean?
+    let temps = Tensor<f64, [_]>.from([21.5, 19.0, 35.2, 22.8, -4.0, 23.1, 99.9, 20.4])
+    let sensible = (temps > 0.0) & (temps < 50.0)
+    print("{sensible.count()} of {temps.shape()[0]} readings are sensible")
+    let good = temps.select(sensible)
+    print("their mean: {good.mean():.2}")
+
+    // a histogram with integer tensors: how many readings fall in each 10-degree bin
+    let mut bins = Tensor<i32, [_]>.zeros(6)
+    for t in good.to_vec() {
+        bins[(t / 10.0) as usize] += 1
+    }
+    print("histogram: {bins}")
+    print("most readings in one bin: {bins.max()}")
+
+    // integers keep their type, and overflow is an error, as it is for single integers
+    let counts = Tensor<u8, [_]>.from([100, 100, 50])
+    print("{counts.sum()}")
+    let m = Tensor<i64, [_, _]>.from_rows(vec[vec[1, 1], vec[1, 0]])
+    print("fibonacci by matrix power: {m @ m @ m @ m @ m}")
+    print("as floats: {(m @ m).to_f64() / 2.0}")
+}

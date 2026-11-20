@@ -883,3 +883,63 @@ mod iterators {
         err("fn f<T>() -> T { zero() }\nfn main() {}\n", "Num");
     }
 }
+
+mod integer_tensors {
+    use super::*;
+
+    #[test]
+    fn what_a_tensor_may_hold() {
+        ok("fn main() {\n let a = Tensor<i8, [_]>.zeros(2)\n let b = Tensor<u64, [_]>.zeros(2)\n let c = Tensor<bool, [_]>.zeros(2)\n let d = Tensor<usize, [_, _]>.eye(2)\n}\n");
+        err("fn main() {\n let a: Tensor<i128, [_]> = Tensor<i128, [_]>.zeros(2)\n}\n", "cannot be the element type of a tensor");
+        err("fn main() {\n let a: Tensor<char, [_]> = Tensor<char, [_]>.zeros(2)\n}\n", "cannot be the element type of a tensor");
+        err("fn f(a: Tensor<String, [_]>) {}\nfn main() {}\n", "cannot be the element type of a tensor");
+    }
+
+    #[test]
+    fn the_types_of_results() {
+        let r = ok("fn main() {\n let a = Tensor<i64, [_]>.from([1, 2, 3])\n let m = a > 1\n let s = a.sum()\n let c = m.count()\n let f = a.to_f64()\n let i = f.to_i64()\n let v = a.select(m)\n let n = !m\n let k = a * 2\n}\n");
+        assert_eq!(r.binding_ty("m").as_deref(), Some("Tensor<bool, [_]>"));
+        assert_eq!(r.binding_ty("s").as_deref(), Some("i64"));
+        assert_eq!(r.binding_ty("c").as_deref(), Some("usize"));
+        assert_eq!(r.binding_ty("f").as_deref(), Some("Tensor<f64, [_]>"));
+        assert_eq!(r.binding_ty("i").as_deref(), Some("Tensor<i64, [_]>"));
+        assert_eq!(r.binding_ty("v").as_deref(), Some("Tensor<i64, [_]>"));
+        assert_eq!(r.binding_ty("n").as_deref(), Some("Tensor<bool, [_]>"));
+        assert_eq!(r.binding_ty("k").as_deref(), Some("Tensor<i64, [_]>"));
+        let r = ok("fn main() {\n let f = Tensor<f64, [_, _]>.zeros(2, 2)\n let m = f >= 0.5\n let e = f == f\n let x = Tensor<u8, [_]>.arange(3)\n}\n");
+        assert_eq!(r.binding_ty("m").as_deref(), Some("Tensor<bool, [_, _]>"));
+        assert_eq!(r.binding_ty("e").as_deref(), Some("Tensor<bool, [_, _]>"));
+    }
+
+    #[test]
+    fn methods_ask_for_the_right_elements() {
+        err("fn main() {\n let a = Tensor<i64, [_]>.from([1, 2])\n print(a.mean())\n}\n", "`mean` needs a tensor of floats");
+        err("fn main() {\n let a = Tensor<i64, [_]>.from([1, 2])\n print(a.count())\n}\n", "`count` needs a tensor of `bool`");
+        err("fn main() {\n let a = Tensor<bool, [_]>.zeros(2)\n print(a.sum())\n}\n", "`sum` needs a tensor of numbers");
+        err("fn main() {\n let a = Tensor<i64, [_]>.from([1, 2])\n print(a.select(a))\n}\n", "needs a mask");
+        err("fn main() {\n let a = Tensor<i64, [_]>.random(2)\n}\n", "`random` needs a tensor of floats");
+        err("fn main() {\n let a = Tensor<i64, [_]>.linspace(0, 1, 3)\n}\n", "needs a tensor of floats");
+        err("fn main() {\n let a = Tensor<bool, [_]>.arange(3)\n}\n", "`arange` needs a tensor of floats or integers");
+        let c = complex_source();
+        err(&c, "cannot be converted to `f64`");
+    }
+
+    fn complex_source() -> String {
+        "fn main() {\n let c = Tensor<c128, [_]>.zeros(2)\n print(c.to_f64())\n}\n".to_string()
+    }
+
+    #[test]
+    fn operators_on_integer_and_bool_tensors() {
+        ok("fn main() {\n let a = Tensor<i64, [_]>.from([1, 2])\n let b = a % 2 + a * a - a / 1\n let c = (a & 3) | (a ^^ 1)\n let d = Tensor<bool, [_]>.zeros(2)\n let e = d & !d | d ^^ d\n}\n");
+        err("fn main() {\n let d = Tensor<bool, [_]>.zeros(2)\n let e = d + d\n}\n", "does not work on tensors of `bool`");
+        err("fn main() {\n let d = Tensor<bool, [_]>.zeros(2)\n let e = -d\n}\n", "cannot negate a tensor of `bool`");
+        err("fn main() {\n let d = Tensor<f64, [_]>.zeros(2)\n let e = d & d\n}\n", "only works on tensors of integers");
+        err("fn main() {\n let d = Tensor<f64, [_]>.zeros(2)\n let e = d % d\n}\n", "only works on tensors of integers");
+        err("fn main() {\n let d = Tensor<i64, [_]>.zeros(2)\n let e = !d\n}\n", "mismatched types");
+        err("fn main() {\n let d = Tensor<bool, [_]>.zeros(2)\n let e = d < d\n}\n", "cannot compare tensors of `bool`");
+        err("fn main() {\n let a = Tensor<i64, [_]>.zeros(2)\n let e = a == 1.5\n}\n", "mismatched types");
+        err("fn main() {\n let a = Tensor<i64, [_]>.zeros(2)\n let b = Tensor<i32, [_]>.zeros(2)\n let e = a == b\n}\n", "mismatched types");
+        // a comparison is a tensor, not a `bool`
+        err("fn main() {\n let a = Tensor<i64, [_]>.zeros(2)\n if a == a { print(1) }\n}\n", "mismatched types");
+    }
+}
