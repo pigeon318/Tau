@@ -27,7 +27,7 @@ Tau is a low-level, statically typed language focused on math and science. It is
 | Code distribution | The same compiled binary on every node. WASM later. |
 | Tensor layout | Column-major. |
 | Floats | Strict IEEE 754 by default. Opt-in `fast_math`. |
-| Licence | MIT or Apache-2.0, decided later. |
+| Licence | MIT OR Apache-2.0 (your choice of either), see `LICENSE-MIT` and `LICENSE-APACHE`. |
 | Strings | Borrowed UTF-8 `str` plus owned `String`. |
 | Number literal defaults | Unsuffixed `5` is `i64`. `5.0` is `f64`. |
 | Panics | Abort the program. A panicking `spawn` task is reported as an error by `join()`. |

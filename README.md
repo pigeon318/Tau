@@ -103,7 +103,7 @@ with a dependency.
 `tau update` replaces the program with the newest release: it downloads the file for your platform, checks it against
 the release's `SHA256SUMS`, runs it once, and only then swaps it in (a damaged or broken download changes nothing).
 `tau update --check` only says whether a newer version exists, and `tau update --force` installs the latest release
-even if you already have it. It needs `curl` (Windows 10 and later include it) and, while the repository is private, a
+even if you already have it. It needs `curl` (Windows 10 and later include it). If the repository is private it also needs a
 GitHub token that can read it: set `GITHUB_TOKEN`, or install the GitHub CLI and run `gh auth login`. A `tau` built from
 source (in a `target` folder) is updated with `git pull` and `cargo build --release` instead.
 
@@ -115,6 +115,22 @@ the `release` workflow builds Windows and Linux programs and attaches them.
 `editors/vscode/` is a VS Code extension: highlighting, snippets, live errors from the compiler, types on hover, and Run / Run test links.
 Build it with `npm install && npm run package` in that folder and install the `.vsix` (`code --install-extension`), or download `tau-vscode-extension` from the CI run.
 It needs `tau` on the PATH (or the `tau.path` setting).
+
+## Checking a change without CI
+
+GitHub Actions minutes are limited, so everything the workflow checks can also be run on your own machine:
+
+```bash
+scripts/check.sh           # the full test suite, the VS Code tests, and a cross-build of tau.exe (Linux)
+scripts/check.sh quick     # the fast test binaries only (about two minutes)
+scripts/check.sh memory    # also the native tests under valgrind, UBSan and ThreadSanitizer
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows-check.ps1    # the Windows tests, on a Windows PC
+```
+
+Releases are built by the `release` workflow (one run per release, started by pushing a `v*` tag or by hand).
 
 ## Layout
 
@@ -142,3 +158,12 @@ It needs `tau` on the PATH (or the `tau.path` setting).
 | `examples/run/` | Programs that run, each with a `.expected` output from an independent Python port (`reference.py`) |
 | `examples/borrow_errors/` | One program per kind of borrow mistake; each must be rejected with the stated error |
 | `tests/` | Parser, type-checker and borrow-checker tests, error-message tests, and no-panic fuzzing |
+
+## Licence
+
+Tau is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you say otherwise, any contribution you submit for inclusion in Tau is licensed as above, without any additional terms or conditions.

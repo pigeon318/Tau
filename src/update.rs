@@ -4,8 +4,8 @@
 //! the release's `SHA256SUMS`, runs it once (`--version`) to see that it works, and then swaps it in.
 //! Downloading is done by `curl` (which comes with Windows 10 and later), so Tau needs no HTTP library.
 //!
-//! The repository is private for now, so a token is needed: `GITHUB_TOKEN` or `GH_TOKEN` (a token that
-//! can read the repository), or a logged-in GitHub CLI (`gh auth login`).
+//! A public repository needs no token. For a private one a token is needed: `GITHUB_TOKEN` or `GH_TOKEN`
+//! (a token that can read the repository), or a logged-in GitHub CLI (`gh auth login`).
 //!
 //! `TAU_UPDATE_URL` replaces the GitHub API address (`https://api.github.com/repos/pigeon318/Tau`);
 //! the tests use it to talk to a server on this machine.
