@@ -295,6 +295,42 @@ impl<'a> Interp<'a> {
                 }
                 other => panic(format!("push_str on a {}", other.type_name())),
             },
+            "str::byte_at" => {
+                let text = self.text_of(&a[0]);
+                match &a[1] {
+                    Value::Int(i) if *i >= 0 && (*i as usize) < text.len() => Ok(Value::Int(text.as_bytes()[*i as usize] as i128)),
+                    Value::Int(i) => panic(format!("index out of bounds: the length is {} but the index is {i}", text.len())),
+                    _ => panic("byte_at needs an integer position"),
+                }
+            }
+            "String::push" => match (&a[0], &a[1]) {
+                (Value::String(s), Value::Char(c)) => {
+                    s.borrow_mut().push(*c);
+                    Ok(Value::Unit)
+                }
+                _ => panic("push needs a string and a character"),
+            },
+            "char_from_u32" => {
+                let Value::Int(n) = &a[0] else { return panic("char_from_u32 needs an integer") };
+                Ok(match u32::try_from(*n).ok().and_then(char::from_u32) {
+                    Some(c) => self.some(Value::Char(c)),
+                    None => self.none(),
+                })
+            }
+            "str::parse_i64" => {
+                let text = self.text_of(&a[0]);
+                Ok(match parse_i64_text(&text) {
+                    Ok(v) => self.ok_value(Value::Int(v as i128)),
+                    Err(msg) => self.err_value(Value::string(&msg)),
+                })
+            }
+            "str::parse_f64" => {
+                let text = self.text_of(&a[0]);
+                Ok(match parse_f64_text(&text) {
+                    Ok(v) => self.ok_value(Value::Float(v)),
+                    Err(msg) => self.err_value(Value::string(&msg)),
+                })
+            }
             "str::lowercase" => Ok(Value::string(&self.text_of(&a[0]).to_lowercase())),
             "str::uppercase" => Ok(Value::string(&self.text_of(&a[0]).to_uppercase())),
             "str::split_whitespace" => {
@@ -483,4 +519,72 @@ pub(super) fn clone_value<'a>(v: &Value<'a>) -> Value<'a> {
         }
         other => other.clone(),
     }
+}
+
+/// `s[a..b]` on text: the same checks and messages as slicing a vector, plus character boundaries.
+pub(super) fn str_slice<'a>(text: &str, a: i128, b: i128) -> R<'a, Value<'a>> {
+    let len = text.len() as i128;
+    let b = b.min(len);
+    if a < 0 || a > b || b > len {
+        return panic(format!("slice {a}..{b} is out of range for length {len}"));
+    }
+    for i in [a, b] {
+        if !text.is_char_boundary(i as usize) {
+            return panic(format!("byte index {i} is not a character boundary"));
+        }
+    }
+    Ok(Value::str(&text[a as usize..b as usize]))
+}
+
+/// An optional sign and decimal digits.
+pub(super) fn parse_i64_text(text: &str) -> Result<i64, String> {
+    let bad = || format!("cannot parse \"{text}\" as an integer");
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    text.parse::<i64>().map_err(|_| format!("cannot parse \"{text}\" as an integer: it does not fit in i64"))
+}
+
+/// An optional sign, digits with an optional `.`, and an optional exponent.
+pub(super) fn parse_f64_text(text: &str) -> Result<f64, String> {
+    let bad = || format!("cannot parse \"{text}\" as a number");
+    let b = text.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let (mut before, mut after) = (0, 0);
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+        before += 1;
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+            after += 1;
+        }
+    }
+    if before + after == 0 {
+        return Err(bad());
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        let mut e = 0;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+            e += 1;
+        }
+        if e == 0 {
+            return Err(bad());
+        }
+    }
+    if i != b.len() {
+        return Err(bad());
+    }
+    text.parse::<f64>().map_err(|_| bad())
 }

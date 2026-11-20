@@ -228,7 +228,14 @@ pub fn compile_c(c_src: &str) -> Result<PathBuf, NativeError> {
             String::from_utf8_lossy(&out.stderr)
         )));
     }
-    std::fs::rename(&tmp_exe, &exe).map_err(|e| NativeError::plain(format!("cannot install {}: {e}", exe.display())))?;
+    if let Err(e) = std::fs::rename(&tmp_exe, &exe) {
+        // Two builds of the same program at once (two tests, two terminals): on Windows the second cannot replace
+        // the file the first has just installed (or is running). The file is the same program, so use it.
+        let _ = std::fs::remove_file(&tmp_exe);
+        if !exe.exists() {
+            return Err(NativeError::plain(format!("cannot install {}: {e}", exe.display())));
+        }
+    }
     Ok(exe)
 }
 

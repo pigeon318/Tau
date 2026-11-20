@@ -651,3 +651,18 @@ fn a_shared_handle_and_a_mutex_are_moved() {
     err_m("let m = Mutex.new(1)\n let c = m.into_inner()\n print(m.get())", "use of moved value");
     ok_m("let s = Shared.new(vec[1])\n let t = s.clone()\n print(s.len + t.len)");
 }
+
+// ------------------------------------------------------------------ strings
+
+#[test]
+fn parts_of_a_string_view_it() {
+    // the pieces borrow the text, so it cannot change while they are used
+    err_m("let mut text = String.from(\"a,b\")\n let parts = text.split(\",\")\n text.push_str(\"c\")\n print(parts.len)", "also borrowed");
+    err_m("let mut text = String.from(\" a \")\n let t = text.trim()\n text.push('x')\n print(t)", "also borrowed");
+    err_m("let mut text = String.from(\"abc\")\n let first = text[0..1]\n text.clear()\n print(first)", "also borrowed");
+    // owned results do not
+    ok_m("let mut text = String.from(\"a,b\")\n let n = text.split(\",\").len\n let up = text.replace(\"a\", \"A\")\n text.push_str(\"c\")\n print(n)\n print(up)");
+    // a piece cannot outlive the text
+    err_m("let t = {\n let text = String.from(\" a \")\n text.trim()\n}\n print(t)", "does not live long enough");
+    ok_m("let t = {\n let text = String.from(\" a \")\n text.trim().to_string()\n}\n print(t)");
+}

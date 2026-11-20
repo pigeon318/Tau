@@ -719,6 +719,72 @@ static void tau_fmt_complex_spec(tau_buf *b, double re, double im, int single, t
     free(t.ptr);
 }
 
+/* ---------------------------------------------------------------- strings: slicing and parsing
+ * (src/interp/builtins.rs has the same, and the two must agree) */
+
+/* s[a..b]: the same checks as slicing a vector, and both ends on character boundaries */
+static tau_str tau_str_slice(tau_str s, __int128 a, __int128 b) {
+    __int128 len = (__int128)s.len;
+    if (b > len) b = len;
+    if (a < 0 || a > b) tau_slice_oob(a, b, s.len);
+    __int128 ends[2] = { a, b };
+    for (int k = 0; k < 2; k++) {
+        __int128 i = ends[k];
+        if (i < len && (s.ptr[(size_t)i] & 0xC0) == 0x80) {
+            tau_buf m = {0};
+            tau_buf_cstr(&m, "byte index "); tau_put_i128(&m, i); tau_buf_cstr(&m, " is not a character boundary");
+            tau_panic((const char *)m.ptr, m.len);
+        }
+    }
+    return (tau_str){ s.ptr + (size_t)a, (size_t)(b - a) };
+}
+
+static void tau_parse_msg(tau_buf *e, tau_str s, const char *what, const char *more) {
+    tau_buf_cstr(e, "cannot parse \""); tau_buf_push(e, s.ptr, s.len); tau_buf_cstr(e, "\" as "); tau_buf_cstr(e, what);
+    if (more) tau_buf_cstr(e, more);
+}
+/* an optional sign and decimal digits; 1 and the value, or 0 and the message */
+static int tau_parse_i64(tau_str s, int64_t *out, tau_buf *err) {
+    size_t i = 0;
+    int neg = 0;
+    if (i < s.len && (s.ptr[i] == '+' || s.ptr[i] == '-')) { neg = s.ptr[i] == '-'; i++; }
+    if (i == s.len) { tau_parse_msg(err, s, "an integer", 0); return 0; }
+    unsigned __int128 v = 0;
+    int big = 0;
+    for (; i < s.len; i++) {
+        if (s.ptr[i] < '0' || s.ptr[i] > '9') { tau_parse_msg(err, s, "an integer", 0); return 0; }
+        if (!big) { v = v * 10 + (unsigned)(s.ptr[i] - '0'); if (v > ((unsigned __int128)1 << 64)) big = 1; }
+    }
+    if (big || (neg ? v > ((unsigned __int128)1 << 63) : v > (((unsigned __int128)1 << 63) - 1))) {
+        tau_parse_msg(err, s, "an integer", ": it does not fit in i64");
+        return 0;
+    }
+    *out = neg ? (int64_t)(0 - (uint64_t)v) : (int64_t)v;
+    return 1;
+}
+/* an optional sign, digits with an optional '.', and an optional exponent */
+static int tau_parse_f64(tau_str s, double *out, tau_buf *err) {
+    size_t i = 0, before = 0, after = 0;
+    if (i < s.len && (s.ptr[i] == '+' || s.ptr[i] == '-')) i++;
+    while (i < s.len && s.ptr[i] >= '0' && s.ptr[i] <= '9') { i++; before++; }
+    if (i < s.len && s.ptr[i] == '.') { i++; while (i < s.len && s.ptr[i] >= '0' && s.ptr[i] <= '9') { i++; after++; } }
+    if (before + after == 0) { tau_parse_msg(err, s, "a number", 0); return 0; }
+    if (i < s.len && (s.ptr[i] == 'e' || s.ptr[i] == 'E')) {
+        i++;
+        if (i < s.len && (s.ptr[i] == '+' || s.ptr[i] == '-')) i++;
+        size_t e = 0;
+        while (i < s.len && s.ptr[i] >= '0' && s.ptr[i] <= '9') { i++; e++; }
+        if (e == 0) { tau_parse_msg(err, s, "a number", 0); return 0; }
+    }
+    if (i != s.len) { tau_parse_msg(err, s, "a number", 0); return 0; }
+    char *tmp = (char *)tau_xmalloc(s.len + 1);
+    memcpy(tmp, s.ptr, s.len);
+    tmp[s.len] = 0;
+    *out = strtod(tmp, 0);
+    free(tmp);
+    return 1;
+}
+
 /* ---------------------------------------------------------------- tensors */
 
 /* Dense, column-major (the first index varies fastest). Elements are stored as doubles (pairs
