@@ -1,9 +1,20 @@
 name: ci
 
+# Minutes are limited, so: a pull request is tested once per push (not once as a push and again as a
+# pull request), a newer push to the same branch cancels the run it replaces, and changes that only
+# touch documentation do not run anything. Windows minutes count double, so the long repeated test
+# below runs only on `main` and when started by hand.
 on:
   push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE*"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE*"]
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: never
@@ -62,6 +73,7 @@ jobs:
         shell: pwsh
         run: cargo test --release
       - name: Stack overflow handling, repeated (it used to fail intermittently)
+        if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           1..25 | ForEach-Object {
