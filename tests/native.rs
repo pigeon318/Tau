@@ -1581,3 +1581,83 @@ fn sorting_moves_owned_elements_without_leaking() {
     );
     assert_eq!(out, "[alpha, bravo, charlie, delta]\n[[1, 2], [2, 0], [3, 1]]\n[charlie]\ncharlie\n[zulu]\n");
 }
+
+// ------------------------------------------------------------------ M9: strings
+
+#[test]
+fn string_methods_run_the_same_natively() {
+    let out = same(
+        "fn main() {\n\
+          let s = \"  Hello, wörld!  \"\n print(s.trim())\n print(s.trim_start())\n print(s.len)\n\
+          let t = String.from(\"a,b,,c\")\n print(t.split(\",\"))\n print(t.split(\",\").len)\n print(t.find(\",\"))\n print(t.find(\"zz\"))\n print(t.find(\"\"))\n print(t.contains(\"b,\"))\n print(t.starts_with(\"a,\"))\n print(t.ends_with(\"c\"))\n print(t.ends_with(\"abc,b,,c\"))\n\
+          print(t.replace(\",\", \"--\"))\n print(\"ab\".repeat(3))\n print(\"ab\".repeat(0))\n\
+          print(\"héllo\".chars())\n print(\"héllo\".char_count())\n print(\"a😀b\".chars())\n print(\"héllo\"[0..1])\n print(\"héllo\"[3..])\n print(\"héllo\"[..1])\n print(\"héllo\"[1..=2])\n print(\"héllo\"[1..3].len)\n\
+          print(\"line1\\nline2\\r\\nline3\\n\".lines())\n print(\"\".lines().len)\n print(\"a\\n\\nb\".lines())\n\
+          print(vec[\"a\", \"b\", \"c\"].join(\"+\"))\n print(vec[String.from(\"x\"), String.from(\"y\")].join(\", \"))\n\
+          print('7'.is_digit())\n print('7'.to_digit())\n print('x'.to_digit())\n print('A'.is_alphabetic())\n print(' '.is_whitespace())\n\
+          let mut u = String.new()\n u.push('h')\n u.push('é')\n u.push('😀')\n print(u)\n print(u.len)\n u.clear()\n print(u.is_empty())\n\
+          print(char_from_u32(65))\n print(char_from_u32(55296))\n print(char_from_u32(1114112))\n\
+          print(\"héllo\".byte_at(1))\n\
+          let words = \"the quick brown fox\".split(\" \")\n let mut caps: Vec<String> = Vec.new()\n for w in words { caps.push(w.uppercase()) }\n print(caps.join(\"_\"))\n\
+         }",
+    );
+    assert!(out.starts_with("Hello, wörld!\nHello, wörld!  \n18\n[a, b, , c]\n4\nSome(1)\nNone\nSome(0)\ntrue\ntrue\ntrue\nfalse\n"), "{out}");
+    assert!(out.contains("[h, é, l, l, o]\n5\n[a, 😀, b]\nh\nllo\nh\né\n2\n[line1, line2, line3]\n0\n[a, , b]\n"), "{out}");
+}
+
+#[test]
+fn parsing_numbers_is_exact_and_the_same() {
+    let out = same(
+        "fn main() {\n\
+          for t in [\"12\", \"-7\", \"+5\", \"0\", \"-0\", \"007\", \"9223372036854775807\", \"-9223372036854775808\", \"9223372036854775808\", \"-9223372036854775809\", \"99999999999999999999\", \"\", \"+\", \"-\", \"x\", \"1 \", \" 1\", \"1_0\", \"1.5\", \"٣\"] {\n print(t.parse_i64())\n }\n\
+          for t in [\"2.5e3\", \".5\", \"1.\", \"+.5e-1\", \"-0.0\", \"0.1\", \"0.30000000000000004\", \"123456789.123456789\", \"1e308\", \"1e309\", \"-1e400\", \"4.9e-324\", \"1e-400\", \"1e\", \"e5\", \".\", \"1.2.3\", \"inf\", \"nan\", \"0x10\", \" 1\", \"\", \"1_0\", \"3.14159265358979323846\"] {\n print(t.parse_f64())\n }\n\
+          match \"41\".parse_i64() {\n Ok(n) => print(n + 1)\n Err(e) => print(e)\n }\n\
+         }",
+    );
+    assert!(out.starts_with("Ok(12)\nOk(-7)\nOk(5)\nOk(0)\nOk(0)\nOk(7)\nOk(9223372036854775807)\nOk(-9223372036854775808)\nErr(cannot parse \"9223372036854775808\" as an integer: it does not fit in i64)\n"), "{out}");
+}
+
+#[test]
+fn string_panics_are_the_same() {
+    for (stmts, msg) in [
+        ("print(\"héllo\"[2..3])", "byte index 2 is not a character boundary"),
+        ("print(\"héllo\"[0..2])", "byte index 2 is not a character boundary"),
+        ("print(\"abc\"[2..1])", "slice 2..1 is out of range for length 3"),
+        ("print(\"abc\"[5..9])", "slice 5..3 is out of range for length 3"),
+        ("print(\"abc\"[4..])", "slice 4..3 is out of range for length 3"),
+        ("print(\"abc\".byte_at(3))", "index out of bounds: the length is 3 but the index is 3"),
+        ("print(\"a,b\".split(\"\"))", "split: the separator is empty"),
+        ("print(\"abc\".replace(\"\", \"x\"))", "replace: the text to replace is empty"),
+    ] {
+        let src = format!("fn main() {{\n {stmts}\n}}");
+        let (_, p) = interpret(&src);
+        assert_eq!(p.as_deref().map(|m| m.contains(msg)), Some(true), "{stmts}: {p:?}");
+        same(&src);
+    }
+}
+
+#[test]
+fn strings_made_by_the_library_are_freed() {
+    // (`TAU_VALGRIND=1` reports a leak) owned strings from replace/repeat/join/push, views from split/trim
+    let out = same(
+        "fn main() {\n let text = String.from(\"  alpha, beta ,gamma  \")\n let mut cleaned: Vec<String> = Vec.new()\n for part in text.trim().split(\",\") { cleaned.push(part.trim().replace(\"a\", \"4\")) }\n print(cleaned.join(\"|\"))\n\
+         let mut s = String.new()\n for i in 0..5 { s.push_str(\"ab\".repeat(i)) }\n s.push('!')\n print(s)\n print(s.len)\n let t = s.replace(\"ab\", \"\")\n print(t)\n}",
+    );
+    assert_eq!(out, "4lph4|bet4|g4mm4\nabababababababababab!\n21\n!\n");
+}
+
+#[test]
+fn slicing_a_string_clamps_the_end_like_a_vector() {
+    let out = same("fn main() {\n print(\"abc\"[1..9])\n print(\"abc\"[3..])\n print(\"abc\"[..0].len)\n}");
+    assert_eq!(out, "bc\n\n0\n");
+}
+
+#[test]
+fn a_loop_body_that_ends_with_an_owned_value_frees_it() {
+    // (`TAU_VALGRIND=1` reports a leak) the value a loop body ends with is thrown away: it must be freed
+    let out = same(
+        "fn main() {\n let mut n = vec[String.from(\"a\"), String.from(\"bb\"), String.from(\"cc\")]\n while n.len > 1 { n.pop() }\n print(n)\n\
+         for i in 0..3 { String.from(\"x\") }\n let mut k = 0\n loop { k += 1\n if k == 2 { break }\n vec[String.from(\"y\")] }\n for w in [\"p\", \"q\"] { w.to_string() }\n print(k)\n}",
+    );
+    assert_eq!(out, "[a]\n2\n");
+}

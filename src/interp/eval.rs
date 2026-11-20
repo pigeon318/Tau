@@ -669,6 +669,13 @@ impl<'a> Interp<'a> {
                 self.index_into(&slot, 0, len, indices, f)
             }
             Value::Slice(slot, s, en) => self.index_into(&slot, s, en, indices, f),
+            Value::Str(_) | Value::String(_) => {
+                let text = self.text_of(&b);
+                match self.eval(&indices[0], f)? {
+                    Value::Range(a, z) => super::builtins::str_slice(&text, a, z),
+                    other => panic(format!("a string is indexed by a range, found a {}", other.type_name())),
+                }
+            }
             Value::Tensor(t) => {
                 if indices.iter().any(|i| matches!(i.kind, ExprKind::Range { .. })) {
                     let specs = self.slice_specs(indices, f)?;

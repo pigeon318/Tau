@@ -1,0 +1,61 @@
+// Working with text: splitting, trimming, searching, parsing numbers and slicing.
+//
+//   s.trim()  s.split(",")  s.lines()  s.find("x")  s.contains("x")  s.starts_with("x")  s.replace("a", "b")
+//   s[1..4]       a part of a string (byte positions; panics if one is inside a character)
+//   "42".parse_i64()   "2.5".parse_f64()      Ok(number) or Err(message)
+//   s.chars()  s.byte_at(i)  parts.join(", ")  String.push(c)  "ab".repeat(3)
+
+// Read "name, value" lines; skip blank lines and lines that start with '#'.
+fn parse(text: str) -> Result<Vec<(String, f64)>, String> {
+    let mut rows: Vec<(String, f64)> = Vec.new()
+    for line in text.lines() {
+        let line = line.trim()
+        if line.is_empty() || line.starts_with("#") { continue }
+        let fields = line.split(",")
+        if fields.len != 2 {
+            return Err("expected `name, value`, found \"{line}\"".to_string())
+        }
+        let value = fields[1].trim().parse_f64()?
+        rows.push((fields[0].trim().to_string(), value))
+    }
+    Ok(rows)
+}
+
+fn main() {
+    let data = "# readings\n  alpha, 1.5\nbeta,2.25\n\n gamma , 10\n"
+    match parse(data) {
+        Ok(rows) => {
+            let mut total = 0.0
+            for (name, v) in rows {
+                print("{name}: {v}")
+                total += v
+            }
+            print("total: {total}")
+        }
+        Err(e) => print("error: {e}")
+    }
+    print(parse("alpha 1"))
+    print(parse("alpha, one"))
+
+    // a path: the extension and the folder
+    let path = "/home/me/data/run.final.csv"
+    match path.find(".") {
+        Some(i) => print("first dot at byte {i}")
+        None => print("no dot")
+    }
+    let parts = path.split("/")
+    print("file: {parts[parts.len - 1]}, in {parts.len - 1} folders")
+
+    // text is UTF-8: positions are bytes, `chars` gives characters
+    let word = "naïve"
+    print("{word.len} bytes, {word.char_count()} characters: {word.chars()}")
+    print(word[0..2])
+
+    // build a string
+    let mut out = String.new()
+    for c in "hello world".chars() {
+        if c.is_alphabetic() { out.push(c) }
+    }
+    print(out.replace("l", "L"))
+    print(vec["a", "b", "c"].join(" -> "))
+}

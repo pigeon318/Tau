@@ -1471,6 +1471,22 @@ impl<'a> Checker<'a> {
         if layers > 0 {
             self.results.derefs.insert(NodeKey::of(base), layers);
         }
+        // `s[a..b]` is a part of a string (a `str` that views `s`); a string cannot be indexed by one number
+        if matches!(st, Ty::Str) || self.is_string(&st) {
+            if indices.len() == 1 && matches!(indices[0].kind, ExprKind::Range { .. }) {
+                if let ExprKind::Range { start, end, .. } = &indices[0].kind {
+                    for x in [start, end].into_iter().flatten() {
+                        self.expr_coerce(x, &Ty::usize());
+                    }
+                }
+                self.record(&indices[0], &Ty::unit());
+                return Ty::Str;
+            }
+            for i in indices {
+                self.expr(i, None);
+            }
+            return self.err_ty(e.span, "a string is indexed by a range of bytes, like `s[1..3]` (a single position: `s.byte_at(i)`; characters: `s.chars()`)");
+        }
         let elem_of = |this: &Self, t: &Ty| -> Option<Ty> {
             match t {
                 Ty::Array(x, _) | Ty::Slice(x) => Some((**x).clone()),

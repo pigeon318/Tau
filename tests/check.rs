@@ -1019,3 +1019,35 @@ mod vector_basics {
         err("fn main() {\n let mut v = vec[1, 2]\n v.retain(|n| n + 1)\n}\n", "mismatched types");
     }
 }
+
+mod string_basics {
+    use super::*;
+
+    #[test]
+    fn types_of_the_string_methods() {
+        let r = ok("fn main() {\n let s = String.from(\"a,b\")\n let p = s.split(\",\")\n let t = s.trim()\n let f = s.find(\"b\")\n let r = s.replace(\"a\", \"b\")\n let c = s.chars()\n let n = \"12\".parse_i64()\n let x = \"1.5\".parse_f64()\n let part = s[0..1]\n let from = \"héllo\"[1..]\n let b = s.byte_at(0)\n let l = s.lines()\n let j = p.join(\"+\")\n let ch = char_from_u32(65)\n let d = 'x'.is_digit()\n}\n");
+        assert_eq!(r.binding_ty("p").as_deref(), Some("Vec<str>"));
+        assert_eq!(r.binding_ty("t").as_deref(), Some("str"));
+        assert_eq!(r.binding_ty("f").as_deref(), Some("Option<usize>"));
+        assert_eq!(r.binding_ty("r").as_deref(), Some("String"));
+        assert_eq!(r.binding_ty("c").as_deref(), Some("Vec<char>"));
+        assert_eq!(r.binding_ty("n").as_deref(), Some("Result<i64, String>"));
+        assert_eq!(r.binding_ty("x").as_deref(), Some("Result<f64, String>"));
+        assert_eq!(r.binding_ty("part").as_deref(), Some("str"));
+        assert_eq!(r.binding_ty("b").as_deref(), Some("u8"));
+        assert_eq!(r.binding_ty("j").as_deref(), Some("String"));
+        assert_eq!(r.binding_ty("ch").as_deref(), Some("Option<char>"));
+    }
+
+    #[test]
+    fn a_string_is_sliced_by_a_range_not_a_number() {
+        err("fn main() {\n let s = \"abc\"\n print(s[1])\n}\n", "a string is indexed by a range of bytes");
+        err("fn main() {\n let s = String.from(\"abc\")\n print(s[\"a\"..2])\n}\n", "mismatched types");
+        ok("fn main() {\n let s = String.from(\"abc\")\n let n = 2\n print(s[..n])\n print(s[n - 1..=n])\n}\n");
+    }
+
+    #[test]
+    fn a_question_mark_works_with_the_parse_errors() {
+        ok("fn read(s: str) -> Result<i64, String> {\n let n = s.parse_i64()?\n Ok(n * 2)\n}\nfn main() { print(read(\"4\")) }\n");
+    }
+}
