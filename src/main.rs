@@ -24,7 +24,7 @@ USAGE:
     tau tokens <file>          print the token stream
     tau parse <file>           check that a file parses (--ast prints the tree, --sexp the function bodies)
     tau clean                  delete the cache of compiled programs
-    tau update                 replace this tau with the newest release (needs curl and a GitHub token for now)
+    tau update                 replace this tau with the newest release (needs curl; a private repository needs a GitHub token)
     tau update --check         only say whether a newer release exists
     tau --version              show the version and which C compiler the native backend would use
 

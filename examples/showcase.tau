@@ -1,0 +1,150 @@
+// Tau showcase: a quick tour of what the language can do.
+//
+//   tau run showcase.tau
+use std.map.Map
+use std.collections.{Set, Heap}
+use std.random.Rng
+use std.time.DateTime
+use math.linalg
+
+// ---- types, enums, traits, generics ------------------------------------------------------------
+struct Point { x: f64, y: f64 }
+
+impl Point {
+    fn dist(self, o: Point) -> f64 { sqrt((self.x - o.x)^2 + (self.y - o.y)^2) }
+}
+
+enum Shape {
+    Circle(f64)
+    Rect(f64, f64)
+    Empty
+}
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => PI * r^2
+        Rect(w, h) => w * h
+        Empty => 0.0
+    }
+}
+
+trait Describe {
+    fn describe(self) -> String
+}
+
+impl Describe for Point {
+    fn describe(self) -> String { "point at ({self.x}, {self.y})".to_string() }
+}
+
+impl Describe for i64 {
+    fn describe(self) -> String { "the integer {self}".to_string() }
+}
+
+fn announce<T: Describe>(x: T) {
+    print("  I am {x.describe()}")
+}
+
+// ---- errors are values -------------------------------------------------------------------------
+fn half(n: i64) -> Result<i64, String> {
+    if n % 2 != 0 { return Err("{n} is odd".to_string()) }
+    Ok(n / 2)
+}
+
+fn quarter(n: i64) -> Result<i64, String> {
+    let h = half(n)?
+    half(h)
+}
+
+// ---- ownership: who may change what is checked before the program runs -------------------------
+fn scale(v: mut [f64], k: f64) {
+    for x in mut v { x *= k }
+}
+
+fn total(v: [f64]) -> f64 {
+    let mut t = 0.0
+    for x in v { t += x }
+    t
+}
+
+fn main() {
+    print("== types, enums and traits ==")
+    let a = Point(0.0, 0.0)
+    let b = Point(3.0, 4.0)
+    print("  distance {a.dist(b)}")
+    print("  areas: {area(Circle(1.0)):.3} {area(Rect(2.0, 5.0))} {area(Empty)}")
+    announce(b)
+    announce(42)
+
+    print("== errors are values ==")
+    print("  quarter(20) = {quarter(20)}")
+    print("  quarter(6)  = {quarter(6)}")
+
+    print("== checked integers (no silent wrap-around) ==")
+    let big: i32 = 2147483647
+    let attempt = spawn { big + 1 }
+    match attempt.join() {
+        Ok(v) => print("  got {v}")
+        Err(_) => print("  i32 overflow stopped the program instead of wrapping")
+    }
+
+    print("== ownership and borrowing ==")
+    let mut data = vec[1.0, 2.0, 3.0]
+    scale(mut data, 2.0)
+    print("  doubled: {data}, total {total(data)}")
+
+    print("== iterators and closures ==")
+    let squares = (1..11).iter().map(|x| x * x).filter(|x| x % 2 == 0).collect()
+    print("  even squares: {squares}")
+    let sum_sq = (1..101).iter().map(|x| x * x).sum()
+    print("  sum of the first 100 squares: {sum_sq}")
+
+    print("== strings, maps, sets, heaps ==")
+    let text = "the cat and the hat and the bat"
+    let mut counts: Map<str, i64> = Map.new()
+    for w in text.split_whitespace() { counts[w] += 1 }
+    for (w, n) in counts.top(2) { print("  {w}: {n}") }
+    let mut seen: Set<str> = Set.new()
+    for w in text.split_whitespace() { seen.insert(w) }
+    print("  {seen.len} distinct words")
+    let mut heap: Heap<i64> = Heap.new_min()
+    for n in [50, 10, 40, 20, 30] { heap.push(n) }
+    let mut order: Vec<i64> = Vec.new()
+    loop {
+        match heap.pop() {
+            Some(n) => order.push(n)
+            None => break
+        }
+    }
+    print("  heap order: {order}")
+
+    print("== tensors and linear algebra ==")
+    let m = Tensor<f64, [_, _]>.from_rows(vec[vec[2.0, 1.0], vec[1.0, 3.0]])
+    let rhs = Tensor<f64, [_]>.from([3.0, 5.0])
+    let x = linalg.inv(m) @ rhs
+    print("  solve M x = (3, 5): x = {x}")
+    print("  det M = {linalg.det(m):.3}")
+
+    print("== complex numbers ==")
+    let z = (1.0 + 2.0i) * (3.0 - 1.0i)
+    print("  (1+2i)(3-i) = {z.re} + {z.im}i")
+
+    print("== random numbers (the same on every machine) ==")
+    let mut rng = Rng.new(2024)
+    let mut rolls: Vec<i64> = Vec.new()
+    for i in 0..8 { rolls.push(rng.range(1, 7)) }
+    print("  eight dice: {rolls}")
+
+    print("== dates ==")
+    let d = DateTime.new(2026, 3, 14, 15, 9, 26)
+    print("  {d.iso()} is a {d.weekday_name()}, day {d.day_of_year()} of the year")
+
+    print("== parallelism that gives the same answer every time ==")
+    let n = par sum(i in 0..1000000) (i % 7) as i64
+    print("  parallel sum: {n}")
+    let t1 = spawn { (1..1001).iter().sum() }
+    let t2 = spawn { (1001..2001).iter().sum() }
+    match (t1.join(), t2.join()) {
+        (Ok(p), Ok(q)) => print("  two tasks: {p} + {q} = {p + q}")
+        _ => print("  a task panicked")
+    }
+}
