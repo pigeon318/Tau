@@ -993,3 +993,29 @@ mod integer_tensors {
         err("fn main() {\n let a = Tensor<i64, [_]>.zeros(2)\n if a == a { print(1) }\n}\n", "mismatched types");
     }
 }
+
+mod vector_basics {
+    use super::*;
+
+    #[test]
+    fn the_methods_and_their_types() {
+        let r = ok("fn main() {\n let mut v = vec[3, 1, 2]\n v.sort()\n v.reverse()\n v.insert(0, 9)\n let x = v.remove(1)\n let f = v.first()\n let g = v.get(0)\n let c = v.contains(1)\n let p = v.position_of(2)\n let s = v.is_sorted()\n v.retain(|n| n > 1)\n v.truncate(1)\n v.clear()\n v.extend([1, 2])\n v.swap(0, 1)\n}\n");
+        assert_eq!(r.binding_ty("x").as_deref(), Some("i64"));
+        assert_eq!(r.binding_ty("f").as_deref(), Some("Option<i64>"));
+        assert_eq!(r.binding_ty("c").as_deref(), Some("bool"));
+        assert_eq!(r.binding_ty("p").as_deref(), Some("Option<usize>"));
+    }
+
+    #[test]
+    fn what_the_elements_must_be() {
+        let r = err("struct P { x: i64 }\nfn main() {\n let mut v = vec[P(1), P(2)]\n v.sort()\n}\n", "no method named `sort`");
+        assert_eq!(r.diagnostics[0].hint.as_deref(), Some("`sort` needs `P: Ord`"));
+        let r = err("struct P { x: i64 }\nfn main() {\n let v = vec[P(1)]\n print(v.contains(P(1)))\n}\n", "no method named `contains`");
+        assert_eq!(r.diagnostics[0].hint.as_deref(), Some("`contains` needs `P: Eq`"));
+        // sort_by takes any ordering function
+        ok("struct P { x: i64 }\nfn main() {\n let mut v = vec[P(2), P(1)]\n v.sort_by(|a, b| a.x < b.x)\n}\n");
+        err("fn main() {\n let v = vec[1, 2]\n v.sort()\n}\n", "not declared `mut`");
+        err("fn main() {\n let mut v = vec[1, 2]\n v.insert(\"a\", 1)\n}\n", "mismatched types");
+        err("fn main() {\n let mut v = vec[1, 2]\n v.retain(|n| n + 1)\n}\n", "mismatched types");
+    }
+}

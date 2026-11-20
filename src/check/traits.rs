@@ -335,6 +335,43 @@ impl<'a> Checker<'a> {
         matches!(ty, Ty::Adt(id, args) if args.len() == 1 && self.prog.adt(*id).name == "Shared" && self.prog.adt(*id).module == 0)
     }
 
+    /// When no method `name` fits `recv` only because a bound does not hold (`sort` on a `Vec<P>` whose `P` is not
+    /// `Ord`), say which bound: "`sort` needs `P: Ord`".
+    pub(crate) fn missing_bound_hint(&mut self, recv: &Ty, name: &str) -> Option<String> {
+        let recv = self.infer.shallow(recv);
+        for (cand, _) in self.deref_chain(&recv) {
+            let cand = self.infer.shallow(&cand);
+            for i in 0..self.prog.impls.len() {
+                if !self.prog.impls[i].methods.iter().any(|(n, _)| n == name) {
+                    continue;
+                }
+                let imp = self.prog.impls[i].clone();
+                let snap = self.infer.snapshot();
+                let subst = self.fresh_subst(&imp.generics, Span::default());
+                let fits = self.infer.unify(&imp.self_ty.subst(&subst), &cand);
+                let mut found = None;
+                if fits {
+                    'gens: for g in &imp.generics {
+                        let Some((_, t)) = subst.iter().find(|(k, _)| k == g) else { continue };
+                        let t = self.infer.resolve(t);
+                        for b in self.prog.generic(*g).bounds.clone() {
+                            let bargs: Vec<Ty> = b.args.iter().map(|a| self.infer.resolve(&a.subst(&subst))).collect();
+                            if !self.implements(&t, b.trait_, &bargs) {
+                                found = Some(format!("`{name}` needs `{}: {}`", self.show(&t), self.prog.trait_(b.trait_).name));
+                                break 'gens;
+                            }
+                        }
+                    }
+                }
+                self.infer.rollback(snap);
+                if found.is_some() {
+                    return found;
+                }
+            }
+        }
+        None
+    }
+
     /// Find a method named `name` on `recv`. With `want_self` the method must take
     /// `self` (`value.method()`); otherwise it must not (`Type.function()`).
     pub(crate) fn lookup_method(&mut self, recv: &Ty, name: &str, want_self: bool, span: Span) -> Option<Picked> {

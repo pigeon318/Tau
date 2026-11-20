@@ -88,6 +88,22 @@ There are no implicit numeric conversions. Use `x as f64`.
 - Growable vectors: `Vec<T>`
 - Structs, enums, and `Option<T>` / `Result<T, E>` (enums in the standard library)
 
+### Vector and slice methods
+
+```
+let mut v = vec[5, 3, 9, 1]
+v.sort()                  // [1, 3, 5, 9]      (needs the elements to be ordered)
+v.sort_by(|a, b| a.len < b.len)    // sort with your own "goes before": `less(a, b)`
+v.reverse()   v.swap(i, j)   v.fill(0)
+v.insert(i, x)   v.remove(i)   v.swap_remove(i)   v.truncate(n)   v.clear()   v.retain(|x| x > 3)   v.extend(other)
+v.contains(x)   v.position_of(x)   v.first()   v.last()   v.get(i)   v.is_sorted()   v.is_empty()
+```
+
+- **On a slice, they work on the original**: `v[1..4].sort()` sorts that part of `v` in place (`sort`, `sort_by`, `reverse`, `swap`, `fill` take a `mut` slice, so they also work on arrays and on a `mut [T]` parameter). `insert`, `remove`, `swap_remove`, `truncate`, `clear`, `retain` and `extend` change the length, so they need a `Vec`.
+- `sort` and `sort_by` are **heap sort**: O(n log n) and not stable (equal elements may change their relative order). Floats sort with `<`, so NaN has no defined place. Elements are moved with `swap`, never copied, so sorting strings or vectors is cheap and needs no `Clone`.
+- `insert(i, x)` takes `i` up to and including the length; `remove(i)` and `swap_remove(i)` need `i` less than the length (otherwise a panic that says so). `swap(i, j)` panics with `index out of bounds` like indexing. `swap_remove` is O(1) but moves the last element into the gap. `retain` keeps the order.
+- `first`, `last`, `get` and `extend` copy elements with `clone`, so the elements must be `Clone`; `contains` and `position_of` need `Eq`; `sort` and `is_sorted` need `Ord`. A method whose bound is not met says which one: "`sort` needs `P: Ord`".
+
 ### Tensors
 ```
 let a: Tensor<f64, [3, 3]> = tensor.zeros()

@@ -1055,7 +1055,7 @@ impl<'a> Checker<'a> {
             let hint = if self.lookup_method(&st, &name.name, false, e.span).is_some() {
                 Some(format!("`{}` is an associated function: call it as `{t}.{}(...)`", name.name, name.name))
             } else {
-                None
+                self.missing_bound_hint(&st, &name.name)
             };
             let msg = format!("no method named `{}` found for type `{t}`", name.name);
             match hint {
