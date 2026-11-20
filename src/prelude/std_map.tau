@@ -1,8 +1,36 @@
-pub struct Map<K, V> {}
+pub struct Map<K, V> { pub len: usize }
 
 impl<K, V> Map<K, V> {
     pub fn new() -> Map<K, V>
     pub fn contains(self, k: K) -> bool
+    // Take the entry out (the other entries keep their order): the value it had, or `None`.
+    pub fn remove(mut self, k: K) -> Option<V>
+    pub fn is_empty(self) -> bool { self.len == 0 }
+    // `m.insert(k, v)` is `m[k] = v`.
+    pub fn insert(mut self, own k: K, own v: V) { self[k] = v }
+    pub fn clear(mut self) {
+        let fresh = Map.new()
+        self = fresh
+    }
+}
+
+// What is in the map: copies of the keys, the values or the pairs, in the order the keys were first added.
+impl<K: Clone, V: Clone> Map<K, V> {
+    // The value for `k`, or `None` (`m[k]` panics when the key is missing).
+    pub fn get(self, k: K) -> Option<V>
+    pub fn keys(self) -> Vec<K>
+    pub fn values(self) -> Vec<V>
+    pub fn entries(self) -> Vec<(K, V)> {
+        let ks = self.keys()
+        let vs = self.values()
+        let mut out: Vec<(K, V)> = Vec.new()
+        let mut i = 0
+        while i < ks.len {
+            out.push((ks[i].clone(), vs[i].clone()))
+            i += 1
+        }
+        out
+    }
 }
 
 impl<K, V: Ord> Map<K, V> {

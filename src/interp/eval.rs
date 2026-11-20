@@ -639,6 +639,7 @@ impl<'a> Interp<'a> {
             Value::Str(s) if name == "len" => Ok(Value::Int(s.len() as i128)),
             Value::String(s) if name == "len" => Ok(Value::Int(s.borrow().len() as i128)),
             Value::Tensor(t) if name == "len" => Ok(Value::Int(t.borrow().len() as i128)),
+            Value::Map(m) if name == "len" => Ok(Value::Int(m.borrow().entries.len() as i128)),
             other => panic(format!("no field `{name}` on a {}", other.type_name())),
         }
     }

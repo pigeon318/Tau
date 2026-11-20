@@ -435,6 +435,47 @@ impl<'a> Interp<'a> {
                 }
                 other => panic(format!("contains on a {}", other.type_name())),
             },
+            "Map::get" => match &a[0] {
+                Value::Map(m) => {
+                    let k = self.map_key(&a[1])?;
+                    let found = m.borrow().index.get(&k).map(|i| clone_value(&m.borrow().entries[*i].1));
+                    Ok(match found {
+                        Some(v) => self.some(v),
+                        None => self.none(),
+                    })
+                }
+                other => panic(format!("get on a {}", other.type_name())),
+            },
+            "Map::remove" => match &a[0] {
+                Value::Map(m) => {
+                    let k = self.map_key(&a[1])?;
+                    let mut mm = m.borrow_mut();
+                    match mm.index.remove(&k) {
+                        Some(i) => {
+                            let (_, v) = mm.entries.remove(i);
+                            for idx in mm.index.values_mut() {
+                                if *idx > i {
+                                    *idx -= 1;
+                                }
+                            }
+                            drop(mm);
+                            Ok(self.some(v))
+                        }
+                        None => {
+                            drop(mm);
+                            Ok(self.none())
+                        }
+                    }
+                }
+                other => panic(format!("remove on a {}", other.type_name())),
+            },
+            "Map::keys" | "Map::values" => match &a[0] {
+                Value::Map(m) => {
+                    let items: Vec<Value<'a>> = m.borrow().entries.iter().map(|(k, v)| clone_value(if key == "Map::keys" { k } else { v })).collect();
+                    Ok(Value::vec(items))
+                }
+                other => panic(format!("{key} on a {}", other.type_name())),
+            },
             "Map::index" => match &a[0] {
                 Value::Map(m) => {
                     let k = self.map_key(&a[1])?;
