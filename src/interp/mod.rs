@@ -21,7 +21,6 @@ use crate::program::*;
 use crate::unit::ModRef;
 use crate::types::*;
 use crate::types::Dim;
-use tensor_int::ElemKind;
 use value::*;
 
 /// Non-local control flow.

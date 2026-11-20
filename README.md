@@ -116,6 +116,22 @@ the `release` workflow builds Windows and Linux programs and attaches them.
 Build it with `npm install && npm run package` in that folder and install the `.vsix` (`code --install-extension`), or download `tau-vscode-extension` from the CI run.
 It needs `tau` on the PATH (or the `tau.path` setting).
 
+## Checking a change without CI
+
+GitHub Actions minutes are limited, so everything the workflow checks can also be run on your own machine:
+
+```bash
+scripts/check.sh           # the full test suite, the VS Code tests, and a cross-build of tau.exe (Linux)
+scripts/check.sh quick     # the fast test binaries only (about two minutes)
+scripts/check.sh memory    # also the native tests under valgrind, UBSan and ThreadSanitizer
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows-check.ps1    # the Windows tests, on a Windows PC
+```
+
+Releases are built by the `release` workflow (one run per release, started by pushing a `v*` tag or by hand).
+
 ## Layout
 
 | Path | Contents |
