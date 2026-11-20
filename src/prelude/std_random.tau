@@ -1,0 +1,57 @@
+// Random numbers that can be repeated: the same seed gives the same numbers on every machine and on both backends.
+//
+//   use std.random.Rng
+//   let mut rng = Rng.new(42)
+//   rng.f64()  rng.range(1, 7)  rng.normal()  rng.chance(0.25)  rng.shuffle(mut cards)
+//
+// The generator is a 48-bit linear congruential generator (the one behind `drand48`): fast, with good enough
+// statistics for simulations and games, and not for cryptography.
+
+pub struct Rng {
+    state: u128
+}
+
+impl Rng {
+    // A generator for this seed (any integer).
+    pub fn new(seed: i64) -> Rng {
+        let m = 281474976710656
+        let mut s = seed % m
+        if s < 0 { s += m }
+        Rng(((s as u128) * 2654435761 + 1013904223) % (m as u128))
+    }
+    // The next 32 random bits.
+    pub fn u32(mut self) -> u32 {
+        self.state = (self.state * 25214903917 + 11) % 281474976710656
+        (self.state >> 16) as u32
+    }
+    // A number in [0, 1) with 53 random bits.
+    pub fn f64(mut self) -> f64 {
+        let a = (self.u32() >> 5) as f64
+        let b = (self.u32() >> 6) as f64
+        (a * 67108864.0 + b) / 9007199254740992.0
+    }
+    // An integer from `lo` up to but not including `hi` (`hi` must be greater than `lo`).
+    pub fn range(mut self, lo: i64, hi: i64) -> i64 {
+        if hi <= lo { panic("range: the upper limit must be greater than the lower one") }
+        lo + (self.f64() * ((hi - lo) as f64)) as i64
+    }
+    // True with probability `p`.
+    pub fn chance(mut self, p: f64) -> bool {
+        self.f64() < p
+    }
+    // A number from the standard normal distribution (mean 0, standard deviation 1), by the Box-Muller method.
+    pub fn normal(mut self) -> f64 {
+        let u = 1.0 - self.f64()
+        let v = self.f64()
+        sqrt(-2.0 * ln(u)) * cos(2.0 * PI * v)
+    }
+    // Put the elements of a vector, array or slice in a random order (Fisher-Yates).
+    pub fn shuffle<T>(mut self, v: mut [T]) {
+        let mut i = v.len
+        while i > 1 {
+            let j = self.range(0, i as i64) as usize
+            i -= 1
+            v.swap(i, j)
+        }
+    }
+}

@@ -1760,3 +1760,26 @@ fn a_return_inside_a_loop_over_a_temporary_frees_it() {
     );
     assert_eq!(out, "sss\n\nOk(8)\nErr(cannot parse \"x\" as an integer)\nErr(cannot parse \"q\" as an integer)\n");
 }
+
+// ------------------------------------------------------------------ M9: random numbers
+
+#[test]
+fn rng_gives_the_same_numbers_everywhere() {
+    // the expected numbers come from an independent implementation of the same generator in Python
+    let out = same(
+        "use std.random.Rng\nfn main() {\n let mut r = Rng.new(42)\n print(r.u32())\n print(r.u32())\n print(r.f64())\n print(r.range(1, 7))\n print(r.range(-5, 5))\n print(r.chance(0.5))\n print(r.normal())\n\
+          let mut v = vec[1, 2, 3, 4, 5, 6]\n r.shuffle(mut v)\n print(v)\n let mut z = Rng.new(0)\n print(z.u32())\n let mut n = Rng.new(-7)\n print(n.u32())\n\
+          let mut counts = vec[0, 0, 0, 0, 0, 0]\n let mut d = Rng.new(2024)\n for i in 0..60000 { counts[d.range(0, 6) as usize] += 1 }\n print(counts)\n\
+          let mut part = vec[10, 20, 30, 40, 50]\n let mut q = Rng.new(5)\n q.shuffle(mut part[1..4])\n print(part[0])\n print(part[4])\n}",
+    );
+    assert!(out.starts_with("2369011890\n3912759774\n0.3197457026755782\n1\n3\ntrue\n-1.7471021493640493\n[6, 4, 3, 5, 1, 2]\n3834980216\n2647652506\n[9806, 10029, 10087, 10094, 9937, 10047]\n"), "{out}");
+    assert!(out.ends_with("10\n50\n"), "{out}");
+}
+
+#[test]
+fn rng_panics_on_an_empty_range() {
+    let src = "use std.random.Rng\nfn main() {\n let mut r = Rng.new(1)\n print(r.range(5, 5))\n}";
+    let (_, p) = interpret(src);
+    assert_eq!(p.as_deref(), Some("range: the upper limit must be greater than the lower one"));
+    same(src);
+}

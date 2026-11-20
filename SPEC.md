@@ -144,6 +144,23 @@ h.push(5)  h.pop()  h.peek()  h.len
 - **The `len` fields (and every other field of a library type) can be read but not assigned** by a program (`s.len = 4` is an error), because the library keeps them in step with what the collection holds.
 - A closure passed where a generic result type is expected learns its parameter types from the expected type: `let h: Heap<(i64, str)> = Heap.with_order(|a, b| a.0 < b.0)` needs no annotations on `a` and `b`.
 
+### Random numbers
+
+```
+use std.random.Rng
+let mut rng = Rng.new(42)               // any integer seed
+rng.f64()           // a number in [0, 1)
+rng.range(1, 7)     // an integer from 1 up to 6 (the upper limit is not included)
+rng.u32()           // 32 random bits
+rng.chance(0.25)    // true with probability 0.25
+rng.normal()        // standard normal (mean 0, standard deviation 1)
+rng.shuffle(mut cards)       // put a vector, array or slice in a random order
+```
+
+- **The same seed gives the same numbers on every machine and on both backends** (it is integer arithmetic: a 48-bit linear congruential generator, the one behind `drand48`, written in Tau). The generator is good for simulations and games, not for cryptography. `Tensor.random` keeps its own fixed seed.
+- `range` panics if the upper limit is not greater than the lower one. A shuffle is a Fisher-Yates shuffle, so every order is equally likely (up to the generator's quality).
+- A `Rng` is a value: pass it with `mut` to a function that needs numbers, or give each task its own with a different seed (`Rng.new(task_id)`) so that a parallel program still gives the same result on any number of cores.
+
 ### Strings
 
 ```
