@@ -1052,6 +1052,20 @@ impl<'a> Cg<'a> {
     // ------------------------------------------------------------ blocks and statements
 
     /// The type of a block, computed the way the checker does.
+    /// A block whose value is thrown away (a loop body): an owned value it ends with (`while c { v.pop() }`)
+    /// is freed instead of leaked.
+    fn block_discard(&mut self, b: &'a Block) -> CgResult<String> {
+        let ty = self.block_ty(b);
+        let code = self.block_value(b)?;
+        if self.needs_drop(&ty) && !Self::is_never(&ty) {
+            let ct = self.cty(&ty)?;
+            let t = self.fresh("dv");
+            let d = self.drop_stmt(&t, &ty)?;
+            return Ok(format!("({{ {ct} {t} = {code}; {d}((tau_unit)0); }})"));
+        }
+        Ok(code)
+    }
+
     fn block_ty(&self, b: &Block) -> Ty {
         match b.stmts.last() {
             Some(Stmt::Expr(e)) => self.ty_of(e),
@@ -2075,6 +2089,19 @@ impl<'a> Cg<'a> {
         }
         if let ExprKind::Range { start, end, inclusive } = &indices[0].kind {
             let bt = self.eff_ty(base);
+            if matches!(bt, Ty::Str) || self.is_string(&bt) {
+                // a part of a string: a `str` that views it
+                let v = self.borrowed_as(base, &Ty::Str)?;
+                let lo = match start {
+                    Some(x) => format!("(__int128)({})", self.expr(x)?),
+                    None => "(__int128)0".to_string(),
+                };
+                let hi = match end {
+                    Some(x) => format!("(__int128)({}){}", self.expr(x)?, if *inclusive { " + 1" } else { "" }),
+                    None => "(__int128)s_.len".to_string(),
+                };
+                return Ok(format!("({{ tau_str s_ = {v}; __int128 a_ = {lo}; __int128 b_ = {hi}; tau_str_slice(s_, a_, b_); }})"));
+            }
             let Some(el) = self.seq_elem(&bt) else { return unsupported("slicing this type") };
             let (b, _) = self.place(base)?;
             let view = self.view(&b, &bt)?;
@@ -2990,6 +3017,27 @@ impl<'a> Cg<'a> {
                 let p = self.mut_ptr(ops[0].0)?;
                 let v = self.borrowed_as(ops[1].0, &Ty::Str)?;
                 Ok(format!("({{ tau_buf *b_ = {p}; tau_str s_ = {v}; tau_buf_push(b_, s_.ptr, s_.len); ((tau_unit)0); }})"))
+            }
+            "str::byte_at" => {
+                let v = self.borrowed_as(ops[0].0, &Ty::Str)?;
+                let i = self.expr(ops[1].0)?;
+                Ok(format!("({{ tau_str s_ = {v}; uint64_t i_ = (uint64_t)({i}); if (i_ >= s_.len) tau_oob(s_.len, (__int128)i_); (uint8_t)s_.ptr[i_]; }})"))
+            }
+            "String::push" => {
+                let p = self.mut_ptr(ops[0].0)?;
+                let c = self.expr(ops[1].0)?;
+                Ok(format!("({{ tau_buf *b_ = {p}; tau_fmt_char(b_, {c}); ((tau_unit)0); }})"))
+            }
+            "char_from_u32" => {
+                let ct = self.cty(ret)?;
+                let n = self.expr(args[0])?;
+                Ok(format!("({{ uint32_t n_ = (uint32_t)({n}); {ct} r_; if (n_ < 0x110000u && !(n_ >= 0xD800u && n_ <= 0xDFFFu)) r_ = ({ct}){{ .tag = 0, .u.v0 = {{ n_ }} }}; else r_ = ({ct}){{ .tag = 1 }}; r_; }})"))
+            }
+            "str::parse_i64" | "str::parse_f64" => {
+                let ct = self.cty(ret)?;
+                let v = self.borrowed_as(ops[0].0, &Ty::Str)?;
+                let (vt, f) = if name == "str::parse_i64" { ("int64_t", "tau_parse_i64") } else { ("double", "tau_parse_f64") };
+                Ok(format!("({{ tau_str s_ = {v}; {vt} v_; tau_buf e_ = {{0}}; {ct} r_; if ({f}(s_, &v_, &e_)) r_ = ({ct}){{ .tag = 0, .u.v0 = {{ v_ }} }}; else r_ = ({ct}){{ .tag = 1, .u.v1 = {{ e_ }} }}; r_; }})"))
             }
             "str::lowercase" | "str::uppercase" => {
                 let v = self.borrowed_as(ops[0].0, &Ty::Str)?;
@@ -4448,7 +4496,7 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         };
         let depth = self.scopes.len();
         self.loops.push(LoopCtx { brk: brk.clone(), cont: cont.clone(), depth, result: result.clone() });
-        let b = self.block_value(body);
+        let b = self.block_discard(body);
         self.loops.pop();
         let b = b?;
         let value = result.unwrap_or_else(|| "((tau_unit)0)".to_string());
@@ -4461,7 +4509,7 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         let depth = self.scopes.len();
         self.loops.push(LoopCtx { brk: brk.clone(), cont: cont.clone(), depth, result: None });
         let c = self.cond_expr(cond);
-        let b = self.block_value(body);
+        let b = self.block_discard(body);
         self.loops.pop();
         let (c, b) = (c?, b?);
         Ok(format!("({{ for (;;) {{ if (!({c})) goto {brk}; (void)({b}); {cont}: ; }} {brk}: ; ((tau_unit)0); }})"))
@@ -4519,7 +4567,7 @@ static {vect} {top}({mt} *m, uint64_t n) {{
             Some(g) => self.cond_expr(g).map(|c| format!("if (!({c})) goto {cont}; ")),
             None => Ok(String::new()),
         };
-        let b = self.block_value(body);
+        let b = self.block_discard(body);
         self.loops.pop();
         self.scopes.pop();
         let (g, b) = (g?, b?);
@@ -4587,7 +4635,7 @@ static {vect} {top}({mt} *m, uint64_t n) {{
             Some(g) => self.cond_expr(g).map(|c| format!("if (!({c})) {{ {per_iter}goto {cont}; }} ")),
             None => Ok(String::new()),
         };
-        let b = self.block_value(body);
+        let b = self.block_discard(body);
         self.loops.pop();
         self.scopes.truncate(depth);
         let (g, b) = (g?, b?);
@@ -4623,7 +4671,7 @@ static {vect} {top}({mt} *m, uint64_t n) {{
             Some(g) => self.cond_expr(g).map(|c| format!("if (!({c})) goto {cont}; ")),
             None => Ok(String::new()),
         };
-        let b = self.block_value(body);
+        let b = self.block_discard(body);
         self.loops.pop();
         self.scopes.pop();
         let (g, b) = (g?, b?);

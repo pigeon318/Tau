@@ -104,6 +104,29 @@ v.contains(x)   v.position_of(x)   v.first()   v.last()   v.get(i)   v.is_sorted
 - `insert(i, x)` takes `i` up to and including the length; `remove(i)` and `swap_remove(i)` need `i` less than the length (otherwise a panic that says so). `swap(i, j)` panics with `index out of bounds` like indexing. `swap_remove` is O(1) but moves the last element into the gap. `retain` keeps the order.
 - `first`, `last`, `get` and `extend` copy elements with `clone`, so the elements must be `Clone`; `contains` and `position_of` need `Eq`; `sort` and `is_sorted` need `Ord`. A method whose bound is not met says which one: "`sort` needs `P: Ord`".
 
+### Strings
+
+```
+let s = "  name, 42  "
+s.trim()   s.trim_start()   s.trim_end()                  // without white space at the ends
+s.split(",")   s.lines()                                  // Vec<str>: parts that view the text
+s.find("42")   s.contains(",")   s.starts_with("x")   s.ends_with("x")      // find: Option<usize>, a byte position
+s.replace("a", "b")   s.repeat(3)                         // a new String
+s[2..6]   s[..3]   s[4..]   s[1..=3]                      // a part of the text, as a `str` (byte positions)
+s.chars()   s.char_count()   s.byte_at(i)                 // Vec<char>, number of characters, one byte
+"42".parse_i64()   "2.5e3".parse_f64()                    // Result<i64, String>, Result<f64, String>
+let mut t = String.new()   t.push('é')   t.push_str("ab")   t.clear()   t.is_empty()
+parts.join(", ")                                          // a Vec<String> or Vec<str> as one String
+c.is_digit()  c.is_alphabetic()  c.is_whitespace()  c.to_digit()      // characters (ASCII rules)
+char_from_u32(233)                                        // Option<char>
+```
+
+- Text is UTF-8, and **positions are byte positions**: `"héllo".len` is 6. `s[a..b]` panics with `byte index 2 is not a character boundary` if `a` or `b` is inside a character, and with `slice 5..3 is out of range for length 3` for a bad range (an end past the length is cut to the length, as for vectors). A single position is not allowed (`s[0]` is an error): use `s.byte_at(i)` or `s.chars()`.
+- **`split`, `lines`, `trim` and `s[a..b]` give views** (`str`) of the original text, not copies, so the original cannot be changed or dropped while they are used; `.to_string()` makes an owned copy. `split` needs a non-empty separator; adjacent separators give empty parts. `lines` removes `\n` and `\r\n` and does not make an empty last line. `replace` and `repeat` build a new `String`.
+- **Parsing is exact and strict.** `parse_i64` takes an optional sign and decimal digits only (no spaces, no `_`, no `+` alone) and says `cannot parse "x" as an integer`, or `... : it does not fit in i64`. `parse_f64` takes an optional sign, digits with an optional `.`, and an optional exponent (`2.5e3`, `.5`, `1.`; not `inf`, `nan`, hexadecimal or spaces), correctly rounded, and says `cannot parse "x" as a number`. The error is a `String`, so `?` works in a function that returns `Result<T, String>`.
+- White space for `trim` is the ASCII white space (space, tab, line feed, carriage return, vertical tab, form feed), and the character methods (`is_digit`, `is_alphabetic`, ...) use ASCII rules; letters outside ASCII are not recognised (yet). `uppercase`/`lowercase` handle all of Unicode.
+- Everything above `byte_at`, `s[a..b]`, `push`, `char_from_u32` and the two `parse_` functions is written in Tau (in the prelude).
+
 ### Tensors
 ```
 let a: Tensor<f64, [3, 3]> = tensor.zeros()

@@ -76,6 +76,8 @@ pub fn round<T: Float>(x: T) -> T
 pub fn abs<T: Num>(x: T) -> T
 pub fn min<T: Ord>(a: T, b: T) -> T
 pub fn max<T: Ord>(a: T, b: T) -> T
+// The character with this code, or `None` if it is not one (surrogates and numbers above 0x10FFFF).
+pub fn char_from_u32(n: u32) -> Option<char>
 pub fn zero<T: Num>() -> T
 pub fn one<T: Num>() -> T
 pub fn sum<T: Num>(xs: [T]) -> T
@@ -150,9 +152,16 @@ impl String {
     pub fn new() -> String
     pub fn from(s: str) -> String
     pub fn push_str(mut self, s: str)
+    pub fn push(mut self, c: char)
 }
 
 impl str {
+    // The byte at position `i` (panics past the end).
+    pub fn byte_at(self, i: usize) -> u8
+    // `"12".parse_i64()`: an optional sign and decimal digits, nothing else (no spaces, no `_`).
+    pub fn parse_i64(self) -> Result<i64, String>
+    // `"2.5e3".parse_f64()`: an optional sign, digits with an optional `.`, an optional exponent. (No `inf` or `nan`.)
+    pub fn parse_f64(self) -> Result<f64, String>
     pub fn to_string(self) -> String
     pub fn split_whitespace(self) -> Vec<str>
     pub fn lowercase(self) -> String
@@ -703,5 +712,196 @@ fn sift_down<T>(v: mut [T], root: usize, end: usize, less: fn(T, T) -> bool) {
         } else {
             return
         }
+    }
+}
+
+// ---- strings (written in Tau on top of `byte_at`, `s[a..b]`, `char_from_u32` and `push`) -----------------------
+// Positions are byte positions in the UTF-8 text. `s[a..b]` panics if a position is not on a character boundary.
+
+fn is_space_byte(b: u8) -> bool {
+    b == 32 || (b >= 9 && b <= 13)
+}
+
+fn matches_at(s: str, i: usize, p: str) -> bool {
+    if i + p.len > s.len { return false }
+    let mut j = 0
+    while j < p.len {
+        if s.byte_at(i + j) != p.byte_at(j) { return false }
+        j += 1
+    }
+    true
+}
+
+impl str {
+    pub fn is_empty(self) -> bool { self.len == 0 }
+    pub fn starts_with(self, p: str) -> bool { matches_at(self, 0, p) }
+    pub fn ends_with(self, p: str) -> bool {
+        if p.len > self.len { return false }
+        matches_at(self, self.len - p.len, p)
+    }
+    // The byte position of the first occurrence of `p`.
+    pub fn find(self, p: str) -> Option<usize> {
+        let mut i = 0
+        while i + p.len <= self.len {
+            if matches_at(self, i, p) { return Some(i) }
+            i += 1
+        }
+        None
+    }
+    pub fn contains(self, p: str) -> bool {
+        match self.find(p) {
+            Some(_) => true
+            None => false
+        }
+    }
+    // Without white space (space, tab, newline, ...) at the start and at the end.
+    pub fn trim_start(self) -> str {
+        let mut i = 0
+        while i < self.len && is_space_byte(self.byte_at(i)) { i += 1 }
+        self[i..]
+    }
+    pub fn trim_end(self) -> str {
+        let mut j = self.len
+        while j > 0 && is_space_byte(self.byte_at(j - 1)) { j -= 1 }
+        self[..j]
+    }
+    pub fn trim(self) -> str { self.trim_start().trim_end() }
+    // The parts between the occurrences of `sep` (which must not be empty). Adjacent separators give empty parts.
+    pub fn split(self, sep: str) -> Vec<str> {
+        if sep.len == 0 { panic("split: the separator is empty") }
+        let mut out: Vec<str> = Vec.new()
+        let mut start = 0
+        let mut i = 0
+        while i + sep.len <= self.len {
+            if matches_at(self, i, sep) {
+                out.push(self[start..i])
+                i += sep.len
+                start = i
+            } else {
+                i += 1
+            }
+        }
+        out.push(self[start..])
+        out
+    }
+    // The lines of the text, without their line ends (`\n` or `\r\n`); a final line end does not start another line.
+    pub fn lines(self) -> Vec<str> {
+        let mut out: Vec<str> = Vec.new()
+        let mut start = 0
+        let mut i = 0
+        while i < self.len {
+            if self.byte_at(i) == 10 {
+                let mut end = i
+                if end > start && self.byte_at(end - 1) == 13 { end -= 1 }
+                out.push(self[start..end])
+                start = i + 1
+            }
+            i += 1
+        }
+        if start < self.len { out.push(self[start..]) }
+        out
+    }
+    // A copy with every occurrence of `from` (not empty) replaced by `to`.
+    pub fn replace(self, from: str, to: str) -> String {
+        if from.len == 0 { panic("replace: the text to replace is empty") }
+        let mut out = String.new()
+        let mut start = 0
+        let mut i = 0
+        while i + from.len <= self.len {
+            if matches_at(self, i, from) {
+                out.push_str(self[start..i])
+                out.push_str(to)
+                i += from.len
+                start = i
+            } else {
+                i += 1
+            }
+        }
+        out.push_str(self[start..])
+        out
+    }
+    pub fn repeat(self, n: usize) -> String {
+        let mut out = String.new()
+        let mut k = 0
+        while k < n {
+            out.push_str(self)
+            k += 1
+        }
+        out
+    }
+    // The characters (Unicode code points) of the text.
+    pub fn chars(self) -> Vec<char> {
+        let mut out: Vec<char> = Vec.new()
+        let mut i = 0
+        while i < self.len {
+            let b = self.byte_at(i) as u32
+            let mut code = b
+            let mut n = 1
+            if b >= 240 {
+                code = ((b & 7) << 18) | ((self.byte_at(i + 1) as u32 & 63) << 12) | ((self.byte_at(i + 2) as u32 & 63) << 6) | (self.byte_at(i + 3) as u32 & 63)
+                n = 4
+            } else if b >= 224 {
+                code = ((b & 15) << 12) | ((self.byte_at(i + 1) as u32 & 63) << 6) | (self.byte_at(i + 2) as u32 & 63)
+                n = 3
+            } else if b >= 192 {
+                code = ((b & 31) << 6) | (self.byte_at(i + 1) as u32 & 63)
+                n = 2
+            }
+            match char_from_u32(code) {
+                Some(c) => out.push(c)
+                None => panic("invalid character in text")
+            }
+            i += n
+        }
+        out
+    }
+    pub fn char_count(self) -> usize { self.chars().len }
+}
+
+impl String {
+    pub fn is_empty(self) -> bool { self.len == 0 }
+    pub fn clear(mut self) {
+        let fresh = String.new()
+        self = fresh
+    }
+}
+
+// The text of the pieces with `sep` between them.
+impl [String] {
+    pub fn join(self, sep: str) -> String {
+        let mut out = String.new()
+        let mut i = 0
+        while i < self.len {
+            if i > 0 { out.push_str(sep) }
+            out.push_str(self[i])
+            i += 1
+        }
+        out
+    }
+}
+impl [str] {
+    pub fn join(self, sep: str) -> String {
+        let mut out = String.new()
+        let mut i = 0
+        while i < self.len {
+            if i > 0 { out.push_str(sep) }
+            out.push_str(self[i])
+            i += 1
+        }
+        out
+    }
+}
+
+// Characters (ASCII rules: letters, digits and white space outside ASCII are not recognised).
+impl char {
+    pub fn is_digit(self) -> bool { self >= '0' && self <= '9' }
+    pub fn is_uppercase(self) -> bool { self >= 'A' && self <= 'Z' }
+    pub fn is_lowercase(self) -> bool { self >= 'a' && self <= 'z' }
+    pub fn is_alphabetic(self) -> bool { self.is_uppercase() || self.is_lowercase() }
+    pub fn is_alphanumeric(self) -> bool { self.is_alphabetic() || self.is_digit() }
+    pub fn is_whitespace(self) -> bool { self == ' ' || (self >= '\t' && self <= '\r') }
+    // The value of a decimal digit.
+    pub fn to_digit(self) -> Option<i64> {
+        if self.is_digit() { Some(self as i64 - '0' as i64) } else { None }
     }
 }
