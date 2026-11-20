@@ -200,7 +200,11 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------ expressions
 
     pub(super) fn expr(&mut self, e: &'a Expr, exp: Option<&Ty>) -> Ty {
+        if matches!(e.kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. }) {
+            self.body.expect_ret = exp.cloned();
+        }
         let t = self.expr_inner(e, exp);
+        self.body.expect_ret = None;
         if matches!(e.kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. }) {
             self.solve_bound_args();
         }
@@ -868,7 +872,18 @@ impl<'a> Checker<'a> {
         is_callee: bool,
     ) -> Ty {
         self.check_unsafe_call(fid, span);
+        let expected = self.body.expect_ret.take();
         let inst = self.instantiate(fid, parent, explicit, span);
+        // `let h: Heap<(i64, str)> = Heap.with_order(|a, b| a.0 < b.0)`: the result type is known before the
+        // arguments are looked at, so the closure's parameters are too (not for a bare `T` result, which may be coerced)
+        if let Some(exp) = expected {
+            if matches!(self.infer.shallow(&inst.ret), Ty::Adt(..) | Ty::Tuple(_) | Ty::Array(..) | Ty::Tensor(..)) {
+                let snap = self.infer.snapshot();
+                if !self.infer.unify(&inst.ret, &exp) {
+                    self.infer.rollback(snap);
+                }
+            }
+        }
         if inst.self_mode.is_some() {
             let name = self.prog.fn_(fid).name.clone();
             self.err_hint(
@@ -1793,6 +1808,18 @@ impl<'a> Checker<'a> {
             ExprKind::Index { base, .. } if self.is_ptr_expr(base) => {}
             ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
                 let base: &Expr = base;
+                // a field of a library type (`v.len`, `set.len`) can be read but not assigned by a program: the
+                // library keeps it in step with what it holds
+                if let ExprKind::Field { name, .. } = &e.kind {
+                    if let Some(bt) = self.results.expr_ty.get(&NodeKey::of(base)).cloned() {
+                        if let Ty::Adt(id, _) = self.infer.shallow(&bt) {
+                            if self.is_user(self.body.cx.module) && !self.is_user(self.prog.adt(id).module) {
+                                self.err_hint(e.span, format!("cannot assign to the field `{}` of a library type", name.name), "it can be read, but only the library changes it");
+                                return;
+                            }
+                        }
+                    }
+                }
                 if let (Some(bt), Some(n)) = (self.results.expr_ty.get(&NodeKey::of(base)).cloned(), self.results.derefs.get(&NodeKey::of(base)).copied()) {
                     if self.passes_shared(&bt, n) {
                         self.shared_is_read_only(e.span);

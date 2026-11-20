@@ -1073,3 +1073,35 @@ mod map_basics {
         err("use std.map.Map\nfn main() {\n let m: Map<str, i64> = Map.new()\n m.len = 3\n}\n", "cannot assign");
     }
 }
+
+mod collections {
+    use super::*;
+
+    #[test]
+    fn types_of_set_deque_and_heap() {
+        let r = ok("use std.collections.Set\nuse std.collections.Deque\nuse std.collections.Heap\nfn main() {\n let mut s: Set<i64> = Set.new()\n let a = s.insert(1)\n let n = s.len\n let v = s.to_vec()\n let u = s.union(s)\n let mut d: Deque<str> = Deque.new()\n d.push_back(\"a\")\n let p = d.pop_front()\n let g = d.get(0)\n let mut h: Heap<f64> = Heap.new_min()\n h.push(1.5)\n let t = h.pop()\n let k = h.peek()\n}\n");
+        assert_eq!(r.binding_ty("a").as_deref(), Some("bool"));
+        assert_eq!(r.binding_ty("n").as_deref(), Some("usize"));
+        assert_eq!(r.binding_ty("v").as_deref(), Some("Vec<i64>"));
+        assert_eq!(r.binding_ty("p").as_deref(), Some("Option<str>"));
+        assert_eq!(r.binding_ty("t").as_deref(), Some("Option<f64>"));
+    }
+
+    #[test]
+    fn a_heap_needs_an_order() {
+        err("use std.collections.Heap\nstruct P { x: i64 }\nfn main() {\n let h: Heap<P> = Heap.new()\n}\n", "Ord");
+        ok("use std.collections.Heap\nstruct P { x: i64 }\nfn main() {\n let mut h: Heap<P> = Heap.with_order(|a, b| a.x < b.x)\n h.push(P(1))\n}\n");
+        err("use std.collections.Set\nfn main() {\n let s: Set<i64> = Set.new()\n s.insert(1)\n}\n", "not declared `mut`");
+        err("use std.collections.Set\nfn main() {\n let mut s: Set<i64> = Set.new()\n s.len = 4\n}\n", "cannot assign to the field `len` of a library type");
+        err("fn main() {\n let mut v = vec[1]\n v.len = 0\n}\n", "cannot assign to the field `len`");
+        ok("struct P { len: i64 }\nfn main() {\n let mut p = P(1)\n p.len = 2\n}\n");
+    }
+
+    #[test]
+    fn a_closure_learns_its_parameter_types_from_the_expected_result() {
+        // `Heap.with_order(|a, b| a.0 < b.0)`: the type of the heap is known from the annotation
+        ok("use std.collections.Heap\nfn main() {\n let mut h: Heap<(i64, str)> = Heap.with_order(|a, b| a.0 < b.0)\n h.push((1, \"a\"))\n}\n");
+        // a bare generic result is still coerced afterwards
+        ok("fn first<T>(xs: [T]) -> T { xs[0] }\nfn takes(xs: [i64]) -> i64 { xs[0] }\nfn main() {\n let v = vec[vec[1, 2]]\n print(takes(first(v)))\n}\n");
+    }
+}

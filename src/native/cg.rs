@@ -853,6 +853,22 @@ impl<'a> Cg<'a> {
         Ok((r, drops))
     }
 
+    /// Statements dropping every temporary of the statements being evaluated (innermost first). A `return` (or a `?`)
+    /// leaves them all at once: `for x in make_vec() { ... return ... }` would otherwise leak the vector.
+    fn pending_temp_drops(&mut self) -> CgResult<String> {
+        let mut all: Vec<(String, Ty)> = Vec::new();
+        for level in self.temps.iter().rev() {
+            for (name, ty) in level.iter().rev() {
+                all.push((name.clone(), ty.clone()));
+            }
+        }
+        let mut out = String::new();
+        for (name, ty) in all {
+            out.push_str(&self.drop_stmt(&name, &ty)?);
+        }
+        Ok(out)
+    }
+
     /// A hoisted, zero-initialised temporary of type `ty`, dropped at the end of the current
     /// statement. Returns its C name.
     fn new_temp(&mut self, ty: &Ty) -> CgResult<String> {
@@ -1831,10 +1847,10 @@ impl<'a> Cg<'a> {
             }
             ExprKind::Return(v) => {
                 let ret = self.cur_ret.clone();
-                let drops = self.scope_drops(0)?;
                 let val = match v {
                     Some(x) => {
                         let c = self.convert(x, &ret)?;
+                        let drops = format!("{}{}", self.pending_temp_drops()?, self.scope_drops(0)?);
                         if Self::is_unit(&ret) || Self::is_never(&ret) {
                             format!("(void)({c}); {drops}return 0;")
                         } else {
@@ -1842,7 +1858,10 @@ impl<'a> Cg<'a> {
                             format!("{ct} rv_ = {c}; {drops}return rv_;")
                         }
                     }
-                    None => format!("{drops}return 0;"),
+                    None => {
+                        let drops = format!("{}{}", self.pending_temp_drops()?, self.scope_drops(0)?);
+                        format!("{drops}return 0;")
+                    }
                 };
                 Ok(format!("({{ {val} ((tau_unit)0); }})"))
             }
@@ -4295,7 +4314,7 @@ static {vect} {top}({mt} *m, uint64_t n) {{
         let Ty::Adt(rid, _) = &ret else { return unsupported("`?` in a function that does not return Option or Result") };
         let v = self.owned(inner)?;
         let t = self.fresh("try");
-        let drops = self.scope_drops(0)?;
+        let drops = format!("{}{}", self.pending_temp_drops()?, self.scope_drops(0)?);
         // the failing variant is index 1 (`None`, `Err`); its payload (if any) is passed on
         let propagate = if *rid == *id && name == "Result" {
             format!("{rct} er_ = (({rct}){{ .tag = 1, .u.v1 = {{ {t}.u.v1.f0 }} }}); {drops}return er_;")

@@ -252,6 +252,9 @@ pub(crate) struct Body {
     pub touched: Vec<NodeKey>,
     pub touched_pats: Vec<NodeKey>,
     pub touched_nexts: Vec<NodeKey>,
+    /// The type a call expression is expected to have (from a `let` annotation, a parameter, a return type): used
+    /// to fix a generic result before the arguments are checked, so closures in them know their parameter types.
+    pub expect_ret: Option<Ty>,
     /// The type of every interpolation that has a format spec, checked against it once types are known.
     pub fmt_checks: Vec<(Ty, crate::fmtspec::Fmt)>,
     /// Integer literals (node, value, span, directly negated?), checked against their final

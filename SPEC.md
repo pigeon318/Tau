@@ -119,6 +119,31 @@ m.keys()   m.values()   m.entries()   m.top(3)
 - A key must have exactly the key type: a `Map<String, T>` is indexed with a `String`, a `Map<str, T>` with a `str`.
 - A `Map` is not iterated in place or cloned yet.
 
+### Collections: `Set`, `Deque`, `Heap`
+
+```
+use std.collections.Set       // Set<T>: T is anything that can be a Map key
+use std.collections.Deque     // Deque<T>
+use std.collections.Heap      // Heap<T>
+
+let mut s: Set<i64> = Set.new()
+s.insert(3)  s.contains(3)  s.remove(3)  s.len  s.to_vec()  s.union(t)  s.intersection(t)  s.difference(t)  s.is_subset(t)
+
+let mut d: Deque<i64> = Deque.new()
+d.push_back(1)  d.push_front(0)  d.pop_front()  d.pop_back()  d.front()  d.back()  d.get(i)  d.len  d.to_vec()
+
+let mut h: Heap<i64> = Heap.new()                 // the largest comes out first
+let mut m: Heap<f64> = Heap.new_min()             // the smallest first
+let mut t: Heap<(i64, str)> = Heap.with_order(|a, b| a.0 < b.0)    // your own order: `before(a, b)`
+h.push(5)  h.pop()  h.peek()  h.len
+```
+
+- All three are written in Tau (`std.collections`) on `Vec` and `Map`, and have `len`, `is_empty()` and `clear()`. `insert` on a set says whether the value was new; `remove` whether it was there. A set keeps the order in which values were first added (`to_vec` gives copies in that order); `remove` is O(n).
+- `Deque` is two vectors: adding at either end is O(1), taking is O(1) except when that side is empty and the other is moved over (O(n), once per n takes), so a queue (`push_back` and `pop_front`) and a stack are O(1) per operation; alternating `pop_front` and `pop_back` on a large deque is slow.
+- `Heap` is a binary heap: `push` and `pop` are O(log n). Elements that compare equal come out in no particular order.
+- **The `len` fields (and every other field of a library type) can be read but not assigned** by a program (`s.len = 4` is an error), because the library keeps them in step with what the collection holds.
+- A closure passed where a generic result type is expected learns its parameter types from the expected type: `let h: Heap<(i64, str)> = Heap.with_order(|a, b| a.0 < b.0)` needs no annotations on `a` and `b`.
+
 ### Strings
 
 ```

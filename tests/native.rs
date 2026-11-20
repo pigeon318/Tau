@@ -1702,3 +1702,61 @@ fn maps_free_what_they_own() {
     );
     assert!(out.starts_with("Some([beta, BETA])\nSome([alpha, ALPHA])\nNone\n"), "{out}");
 }
+
+// ------------------------------------------------------------------ M9: Set, Deque, Heap
+
+#[test]
+fn set_deque_and_heap_run_the_same_natively() {
+    let out = same(
+        "use std.collections.Set\nuse std.collections.Deque\nuse std.collections.Heap\nfn main() {\n\
+          let mut s: Set<i64> = Set.new()\n print(s.insert(3))\n print(s.insert(1))\n print(s.insert(3))\n print(s.len)\n print(s.contains(1))\n print(s.contains(9))\n print(s.to_vec())\n print(s.remove(3))\n print(s.remove(3))\n print(s.to_vec())\n\
+          let mut a: Set<i64> = Set.new()\n for x in [1, 2, 3, 4] { a.insert(x) }\n let mut b: Set<i64> = Set.new()\n for x in [3, 4, 5] { b.insert(x) }\n\
+          print(a.union(b).to_vec())\n print(a.intersection(b).to_vec())\n print(a.difference(b).to_vec())\n print(a.is_subset(b))\n\
+          let mut words: Set<str> = Set.new()\n for w in \"the cat the dog a cat\".split(\" \") { words.insert(w) }\n print(words.to_vec())\n\
+          let mut d: Deque<i64> = Deque.new()\n d.push_back(1)\n d.push_back(2)\n d.push_front(0)\n d.push_front(-1)\n print(d.to_vec())\n print(d.len)\n print(d.get(1))\n print(d.front())\n print(d.back())\n print(d.pop_front())\n print(d.pop_back())\n print(d.to_vec())\n print(d.pop_front())\n print(d.pop_front())\n print(d.pop_front())\n print(d.is_empty())\n\
+          let mut h: Heap<i64> = Heap.new()\n for x in [5, 1, 9, 3, 7] { h.push(x) }\n print(h.peek())\n let mut out: Vec<i64> = Vec.new()\n while h.len > 0 {\n match h.pop() {\n Some(x) => out.push(x)\n None => {}\n }\n }\n print(out)\n\
+          let mut m: Heap<f64> = Heap.new_min()\n for x in [2.5, -1.0, 9.0, 0.5] { m.push(x) }\n print(m.pop())\n print(m.pop())\n\
+          let mut tasks: Heap<(i64, str)> = Heap.with_order(|a, b| a.0 < b.0)\n tasks.push((3, \"c\"))\n tasks.push((1, \"a\"))\n tasks.push((2, \"b\"))\n print(tasks.pop())\n print(tasks.len)\n\
+         }",
+    );
+    assert!(out.starts_with("true\ntrue\nfalse\n2\ntrue\nfalse\n[3, 1]\ntrue\nfalse\n[1]\n[1, 2, 3, 4, 5]\n[3, 4]\n[1, 2]\nfalse\n[the, cat, dog, a]\n"), "{out}");
+    assert!(out.ends_with("Some(9)\n[9, 7, 5, 3, 1]\nSome(-1.0)\nSome(0.5)\nSome((1, a))\n2\n"), "{out}");
+}
+
+#[test]
+fn the_collections_agree_with_a_simple_model() {
+    // a heap pops in sorted order, a deque behaves like a vector with inserts and removals at the ends, and a set
+    // like a vector without repeats, over a few thousand pseudo-random operations
+    let out = same(
+        "use std.collections.Set\nuse std.collections.Deque\nuse std.collections.Heap\nfn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }\nfn main() {\n\
+          let mut x: i64 = 7\n\
+          let mut h: Heap<i64> = Heap.new()\n let mut all: Vec<i64> = Vec.new()\n for i in 0..3000 { x = next(x)\n let v = x % 1000\n h.push(v)\n all.push(v)\n }\n all.sort()\n all.reverse()\n let mut ok = true\n for want in all { match h.pop() {\n Some(got) => { if got != want { ok = false } }\n None => { ok = false }\n } }\n print(ok)\n print(h.len)\n\
+          let mut d: Deque<i64> = Deque.new()\n let mut model: Vec<i64> = Vec.new()\n let mut same_all = true\n for i in 0..4000 {\n x = next(x)\n let op = (x / 7) % 4\n if op == 0 { d.push_back(i)\n model.push(i) }\n else if op == 1 { d.push_front(i)\n model.insert(0, i) }\n else if op == 2 {\n let a = d.pop_front()\n if model.len > 0 { let b = model.remove(0)\n match a { Some(v) => { if v != b { same_all = false } }\n None => { same_all = false } } } else { match a { Some(_) => { same_all = false }\n None => {} } }\n } else {\n let a = d.pop_back()\n match model.pop() { Some(b) => { match a { Some(v) => { if v != b { same_all = false } }\n None => { same_all = false } } }\n None => { match a { Some(_) => { same_all = false }\n None => {} } } }\n }\n if d.len != model.len { same_all = false }\n }\n print(same_all)\n print(d.to_vec() == model)\n\
+          let mut s: Set<i64> = Set.new()\n let mut seen: Vec<i64> = Vec.new()\n for i in 0..3000 { x = next(x)\n let v = x % 500\n let added = s.insert(v)\n let fresh = !seen.contains(v)\n if fresh { seen.push(v) }\n if added != fresh { print(\"set differs\") } }\n print(s.len == seen.len)\n print(s.to_vec() == seen)\n}",
+    );
+    assert_eq!(out, "true\n0\ntrue\ntrue\ntrue\ntrue\n");
+}
+
+#[test]
+fn collections_free_what_they_own() {
+    // (`TAU_VALGRIND=1` reports a leak) strings in a set, a deque, a heap with a closure; removed, popped, cleared
+    let out = same(
+        "use std.collections.Set\nuse std.collections.Deque\nuse std.collections.Heap\nfn main() {\n\
+          let mut s: Set<String> = Set.new()\n for w in [\"a\", \"b\", \"a\", \"c\"] { s.insert(w.to_string()) }\n print(s.len)\n print(s.remove(\"b\".to_string()))\n print(s.to_vec())\n s.clear()\n\
+          let mut d: Deque<String> = Deque.new()\n for w in [\"x\", \"y\", \"z\"] { d.push_back(w.to_string()) }\n d.push_front(\"w\".to_string())\n print(d.pop_front())\n print(d.pop_back())\n print(d.to_vec())\n d.clear()\n\
+          let mut h: Heap<String> = Heap.new()\n for w in [\"pear\", \"fig\", \"apple\"] { h.push(w.to_string()) }\n print(h.peek())\n print(h.pop())\n h.clear()\n print(h.len)\n}",
+    );
+    assert!(out.starts_with("3\ntrue\n[a, c]\nSome(w)\nSome(z)\n[x, y]\nSome(pear)\nSome(pear)\n0\n"), "{out}");
+}
+
+#[test]
+fn a_return_inside_a_loop_over_a_temporary_frees_it() {
+    // (`TAU_VALGRIND=1` reports a leak) `for x in make() { ... return ... }` and a `?` after a temporary
+    let out = same(
+        "fn make(n: i64) -> Vec<String> {\n let mut v: Vec<String> = Vec.new()\n for i in 0..n { v.push(\"s\".repeat(i as usize)) }\n v\n}\n\
+         fn first_long(n: i64) -> String {\n for s in make(n) { if s.len > 2 { return s.to_string() } }\n String.new()\n}\n\
+         fn total(a: str, b: str) -> Result<i64, String> {\n let words = make(3).join(\"+\")\n let x = a.parse_i64()?\n let y = b.parse_i64()?\n Ok(x + y + words.len as i64)\n}\n\
+         fn main() {\n print(first_long(6))\n print(first_long(2))\n print(total(\"1\", \"2\"))\n print(total(\"1\", \"x\"))\n print(total(\"q\", \"2\"))\n}",
+    );
+    assert_eq!(out, "sss\n\nOk(8)\nErr(cannot parse \"x\" as an integer)\nErr(cannot parse \"q\" as an integer)\n");
+}
