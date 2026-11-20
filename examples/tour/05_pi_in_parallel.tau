@@ -1,0 +1,54 @@
+// Computing pi three ways, with parallel sums that give the same digits on any number of cores.
+//
+//   tau run examples/tour/05_pi_in_parallel.tau
+//   (try TAU_THREADS=1 and TAU_THREADS=8 in front: the output does not change)
+
+// pi/4 = 1 - 1/3 + 1/5 - ...
+fn leibniz(terms: i64) -> f64 {
+    4.0 * par sum(k in 0..terms) {
+        let sign = if k % 2 == 0 { 1.0 } else { -1.0 }
+        sign / (2 * k + 1) as f64
+    }
+}
+
+// The area under 4 / (1 + x^2) from 0 to 1 is pi (midpoint rule).
+fn integral(slices: i64) -> f64 {
+    let h = 1.0 / slices as f64
+    h * par sum(i in 0..slices) {
+        let x = (i as f64 + 0.5) * h
+        4.0 / (1.0 + x * x)
+    }
+}
+
+// The i-th number of the Halton sequence in a base: a low-discrepancy sequence that fills [0, 1) evenly.
+fn halton(i: i64, base: i64) -> f64 {
+    let mut f = 1.0
+    let mut r = 0.0
+    let mut n = i + 1
+    while n > 0 {
+        f = f / base as f64
+        r += f * (n % base) as f64
+        n = n / base
+    }
+    r
+}
+
+// Points in the unit square (Halton points, so every run uses the same ones): the fraction inside the
+// quarter circle is pi / 4.
+fn monte_carlo(points: i64) -> f64 {
+    let inside = par sum(i in 0..points) {
+        let x = halton(i, 2)
+        let y = halton(i, 3)
+        if x * x + y * y < 1.0 { 1 } else { 0 }
+    }
+    4.0 * inside as f64 / points as f64
+}
+
+fn main() {
+    let leibniz_pi = leibniz(2000000)
+    let integral_pi = integral(2000000)
+    let mc_pi = monte_carlo(400000)
+    print("Leibniz series  (2 million terms):  {leibniz_pi:.10}   error {abs(leibniz_pi - PI):.2e}")
+    print("midpoint rule   (2 million slices): {integral_pi:.10}   error {abs(integral_pi - PI):.2e}")
+    print("Halton points  (400 000 points):   {mc_pi:.6}   error {abs(mc_pi - PI):.2e}")
+}

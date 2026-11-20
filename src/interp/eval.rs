@@ -640,6 +640,8 @@ impl<'a> Interp<'a> {
             Value::String(s) if name == "len" => Ok(Value::Int(s.borrow().len() as i128)),
             Value::Tensor(t) if name == "len" => Ok(Value::Int(t.borrow().len() as i128)),
             Value::Map(m) if name == "len" => Ok(Value::Int(m.borrow().entries.len() as i128)),
+            Value::Complex(re, _) if name == "re" => Ok(Value::Float(*re)),
+            Value::Complex(_, im) if name == "im" => Ok(Value::Float(*im)),
             other => panic(format!("no field `{name}` on a {}", other.type_name())),
         }
     }

@@ -6,18 +6,28 @@ running on named nodes. "Tau" is a working name.
 
 The design lives in [`SPEC.md`](SPEC.md).
 
+## Install
+
+Download the program for your system from the [latest release](https://github.com/pigeon318/Tau/releases/latest)
+(`tau-windows-x86_64.exe` or `tau-linux-x86_64`), name it `tau` (`tau.exe`), put it on your `PATH`, and run `tau --version`.
+After that `tau update` installs newer releases. A C compiler (MinGW-w64 `gcc` on Windows, `gcc` or `clang` on Linux)
+makes programs run natively, 10 to 200 times faster; without one Tau uses its interpreter. [`docs/GUIDE.md`](docs/GUIDE.md)
+shows how to use it and lists a tour of programs to run (`examples/tour/`).
+
 ## Status
 
-**Tau programs run.** The compiler reads Tau source, resolves names, infers types, checks traits,
-generics, operators and mutability, then checks ownership (use after move, conflicting borrows,
-views that outlive their data, race-free `spawn` and `par for`), and an interpreter runs what is
-accepted. A **native backend** (Tau to C, compiled by the system `clang` or `gcc`) runs
-everything except `on` blocks and a few corner cases: scalars, structs, enums, generics, traits, closures,
-`Vec`/`String`/arrays/slices/`Map`, tensors, complex numbers, linear algebra, FFT, files, clocks and dates (`std.time`), `Box<T>` and recursive types, iterators (`v.iter().map(..).sum()`, `for x in my_iterator`), integer and bool tensors with masks, ownership, checked
-arithmetic, and `par for`/`par sum`/`spawn` on a thread pool whose results never depend on the number of
-cores. It is typically 10 to 200 times faster than the interpreter, which remains the reference and the
-fallback (used automatically when a program needs something native cannot do, or no C compiler is installed).
-See [`docs/native/DESIGN.md`](docs/native/DESIGN.md).
+**Version 0.1.0 is the first release.** The compiler reads Tau source, resolves names, infers types, checks traits, generics,
+operators and mutability, then checks ownership (use after move, conflicting borrows, views that outlive their data,
+race-free `spawn` and `par for`). A **native backend** (Tau to C, compiled by the system `clang` or `gcc`) and an
+**interpreter** run the result and agree on every test; the native one runs everything except `on` blocks and a few corner
+cases, typically 10 to 200 times faster, and the interpreter is the reference and the fallback (used automatically when a
+program needs something native cannot do, or no C compiler is installed). The language has structs, enums, traits,
+generics, closures, iterators, modules and packages, `Box`/`Shared`/`Mutex`, checked integers, complex numbers, tensors of
+floats, complex numbers, integers and `bool`, linear algebra, the FFT, and thread-pool parallelism whose results never depend
+on the number of cores. The standard library covers `Vec`, strings, `Map`, `Set`, `Deque`, `Heap`, random numbers, dates and
+clocks, and files. What 0.1.0 contains and what it does not is in
+[`docs/release-notes/v0.1.0.md`](docs/release-notes/v0.1.0.md); what comes next is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+See [`docs/native/DESIGN.md`](docs/native/DESIGN.md) for how the native backend works.
 
 | Stage | Deliverable | State |
 |---|---|---|
@@ -25,10 +35,10 @@ See [`docs/native/DESIGN.md`](docs/native/DESIGN.md).
 | 2 | Name resolution, type checker | done |
 | 3 | Borrow checker | done |
 | 3.5 | Interpreter (`tau run`) | done |
-| 4 | Native code generation via C (see `docs/native/DESIGN.md`) | done |
-| 5 | Std library, tensors | |
-| 6 | Thread pool, `par` | done (part of stage 4) |
-| 7 | Modules and packages (`tau.toml`, `tau.lock`), `tau test`, `tau fmt` | modules and packages done |
+| 4 | Native code generation via C | done |
+| 5 | Standard library, tensors | done for 0.1.0 (`path`/`env`/`process` and JSON next) |
+| 6 | Thread pool, `par` | done |
+| 7 | Modules and packages (`tau.toml`, `tau.lock`), `tau test` | done (`tau fmt` next) |
 
 ## Try it
 
@@ -107,7 +117,7 @@ even if you already have it. It needs `curl` (Windows 10 and later include it). 
 GitHub token that can read it: set `GITHUB_TOKEN`, or install the GitHub CLI and run `gh auth login`. A `tau` built from
 source (in a `target` folder) is updated with `git pull` and `cargo build --release` instead.
 
-Releases are made by pushing a tag that matches the version in `Cargo.toml` (`git tag v0.1.0 && git push origin v0.1.0`);
+Releases are made by the `release` workflow: run it from the Actions tab (it uses the version in `Cargo.toml` and the notes in `docs/release-notes/`), or push a tag that matches that version (`git tag v0.1.0 && git push origin v0.1.0`);
 the `release` workflow builds Windows and Linux programs and attaches them.
 
 ## Editor support

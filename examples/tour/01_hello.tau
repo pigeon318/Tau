@@ -1,0 +1,54 @@
+// A first look at Tau: values, functions, loops, text and formatted output.
+//
+//   tau run examples/tour/01_hello.tau
+
+fn greet(name: str, times: i64) {
+    for i in 1..=times {
+        print("{i}. Hello, {name}!")
+    }
+}
+
+fn area(w: f64, h: f64) -> f64 {
+    w * h
+}
+
+struct Point { x: f64, y: f64 }
+
+fn distance(a: Point, b: Point) -> f64 {
+    sqrt((a.x - b.x) ^ 2 + (a.y - b.y) ^ 2)
+}
+
+fn main() {
+    greet("world", 2)
+
+    // numbers: integers are checked, floats are f64 by default
+    let n = 7
+    let half = n as f64 / 2.0
+    print("{n} / 2 = {half}")
+    print("{n} squared is {n ^ 2}, and 2^10 = {2 ^ 10}")
+
+    // formatting: width, alignment, precision, hex, binary
+    print("pi is about {3.14159265:.3}")
+    print("[{42:>8}] [{42:<8}] [{42:^8}] [{42:08}]")
+    print("255 is {255:x} in hex and {255:b} in binary")
+
+    // a table
+    print("  n    n^2     sqrt")
+    for k in 1..=5 {
+        print("{k:>3} {k * k:>6} {sqrt(k as f64):>8.4}")
+    }
+
+    // structs
+    let a = Point(0.0, 0.0)
+    let b = Point(3.0, 4.0)
+    print("the distance is {distance(a, b)}, the area is {area(3.0, 4.0)}")
+
+    // vectors, a loop, and a conditional expression
+    let mut v = vec[3, 1, 4, 1, 5, 9, 2, 6]
+    v.sort()
+    print("sorted: {v}")
+    let mut evens = 0
+    for x in v { if x % 2 == 0 { evens += 1 } }
+    let verdict = if evens > 3 { "mostly even" } else { "mostly odd" }
+    print("{evens} even numbers: {verdict}")
+}

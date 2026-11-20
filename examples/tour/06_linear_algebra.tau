@@ -1,0 +1,35 @@
+// Linear algebra and the Fourier transform.
+//
+//   tau run examples/tour/06_linear_algebra.tau
+use math.linalg
+use math.fft.{fft}
+
+fn main() {
+    // solve  2x + y - z = 8,  -3x - y + 2z = -11,  -2x + y + 2z = -3
+    let a = Tensor<f64, [_, _]>.from_rows(vec[vec[2.0, 1.0, -1.0], vec[-3.0, -1.0, 2.0], vec[-2.0, 1.0, 2.0]])
+    let b = Tensor<f64, [_]>.from([8.0, -11.0, -3.0])
+    let x = linalg.inv(a) @ b
+    print("solution (x, y, z) = {x}")
+    print("check: A @ x = {a @ x}")
+    print("determinant = {linalg.det(a):.3}")
+
+    // eigenvalues of a symmetric matrix
+    let s = Tensor<f64, [_, _]>.from_rows(vec[vec[4.0, 1.0, 0.0], vec[1.0, 3.0, 1.0], vec[0.0, 1.0, 2.0]])
+    let (values, vectors) = linalg.eig(s)
+    print("eigenvalues of S: {values}")
+    print("their sum is {values.sum():.6} and the trace of S is {trace(s):.6}")
+
+    // the Fourier transform: a signal made of two tones, 5 and 12 cycles per second
+    let n = 64
+    let t = Tensor<f64, [_]>.arange(n).map(|i| i / 64.0)
+    let signal = t.map(|u| sin(2.0 * PI * 5.0 * u) + 0.5 * sin(2.0 * PI * 12.0 * u))
+    let spectrum = fft(signal)
+    print("the strongest frequencies:")
+    for k in 1..n / 2 {
+        let s = spectrum[k]
+        let magnitude = sqrt(s.re * s.re + s.im * s.im) / 32.0
+        if magnitude > 0.1 {
+            print("  {k:>2} Hz  amplitude {magnitude:.3}")
+        }
+    }
+}

@@ -1,0 +1,69 @@
+// Number crunching with tensors of bool/integers and iterators.
+//
+//   tau run examples/tour/02_primes_and_numbers.tau
+
+// The sieve of Eratosthenes: prime[i] says whether i is prime.
+fn sieve(n: usize) -> Tensor<bool, [_]> {
+    let mut prime = Tensor<bool, [_]>.ones(n + 1)
+    prime[0] = false
+    prime[1] = false
+    let mut i = 2
+    while i * i <= n {
+        if prime[i] {
+            let mut j = i * i
+            while j <= n {
+                prime[j] = false
+                j += i
+            }
+        }
+        i += 1
+    }
+    prime
+}
+
+// How many steps the Collatz sequence from n takes to reach 1.
+fn collatz_steps(n: i64) -> i64 {
+    let mut x = n
+    let mut steps = 0
+    while x != 1 {
+        x = if x % 2 == 0 { x / 2 } else { 3 * x + 1 }
+        steps += 1
+    }
+    steps
+}
+
+fn main() {
+    let limit = 100000
+    let prime = sieve(limit)
+    let numbers = Tensor<i64, [_]>.arange(limit + 1)
+    let primes = numbers.select(prime)
+    print("there are {prime.count()} primes up to {limit}")
+    print("the first ten: {primes.to_vec()[0..10]}")
+    print("the last one: {primes.max()}")
+
+    // twin primes: p and p + 2 both prime
+    let twins = prime[0..limit - 1] & prime[2..limit + 1]
+    print("{twins.count()} twin prime pairs below {limit}")
+
+    // the longest Collatz sequence for a start below 100000
+    let mut best = 1
+    let mut best_steps = 0
+    for n in 1..100000 {
+        let s = collatz_steps(n)
+        if s > best_steps {
+            best = n
+            best_steps = s
+        }
+    }
+    print("longest Collatz: starting at {best} it takes {best_steps} steps to reach 1")
+
+    // iterators: sums of squares, with no vectors made in between
+    let squares = (1..=100).iter().map(|x| x * x).sum()
+    let odd_cubes = (1..=20).iter().filter(|x| x % 2 == 1).map(|x| x * x * x).sum()
+    print("1^2 + ... + 100^2 = {squares}, the cubes of the odd numbers up to 20 sum to {odd_cubes}")
+
+    // factorials: integers never wrap silently (21! would not fit in an i64 and panics)
+    let mut f: i64 = 1
+    for k in 1..=20 { f *= k }
+    print("20! = {f}")
+}

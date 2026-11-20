@@ -1105,3 +1105,46 @@ mod collections {
         ok("fn first<T>(xs: [T]) -> T { xs[0] }\nfn takes(xs: [i64]) -> i64 { xs[0] }\nfn main() {\n let v = vec[vec[1, 2]]\n print(takes(first(v)))\n}\n");
     }
 }
+
+mod random {
+    use super::*;
+
+    #[test]
+    fn types_of_the_generator() {
+        let r = ok("use std.random.Rng\nfn main() {\n let mut g = Rng.new(1)\n let a = g.u32()\n let b = g.f64()\n let c = g.range(0, 10)\n let d = g.chance(0.5)\n let e = g.normal()\n let mut v = vec[1, 2]\n g.shuffle(mut v)\n}\n");
+        assert_eq!(r.binding_ty("a").as_deref(), Some("u32"));
+        assert_eq!(r.binding_ty("b").as_deref(), Some("f64"));
+        assert_eq!(r.binding_ty("c").as_deref(), Some("i64"));
+        assert_eq!(r.binding_ty("d").as_deref(), Some("bool"));
+        err("use std.random.Rng\nfn main() {\n let g = Rng.new(1)\n g.f64()\n}\n", "not declared `mut`");
+    }
+}
+
+mod date_times {
+    use super::*;
+
+    #[test]
+    fn types_of_date_and_time() {
+        let r = ok("use std.time.*\nfn main() {\n let d = DateTime.new(2026, 1, 2, 3, 4, 5)\n let y = d.year\n let u = d.unix()\n let w = d.weekday_name()\n let n = d.add_days(3)\n let p = DateTime.parse(\"2026-01-02\")\n let s = d.iso()\n let before = d < n\n}\n");
+        assert_eq!(r.binding_ty("y").as_deref(), Some("i64"));
+        assert_eq!(r.binding_ty("u").as_deref(), Some("i64"));
+        assert_eq!(r.binding_ty("w").as_deref(), Some("str"));
+        assert_eq!(r.binding_ty("n").as_deref(), Some("DateTime"));
+        assert_eq!(r.binding_ty("p").as_deref(), Some("Result<DateTime, String>"));
+        assert_eq!(r.binding_ty("before").as_deref(), Some("bool"));
+    }
+}
+
+mod complex_parts {
+    use super::*;
+
+    #[test]
+    fn the_parts_of_a_complex_number() {
+        let r = ok("fn main() {\n let z = 3.0 + 4.0i\n let a = z.re\n let b = z.im\n let w = (1.0 + 2.0i) as c64\n let c = w.re\n}\n");
+        assert_eq!(r.binding_ty("a").as_deref(), Some("f64"));
+        assert_eq!(r.binding_ty("b").as_deref(), Some("f64"));
+        assert_eq!(r.binding_ty("c").as_deref(), Some("f32"));
+        err("fn main() {\n let mut z = 3.0 + 4.0i\n z.re = 1.0\n}\n", "cannot assign to `re` of a complex number");
+        err("fn main() {\n let z = 3.0 + 4.0i\n print(z.abs)\n}\n", "no field `abs`");
+    }
+}

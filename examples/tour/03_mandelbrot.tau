@@ -1,0 +1,40 @@
+// The Mandelbrot set, drawn with complex numbers.
+//
+//   tau run examples/tour/03_mandelbrot.tau
+
+// A complex number from its real and imaginary parts.
+fn complex(re: f64, im: f64) -> c128 {
+    (re as c128) + (im as c128) * 1.0i
+}
+
+// How many steps of z = z^2 + c it takes for |z| to exceed 2 (max_iter if it never does).
+fn escape_time(c: c128, max_iter: i64) -> i64 {
+    let mut z = complex(0.0, 0.0)
+    let mut k = 0
+    while k < max_iter {
+        z = z * z + c
+        if z.re * z.re + z.im * z.im > 4.0 {
+            return k
+        }
+        k += 1
+    }
+    max_iter
+}
+
+fn main() {
+    let width = 72
+    let height = 26
+    let max_iter = 60
+    let shades = [' ', '.', ':', '-', '=', '+', '*', '#', '%', '@']
+    for row in 0..height {
+        let mut line = String.new()
+        for col in 0..width {
+            let re = -2.2 + 3.2 * (col as f64) / (width as f64)
+            let im = -1.2 + 2.4 * (row as f64) / (height as f64)
+            let k = escape_time(complex(re, im), max_iter)
+            let shade = if k == max_iter { 9 } else { (k * 9 / 20) as usize % 9 }
+            line.push(shades[shade])
+        }
+        print(line)
+    }
+}

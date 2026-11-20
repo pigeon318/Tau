@@ -1,36 +1,120 @@
 name: release
 
-# Publishes tau.exe (Windows) and tau (Linux) when a version tag such as v0.1.0 is pushed.
+# Publishes Tau: the Windows and Linux programs, SHA256SUMS (what `tau update` checks) and the VS Code extension.
+#
+#   * From the Actions tab: choose "release", then "Run workflow". It releases the version in Cargo.toml
+#     (v0.1.0 for version 0.1.0), creating the tag on the commit you ran it from.
+#   * Or push a tag: `git tag v0.1.0 && git push origin v0.1.0` (the tag must match Cargo.toml).
+#
+# The notes are docs/release-notes/<tag>.md (generated notes if there is no such file). Nothing is published unless the
+# tests pass and each program starts and runs.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          want="v$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "$want" ]; then
+            echo "the tag is ${GITHUB_REF_NAME} but Cargo.toml says $want"
+            exit 1
+          fi
+          if gh release view "$want" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "release $want already exists: raise the version in Cargo.toml for a new one"
+            exit 1
+          fi
+          echo "releasing $want"
+          echo "tag=$want" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test (interpreter and native backend)
+        run: cargo test --release
+
   windows:
+    needs: version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - run: cargo build --release
+      - name: The program starts and runs a program
+        shell: pwsh
+        run: |
+          .\target\release\tau.exe --version
+          $out = (.\target\release\tau.exe run examples\hello.tau --interp) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $out.Trim() -eq "") { Write-Error "tau.exe could not run hello.tau"; exit 1 }
+          Write-Host $out
       - uses: actions/upload-artifact@v4
         with:
           name: tau-windows-x86_64
           path: target/release/tau.exe
 
   linux:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: cargo build --release
+      - name: The program starts, and compiles and runs programs natively
+        run: |
+          ./target/release/tau --version
+          for name in collatz primes sort bank wordcount integrate; do
+            got="$(./target/release/tau run examples/run/$name.tau --native)"
+            want="$(cat examples/run/$name.expected)"
+            if [ "$got" != "$want" ]; then
+              echo "$name differs"
+              exit 1
+            fi
+            echo "$name ok"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: tau-linux-x86_64
           path: target/release/tau
 
+  vscode:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Package the extension
+        working-directory: editors/vscode
+        run: |
+          npm install --no-audit --no-fund
+          npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tau-vscode-extension
+          path: editors/vscode/*.vsix
+
   publish:
-    needs: [windows, linux]
+    needs: [version, test, windows, linux, vscode]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,17 +124,17 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          # the tag must match the version in Cargo.toml, because `tau update` compares them
-          want="v$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)"
-          if [ "$want" != "${GITHUB_REF_NAME}" ]; then
-            echo "the tag is ${GITHUB_REF_NAME} but Cargo.toml says $want"
-            exit 1
-          fi
           cd dist
           cp tau-windows-x86_64/tau.exe tau-windows-x86_64.exe
           cp tau-linux-x86_64/tau tau-linux-x86_64
           chmod +x tau-linux-x86_64
+          cp tau-vscode-extension/*.vsix tau-vscode-extension.vsix
           # the file names and SHA256SUMS are what `tau update` looks for
-          sha256sum tau-windows-x86_64.exe tau-linux-x86_64 > SHA256SUMS
-          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --title "Tau ${GITHUB_REF_NAME}" --generate-notes tau-windows-x86_64.exe tau-linux-x86_64 SHA256SUMS
+          sha256sum tau-windows-x86_64.exe tau-linux-x86_64 tau-vscode-extension.vsix > SHA256SUMS
+          cat SHA256SUMS
+          notes="../docs/release-notes/${TAG}.md"
+          if [ -f "$notes" ]; then flags="--notes-file $notes"; else flags="--generate-notes"; fi
+          gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --target "${GITHUB_SHA}" --title "Tau ${TAG}" --latest $flags \
+            tau-windows-x86_64.exe tau-linux-x86_64 tau-vscode-extension.vsix SHA256SUMS

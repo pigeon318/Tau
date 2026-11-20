@@ -1,0 +1,52 @@
+// Conway's Game of Life on a grid of bool, with whole-grid operations instead of loops over cells.
+//
+//   tau run examples/tour/04_game_of_life.tau
+
+fn show(cells: Tensor<bool, [_, _]>, generation: i64) {
+    print("generation {generation}")
+    let (h, w) = (cells.shape()[0], cells.shape()[1])
+    for r in 0..h {
+        let mut line = String.new()
+        for c in 0..w {
+            line.push(if cells[r, c] { '#' } else { '.' })
+        }
+        print(line)
+    }
+}
+
+// The next generation of the inside of the grid (the border stays dead).
+fn step(cells: Tensor<bool, [_, _]>) -> Tensor<bool, [_, _]> {
+    let (h, w) = (cells.shape()[0], cells.shape()[1])
+    let a = cells.to_i64()
+    // for every inside cell, the number of live neighbours: the sum of the 8 grids shifted by one
+    let top = a[0..h - 2, 0..w - 2] + a[0..h - 2, 1..w - 1] + a[0..h - 2, 2..w]
+    let middle = a[1..h - 1, 0..w - 2] + a[1..h - 1, 2..w]
+    let bottom = a[2..h, 0..w - 2] + a[2..h, 1..w - 1] + a[2..h, 2..w]
+    let n = top + middle + bottom
+    let alive = cells[1..h - 1, 1..w - 1]
+    // a live cell with 2 or 3 neighbours lives; a dead cell with exactly 3 is born
+    let next = (alive & ((n == 2) | (n == 3))) | (!alive & (n == 3))
+    let mut out = Tensor<bool, [_, _]>.zeros(h, w)
+    out[1..h - 1, 1..w - 1] = next
+    out
+}
+
+fn main() {
+    let mut cells = Tensor<bool, [_, _]>.zeros(10, 24)
+    // a glider
+    cells[1, 2] = true
+    cells[2, 3] = true
+    cells[3, 1] = true
+    cells[3, 2] = true
+    cells[3, 3] = true
+    // and a blinker
+    cells[6, 15] = true
+    cells[6, 16] = true
+    cells[6, 17] = true
+
+    for g in 0..5 {
+        show(cells, g)
+        cells = step(cells)
+    }
+    print("{cells.count()} cells are alive after 5 generations")
+}

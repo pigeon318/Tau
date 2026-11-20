@@ -1760,3 +1760,63 @@ fn a_return_inside_a_loop_over_a_temporary_frees_it() {
     );
     assert_eq!(out, "sss\n\nOk(8)\nErr(cannot parse \"x\" as an integer)\nErr(cannot parse \"q\" as an integer)\n");
 }
+
+// ------------------------------------------------------------------ M9: random numbers
+
+#[test]
+fn rng_gives_the_same_numbers_everywhere() {
+    // the expected numbers come from an independent implementation of the same generator in Python
+    let out = same(
+        "use std.random.Rng\nfn main() {\n let mut r = Rng.new(42)\n print(r.u32())\n print(r.u32())\n print(r.f64())\n print(r.range(1, 7))\n print(r.range(-5, 5))\n print(r.chance(0.5))\n print(r.normal())\n\
+          let mut v = vec[1, 2, 3, 4, 5, 6]\n r.shuffle(mut v)\n print(v)\n let mut z = Rng.new(0)\n print(z.u32())\n let mut n = Rng.new(-7)\n print(n.u32())\n\
+          let mut counts = vec[0, 0, 0, 0, 0, 0]\n let mut d = Rng.new(2024)\n for i in 0..60000 { counts[d.range(0, 6) as usize] += 1 }\n print(counts)\n\
+          let mut part = vec[10, 20, 30, 40, 50]\n let mut q = Rng.new(5)\n q.shuffle(mut part[1..4])\n print(part[0])\n print(part[4])\n}",
+    );
+    assert!(out.starts_with("2369011890\n3912759774\n0.3197457026755782\n1\n3\ntrue\n-1.7471021493640493\n[6, 4, 3, 5, 1, 2]\n3834980216\n2647652506\n[9806, 10029, 10087, 10094, 9937, 10047]\n"), "{out}");
+    assert!(out.ends_with("10\n50\n"), "{out}");
+}
+
+#[test]
+fn rng_panics_on_an_empty_range() {
+    let src = "use std.random.Rng\nfn main() {\n let mut r = Rng.new(1)\n print(r.range(5, 5))\n}";
+    let (_, p) = interpret(src);
+    assert_eq!(p.as_deref(), Some("range: the upper limit must be greater than the lower one"));
+    same(src);
+}
+
+// ------------------------------------------------------------------ M9: DateTime
+
+#[test]
+fn date_times_run_the_same_natively() {
+    // the numbers were checked against Python's datetime
+    let out = same(
+        "use std.time.*\nfn main() {\n let d = DateTime.new(2026, 11, 19, 7, 13, 2)\n print(d)\n print(d.iso())\n print(d.weekday_name())\n print(d.day_of_year())\n print(d.add_days(45))\n print(d.add_hours(-8))\n print(d.add_seconds(59).add_minutes(1))\n\
+          let e = DateTime.from_unix(0)\n print(e)\n print(e.weekday_name())\n print(e.seconds_until(d))\n print(e.days_until(d))\n print(d == DateTime.from_unix(d.unix()))\n print(e < d)\n print(d < e)\n\
+          print(DateTime.parse(\"2024-02-29\"))\n print(DateTime.parse(\"2024-02-29T23:59:59Z\"))\n print(DateTime.parse(\"2024-02-29 12:00:00\"))\n print(DateTime.parse(\"2023-02-29\"))\n print(DateTime.parse(\"2024-13-01\"))\n print(DateTime.parse(\"24-1-1\"))\n print(DateTime.parse(\"2024-1x-01\"))\n\
+          print(is_leap_year(1900))\n print(is_leap_year(2000))\n print(days_in_month(2024, 2))\n print(days_in_month(2025, 2))\n print(d.year + d.month)\n print(DateTime.new(2026, 12, 31, 23, 59, 59).add_seconds(1))\n print(DateTime.now().year >= 2026)\n}",
+    );
+    assert!(out.starts_with("2026-11-19 07:13:02\n2026-11-19T07:13:02Z\nThursday\n323\n2027-01-03 07:13:02\n2026-11-18 23:13:02\n2026-11-19 07:15:01\n1970-01-01 00:00:00\nThursday\n1795072382\n20776\ntrue\ntrue\nfalse\n"), "{out}");
+}
+
+#[test]
+fn an_impossible_date_panics_the_same() {
+    for (stmts, msg) in [
+        ("print(DateTime.new(2023, 2, 29, 0, 0, 0))", "invalid date or time"),
+        ("print(DateTime.new(2024, 13, 1, 0, 0, 0))", "invalid date or time"),
+        ("print(DateTime.new(2024, 1, 1, 24, 0, 0))", "invalid date or time"),
+    ] {
+        let src = format!("use std.time.*\nfn main() {{\n {stmts}\n}}");
+        let (_, p) = interpret(&src);
+        assert_eq!(p.as_deref().map(|m| m.contains(msg)), Some(true), "{stmts}: {p:?}");
+        same(&src);
+    }
+}
+
+#[test]
+fn the_parts_of_complex_numbers_run_the_same_natively() {
+    let out = same(
+        "fn main() {\n let z = 3.0 + 4.0i\n print(z.re)\n print(z.im)\n print(z.re * z.re + z.im * z.im)\n let w = (1.5 + 2.5i) as c64\n print(w.re + w.im)\n\
+          let t = Tensor<c128, [_]>.from([1.0 + 2.0i, 0.0 + 1.0i])\n print(t[0].re)\n print(t[1].im)\n let mut s = 0.0\n for k in 0..2 { s += t[k].re + t[k].im }\n print(s)\n}",
+    );
+    assert_eq!(out, "3.0\n4.0\n25.0\n4.0\n1.0\n1.0\n4.0\n");
+}

@@ -1,0 +1,41 @@
+// A planet in orbit around a star: a leapfrog integrator keeps the energy (almost) constant.
+//
+//   tau run examples/tour/09_orbit.tau
+
+struct Body { x: f64, y: f64, vx: f64, vy: f64 }
+
+// The acceleration towards a star at the origin with gravitational parameter 1.
+fn pull(x: f64, y: f64) -> (f64, f64) {
+    let r = sqrt(x * x + y * y)
+    let f = -1.0 / (r * r * r)
+    (f * x, f * y)
+}
+
+fn energy(b: Body) -> f64 {
+    let r = sqrt(b.x * b.x + b.y * b.y)
+    0.5 * (b.vx * b.vx + b.vy * b.vy) - 1.0 / r
+}
+
+fn main() {
+    // start at distance 1 moving a bit slower than a circular orbit: an ellipse
+    let mut b = Body(1.0, 0.0, 0.0, 0.8)
+    let dt = 0.001
+    let e0 = energy(b)
+    print("  time         x        y  distance      energy")
+    for step in 0..=6283 {
+        if step % 785 == 0 {
+            let r = sqrt(b.x * b.x + b.y * b.y)
+            print("{step as f64 * dt:>6.2}  {b.x:>8.4} {b.y:>8.4}  {r:>8.4}  {energy(b):>10.6}")
+        }
+        // leapfrog: half a kick, a drift, half a kick
+        let (ax, ay) = pull(b.x, b.y)
+        b.vx += 0.5 * dt * ax
+        b.vy += 0.5 * dt * ay
+        b.x += dt * b.vx
+        b.y += dt * b.vy
+        let (bx, by) = pull(b.x, b.y)
+        b.vx += 0.5 * dt * bx
+        b.vy += 0.5 * dt * by
+    }
+    print("energy drift after one orbit: {abs(energy(b) - e0):.2e}")
+}

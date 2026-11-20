@@ -1,0 +1,60 @@
+// Text processing: splitting, counting, sorting and parsing.
+//
+//   tau run examples/tour/08_words.tau
+use std.map.Map
+
+fn main() {
+    let text = "the quick brown fox jumps over the lazy dog. The dog barks; the fox runs away. A quick fox is a happy fox!"
+
+    // clean it up: lower case, only letters and spaces
+    let lower = text.lowercase()
+    let mut clean = String.new()
+    for c in lower.chars() {
+        clean.push(if c.is_alphabetic() { c } else { ' ' })
+    }
+
+    // count the words
+    let mut counts: Map<str, i64> = Map.new()
+    for w in clean.split_whitespace() {
+        counts[w] += 1
+    }
+    print("{counts.len} different words. The most common:")
+    for (word, n) in counts.top(4) {
+        print("  {word:<8} {n}")
+    }
+
+    // the longest words, alphabetically
+    let mut words: Vec<str> = clean.split_whitespace()
+    words.sort()
+    let mut longest: Vec<str> = Vec.new()
+    for w in words { if w.len >= 5 { longest.push(w) } }
+    let joined = longest.join(", ")
+    print("words of five letters or more: {joined}")
+
+    // numbers in text
+    let report = "temperatures: 21.5, 19, 23.25, n/a, 18.0"
+    let mut total = 0.0
+    let mut count = 0
+    for part in report.split(": ")[1].split(", ") {
+        match part.parse_f64() {
+            Ok(v) => {
+                total += v
+                count += 1
+            }
+            Err(e) => print("skipping: {e}")
+        }
+    }
+    print("the mean of {count} readings is {total / count as f64:.2}")
+
+    // palindromes
+    for candidate in ["level", "tau", "racecar", "A man a plan a canal Panama"] {
+        let letters: Vec<char> = candidate.lowercase().chars()
+        let mut kept: Vec<char> = Vec.new()
+        for c in letters { if c.is_alphabetic() { kept.push(c) } }
+        let mut same = true
+        let n = kept.len
+        for i in 0..n / 2 { if kept[i] != kept[n - 1 - i] { same = false } }
+        let verdict = if same { "a palindrome" } else { "not a palindrome" }
+        print("{candidate} is {verdict}")
+    }
+}

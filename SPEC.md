@@ -73,7 +73,7 @@ Tau is a low-level, statically typed language focused on math and science. It is
 ### Primitives
 - Integers: `i8 i16 i32 i64 i128 isize`, `u8 u16 u32 u64 u128 usize`
 - Floats: `f32 f64`
-- Complex: `c64 c128` (pairs of `f32`/`f64`), written like `3 + 4i`
+- Complex: `c64 c128` (pairs of `f32`/`f64`), written like `3 + 4i`; `z.re` and `z.im` read the parts (they cannot be assigned: build a new number)
 - `bool`, `char` (a Unicode scalar), `str` (borrowed UTF-8 string slice), `String` (owned, growable UTF-8 string)
 - String literals have type `str`. `s.to_string()` or `String.from(s)` makes an owned copy.
 
@@ -143,6 +143,23 @@ h.push(5)  h.pop()  h.peek()  h.len
 - `Heap` is a binary heap: `push` and `pop` are O(log n). Elements that compare equal come out in no particular order.
 - **The `len` fields (and every other field of a library type) can be read but not assigned** by a program (`s.len = 4` is an error), because the library keeps them in step with what the collection holds.
 - A closure passed where a generic result type is expected learns its parameter types from the expected type: `let h: Heap<(i64, str)> = Heap.with_order(|a, b| a.0 < b.0)` needs no annotations on `a` and `b`.
+
+### Random numbers
+
+```
+use std.random.Rng
+let mut rng = Rng.new(42)               // any integer seed
+rng.f64()           // a number in [0, 1)
+rng.range(1, 7)     // an integer from 1 up to 6 (the upper limit is not included)
+rng.u32()           // 32 random bits
+rng.chance(0.25)    // true with probability 0.25
+rng.normal()        // standard normal (mean 0, standard deviation 1)
+rng.shuffle(mut cards)       // put a vector, array or slice in a random order
+```
+
+- **The same seed gives the same numbers on every machine and on both backends** (it is integer arithmetic: a 48-bit linear congruential generator, the one behind `drand48`, written in Tau). The generator is good for simulations and games, not for cryptography. `Tensor.random` keeps its own fixed seed.
+- `range` panics if the upper limit is not greater than the lower one. A shuffle is a Fisher-Yates shuffle, so every order is equally likely (up to the generator's quality).
+- A `Rng` is a value: pass it with `mut` to a function that needs numbers, or give each task its own with a different seed (`Rng.new(task_id)`) so that a parallel program still gives the same result on any number of cores.
 
 ### Strings
 
@@ -507,6 +524,25 @@ what they return is of course different on every run. A nicer `Instant`/`Duratio
 when the standard library can be written in Tau itself.
 
 ---
+
+### `DateTime` (in `std.time`)
+
+```
+use std.time.*
+let d = DateTime.new(2026, 11, 19, 7, 13, 2)        // panics with `invalid date or time` if it does not exist
+let now = DateTime.now()   let e = DateTime.from_unix(0)
+d.year  d.month  d.day  d.hour  d.minute  d.second       // read-only fields
+d.unix()   d.weekday()   d.weekday_name()   d.day_of_year()   d.iso()      // 1795072382, 3, "Thursday", 323, "2026-11-19T07:13:02Z"
+d.add_days(45)   d.add_hours(-8)   d.add_minutes(1)   d.add_seconds(59)   // a new DateTime
+d.seconds_until(e)   d.days_until(e)                        // negative if `e` is earlier; days are cut towards zero
+d == e   d < e                                              // compares the moments
+DateTime.parse("2026-11-19")   DateTime.parse("2026-11-19 07:13:02")   DateTime.parse("2026-11-19T07:13:02Z")    // Result<DateTime, String>
+is_leap_year(2024)   days_in_month(2025, 2)
+print(d)                                                    // 2026-11-19 07:13:02
+```
+
+- Everything is **UTC**: there are no time zones and no leap seconds, and the Gregorian calendar is used for every year. `DateTime` is written in Tau on top of `civil` and `from_civil`, so adding days across month and year ends, leap years and the weekday follow the same rules as those functions (the examples above were checked against Python's `datetime`).
+- `parse` accepts only the three forms shown (digits only, four-digit year) and says what is wrong: a message that the text cannot be read, or that the date does not exist (`2023-02-29 is not a date and time that exists`).
 
 ## 8d. Formatting values
 
