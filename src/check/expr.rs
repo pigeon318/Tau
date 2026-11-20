@@ -1452,6 +1452,8 @@ impl<'a> Checker<'a> {
                 }
             },
             Ty::Slice(_) | Ty::Array(..) | Ty::Str | Ty::Tensor(..) if name.name == "len" => Ty::usize(),
+            // the real and imaginary parts of a complex number
+            Ty::Complex(f) if name.name == "re" || name.name == "im" => Ty::Float(*f),
             Ty::Error => Ty::Error,
             Ty::Var(_) => self.err_ty(base.span, format!("cannot access `.{}` here: the type is not known yet", name.name)),
             other => {
@@ -1812,6 +1814,10 @@ impl<'a> Checker<'a> {
                 // library keeps it in step with what it holds
                 if let ExprKind::Field { name, .. } = &e.kind {
                     if let Some(bt) = self.results.expr_ty.get(&NodeKey::of(base)).cloned() {
+                        if matches!(self.infer.shallow(&bt), Ty::Complex(_)) {
+                            self.err_hint(e.span, format!("cannot assign to `{}` of a complex number", name.name), "make a new one: `z = re as c128 + im as c128 * 1i`");
+                            return;
+                        }
                         // the field belongs to what a `Box` or `Shared` holds
                         let mut owner = self.infer.shallow(&bt);
                         for _ in 0..self.results.derefs.get(&NodeKey::of(base)).copied().unwrap_or(0) {

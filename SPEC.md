@@ -73,7 +73,7 @@ Tau is a low-level, statically typed language focused on math and science. It is
 ### Primitives
 - Integers: `i8 i16 i32 i64 i128 isize`, `u8 u16 u32 u64 u128 usize`
 - Floats: `f32 f64`
-- Complex: `c64 c128` (pairs of `f32`/`f64`), written like `3 + 4i`
+- Complex: `c64 c128` (pairs of `f32`/`f64`), written like `3 + 4i`; `z.re` and `z.im` read the parts (they cannot be assigned: build a new number)
 - `bool`, `char` (a Unicode scalar), `str` (borrowed UTF-8 string slice), `String` (owned, growable UTF-8 string)
 - String literals have type `str`. `s.to_string()` or `String.from(s)` makes an owned copy.
 

@@ -2171,6 +2171,11 @@ impl<'a> Cg<'a> {
             let b = self.borrow(base)?;
             return Ok(format!("((uint64_t)tau_t_len(&({b})))"));
         }
+        if matches!(bt, Ty::Complex(_)) && (name == "re" || name == "im") {
+            let b = self.borrow(base)?;
+            let ft = self.cty(&Ty::Float(if matches!(bt, Ty::Complex(FloatTy::F32)) { FloatTy::F32 } else { FloatTy::F64 }))?;
+            return Ok(format!("(({ft})({b}).{name})"));
+        }
         if name == "len" && self.map_kv(&bt).is_some() {
             let b = self.borrow(base)?;
             return Ok(format!("((uint64_t)({b}).len)"));

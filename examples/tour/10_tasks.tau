@@ -1,0 +1,57 @@
+// Doing several things at once: tasks, a shared counter, and parallel loops whose results never change.
+//
+//   tau run examples/tour/10_tasks.tau
+
+// Count the primes in a range (slowly, on purpose).
+fn count_primes(lo: i64, hi: i64) -> i64 {
+    let mut n = 0
+    for k in lo..hi {
+        let mut prime = k > 1
+        let mut d = 2
+        while d * d <= k {
+            if k % d == 0 {
+                prime = false
+                break
+            }
+            d += 1
+        }
+        if prime { n += 1 }
+    }
+    n
+}
+
+// A task that does some work and reports it on a counter shared with the other tasks.
+fn worker(id: i64, lo: i64, hi: i64, done: Shared<Mutex<i64>>) -> i64 {
+    let n = count_primes(lo, hi)
+    done.update(|total| total + 1)
+    n
+}
+
+fn main() {
+    // three tasks, each with its own range; `join` waits for the result
+    let done = Shared.new(Mutex.new(0))
+    let (d1, d2, d3) = (done.clone(), done.clone(), done.clone())
+    let a = spawn { worker(1, 0, 20000, own d1) }
+    let b = spawn { worker(2, 20000, 40000, own d2) }
+    let c = spawn { worker(3, 40000, 60000, own d3) }
+    let mut total = 0
+    for r in [a.join(), b.join(), c.join()] {
+        match r {
+            Ok(n) => {
+                print("a task found {n} primes")
+                total += n
+            }
+            Err(_) => print("a task panicked")
+        }
+    }
+    print("primes below 60000: {total}; tasks finished: {done.get()}")
+
+    // a parallel loop writes into disjoint parts of a vector, and a parallel sum adds them up
+    let mut squares: Vec<i64> = Vec.new()
+    for i in 0..1000 { squares.push(0) }
+    par for i in 0..1000 {
+        squares[i] = (i * i) as i64
+    }
+    let s = par sum(i in 0..1000) squares[i]
+    print("the sum of the first 1000 squares is {s}")
+}

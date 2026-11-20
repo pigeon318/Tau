@@ -1134,3 +1134,17 @@ mod date_times {
         assert_eq!(r.binding_ty("before").as_deref(), Some("bool"));
     }
 }
+
+mod complex_parts {
+    use super::*;
+
+    #[test]
+    fn the_parts_of_a_complex_number() {
+        let r = ok("fn main() {\n let z = 3.0 + 4.0i\n let a = z.re\n let b = z.im\n let w = (1.0 + 2.0i) as c64\n let c = w.re\n}\n");
+        assert_eq!(r.binding_ty("a").as_deref(), Some("f64"));
+        assert_eq!(r.binding_ty("b").as_deref(), Some("f64"));
+        assert_eq!(r.binding_ty("c").as_deref(), Some("f32"));
+        err("fn main() {\n let mut z = 3.0 + 4.0i\n z.re = 1.0\n}\n", "cannot assign to `re` of a complex number");
+        err("fn main() {\n let z = 3.0 + 4.0i\n print(z.abs)\n}\n", "no field `abs`");
+    }
+}

@@ -1,0 +1,34 @@
+// How fast is it? Tau compiles to native code through C when a C compiler is installed.
+//
+//   tau run examples/tour/speed.tau            (native, if gcc/clang is found)
+//   tau run examples/tour/speed.tau --interp   (the interpreter: the reference, much slower)
+use std.time.*
+
+fn fib(n: i64) -> i64 {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn main() {
+    let t0 = monotonic_ns()
+    print("fib(32) = {fib(32)}                         {format_duration(monotonic_ns() - t0)}")
+
+    let t1 = monotonic_ns()
+    let mut v: Vec<i64> = Vec.new()
+    let mut x: i64 = 12345
+    for i in 0..1000000 {
+        x = (x * 1103515245 + 12345) % 2147483648
+        v.push(x)
+    }
+    v.sort()
+    print("sorted 1 000 000 numbers, the smallest is {v[0]}   {format_duration(monotonic_ns() - t1)}")
+
+    let t2 = monotonic_ns()
+    let a = Tensor<f64, [_, _]>.random(300, 300)
+    let b = Tensor<f64, [_, _]>.random(300, 300)
+    let c = a @ b
+    print("a 300 x 300 matrix product, trace {trace(c):.3}   {format_duration(monotonic_ns() - t2)}")
+
+    let t3 = monotonic_ns()
+    let total = par sum(i in 0..50000000) (i % 7) as i64
+    print("a parallel sum of 50 000 000 terms = {total}   {format_duration(monotonic_ns() - t3)}")
+}

@@ -1,0 +1,31 @@
+// Heat spreading along a metal rod, simulated with tensor slices (no loop over the points).
+//
+//   tau run examples/tour/07_heat.tau
+
+fn bar(t: f64, hottest: f64) -> String {
+    // a row of # whose length is the temperature relative to the hottest point (0 to 40 characters)
+    let n = (t / hottest * 40.0) as usize
+    "#".repeat(n)
+}
+
+fn main() {
+    let points = 21
+    let mut rod = Tensor<f64, [_]>.zeros(points)
+    rod[10] = 1.0                                   // a hot spot in the middle
+    let k = 0.4                                     // how fast heat flows (stable below 0.5)
+
+    for step in 0..=40 {
+        if step % 10 == 0 {
+            print("after {step} steps (total heat {rod.sum():.3}, hottest point {rod.max():.3})")
+            let hottest = rod.max()
+            for i in (0..points).iter().step_by(2) {
+                print("  x={i:>2} {bar(rod[i], hottest)}")
+            }
+        }
+        // each point moves towards the average of its neighbours: u += k * (left - 2 * centre + right)
+        let left = rod[0..points - 2]
+        let centre = rod[1..points - 1]
+        let right = rod[2..points]
+        rod[1..points - 1] = centre + (left - centre * 2.0 + right) * k
+    }
+}

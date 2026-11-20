@@ -1811,3 +1811,12 @@ fn an_impossible_date_panics_the_same() {
         same(&src);
     }
 }
+
+#[test]
+fn the_parts_of_complex_numbers_run_the_same_natively() {
+    let out = same(
+        "fn main() {\n let z = 3.0 + 4.0i\n print(z.re)\n print(z.im)\n print(z.re * z.re + z.im * z.im)\n let w = (1.5 + 2.5i) as c64\n print(w.re + w.im)\n\
+          let t = Tensor<c128, [_]>.from([1.0 + 2.0i, 0.0 + 1.0i])\n print(t[0].re)\n print(t[1].im)\n let mut s = 0.0\n for k in 0..2 { s += t[k].re + t[k].im }\n print(s)\n}",
+    );
+    assert_eq!(out, "3.0\n4.0\n25.0\n4.0\n1.0\n1.0\n4.0\n");
+}
