@@ -31,6 +31,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("std.fs", include_str!("prelude/std_fs.tau")),
     ("std.io", include_str!("prelude/std_io.tau")),
     ("std.map", include_str!("prelude/std_map.tau")),
+    ("std.random", include_str!("prelude/std_random.tau")),
     ("std.time", include_str!("prelude/std_time.tau")),
     ("math.linalg", include_str!("prelude/math_linalg.tau")),
     ("math.fft", include_str!("prelude/math_fft.tau")),

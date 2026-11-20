@@ -1073,3 +1073,17 @@ mod map_basics {
         err("use std.map.Map\nfn main() {\n let m: Map<str, i64> = Map.new()\n m.len = 3\n}\n", "cannot assign");
     }
 }
+
+mod random {
+    use super::*;
+
+    #[test]
+    fn types_of_the_generator() {
+        let r = ok("use std.random.Rng\nfn main() {\n let mut g = Rng.new(1)\n let a = g.u32()\n let b = g.f64()\n let c = g.range(0, 10)\n let d = g.chance(0.5)\n let e = g.normal()\n let mut v = vec[1, 2]\n g.shuffle(mut v)\n}\n");
+        assert_eq!(r.binding_ty("a").as_deref(), Some("u32"));
+        assert_eq!(r.binding_ty("b").as_deref(), Some("f64"));
+        assert_eq!(r.binding_ty("c").as_deref(), Some("i64"));
+        assert_eq!(r.binding_ty("d").as_deref(), Some("bool"));
+        err("use std.random.Rng\nfn main() {\n let g = Rng.new(1)\n g.f64()\n}\n", "not declared `mut`");
+    }
+}
