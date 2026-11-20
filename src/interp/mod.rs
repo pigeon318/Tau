@@ -601,7 +601,7 @@ impl<'a> Interp<'a> {
                 let (re, im) = (self.f32_text(*a as f32), self.f32_text(b.abs() as f32));
                 Ok(if *b < 0.0 { format!("{re}-{im}i") } else { format!("{re}+{im}i") })
             }
-            (Value::Box(s), Ty::Adt(_, args)) if args.len() == 1 => {
+            (Value::Box(s) | Value::Shared(s), Ty::Adt(_, args)) if args.len() == 1 => {
                 let inner = s.borrow()[0].clone();
                 self.display_ty(&inner, &args[0])
             }
@@ -717,7 +717,7 @@ impl<'a> Interp<'a> {
                 format!("[{}]", parts?.join(", "))
             }
             Value::Tensor(t) => self.tensor_text(&t.borrow()),
-            Value::Box(s) => {
+            Value::Box(s) | Value::Shared(s) => {
                 let inner = s.borrow()[0].clone();
                 self.display(&inner)?
             }
@@ -778,7 +778,7 @@ impl<'a> Interp<'a> {
             (Value::Str(_) | Value::String(_), Value::Str(_) | Value::String(_)) => {
                 self.text_of(&a) == self.text_of(&b)
             }
-            (Value::Tuple(x), Value::Tuple(y)) | (Value::Array(x), Value::Array(y)) | (Value::Vec(x), Value::Vec(y)) | (Value::Box(x), Value::Box(y)) => {
+            (Value::Tuple(x), Value::Tuple(y)) | (Value::Array(x), Value::Array(y)) | (Value::Vec(x), Value::Vec(y)) | (Value::Box(x), Value::Box(y)) | (Value::Shared(x), Value::Shared(y)) => {
                 let (xs, ys) = (x.borrow().clone(), y.borrow().clone());
                 self.all_eq(&xs, &ys)?
             }
@@ -836,7 +836,7 @@ impl<'a> Interp<'a> {
             (Value::Str(_) | Value::String(_), Value::Str(_) | Value::String(_)) => {
                 Some(self.text_of(&a).cmp(&self.text_of(&b)))
             }
-            (Value::Tuple(x), Value::Tuple(y)) | (Value::Array(x), Value::Array(y)) | (Value::Vec(x), Value::Vec(y)) | (Value::Box(x), Value::Box(y)) => {
+            (Value::Tuple(x), Value::Tuple(y)) | (Value::Array(x), Value::Array(y)) | (Value::Vec(x), Value::Vec(y)) | (Value::Box(x), Value::Box(y)) | (Value::Shared(x), Value::Shared(y)) => {
                 let (xs, ys) = (x.borrow().clone(), y.borrow().clone());
                 for (p, q) in xs.iter().zip(&ys) {
                     match self.values_cmp(p, q)? {

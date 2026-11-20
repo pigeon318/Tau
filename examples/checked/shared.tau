@@ -1,0 +1,62 @@
+// Shared<T> and Mutex<T>: data with several owners, and data that tasks change one at a time.
+//
+//   Shared.new(x)       one value, any number of handles; s.clone() makes another handle
+//   s.field  s.len      the value is read through any handle, never changed
+//   Mutex.new(x)        a value changed under a lock: m.get()  m.set(x)  m.update(|v| ...)  m.with(|v| ...)
+//   Shared<Mutex<T>>    what several tasks use to change one value
+
+// A persistent tree: inserting makes a new tree that shares every untouched subtree with the old one.
+enum Tree {
+    Leaf
+    Node(Shared<Tree>, i64, Shared<Tree>)
+}
+
+fn insert(t: Shared<Tree>, x: i64) -> Shared<Tree> {
+    match t {
+        Leaf => Shared.new(Node(Shared.new(Leaf), x, Shared.new(Leaf)))
+        Node(l, v, r) => {
+            if x < v {
+                Shared.new(Node(insert(l.clone(), x), v, r.clone()))
+            } else {
+                Shared.new(Node(l.clone(), v, insert(r.clone(), x)))
+            }
+        }
+    }
+}
+
+fn total(t: Shared<Tree>) -> i64 {
+    match t {
+        Leaf => 0
+        Node(l, v, r) => v + total(l) + total(r)
+    }
+}
+
+// Some work that reads shared data, and counts how many items it handled in a shared counter.
+fn weigh(factor: f64, data: Shared<Vec<f64>>, handled: Shared<Mutex<i64>>) -> f64 {
+    let mut s = 0.0
+    for x in data.iter() {
+        s += x * factor
+        handled.update(|n| n + 1)
+    }
+    s
+}
+
+fn main() {
+    let v1 = insert(insert(insert(Shared.new(Leaf), 5), 3), 8)
+    let v2 = insert(v1.clone(), 7)
+    print("version 1 sums to {total(v1)}, version 2 to {total(v2)}")
+
+    let readings = Shared.new(vec[1.5, 2.5, 4.0, 0.5])
+    let handled = Shared.new(Mutex.new(0))
+    let (r1, h1) = (readings.clone(), handled.clone())
+    let (r2, h2) = (readings.clone(), handled.clone())
+    let a = spawn { weigh(1.0, own r1, own h1) }
+    let b = spawn { weigh(10.0, own r2, own h2) }
+    for r in [a.join(), b.join()] {
+        match r {
+            Ok(w) => print("weighed: {w}")
+            Err(_) => print("a task panicked")
+        }
+    }
+    print("items handled by both tasks: {handled.get()}")
+}

@@ -629,3 +629,25 @@ fn an_iterator_cannot_outlive_what_it_walks_over() {
     err_m("let it = {\n let v = vec[1, 2, 3]\n v.iter()\n}\n print(it.count())", "does not live long enough");
     ok_m("let n = {\n let v = vec[1, 2, 3]\n v.iter().count()\n}\n print(n)");
 }
+
+// ------------------------------------------------------------------ Shared<T> and Mutex<T>
+
+#[test]
+fn handles_move_into_tasks_and_a_clone_is_another_handle() {
+    ok_m("let s = Shared.new(vec[1, 2, 3])\n let c = s.clone()\n let t = spawn { let mine = own c\n mine.len }\n print(s.len)\n print(t.join().is_ok_or(0))".replace("print(t.join().is_ok_or(0))", "match t.join() {\n Ok(n) => print(n)\n Err(_) => print(0)\n }").as_str());
+    err_m("let s = Shared.new(vec[1])\n let t = spawn { let mine = own s\n mine.len }\n print(s.len)\n match t.join() {\n Ok(n) => print(n)\n Err(_) => print(0)\n }", "use of moved value");
+    // a task may use a handle without moving it (a read-only borrow, until the task is joined)
+    ok_m("let s = Shared.new(vec[1, 2, 3])\n let t = spawn { s.len }\n match t.join() {\n Ok(n) => print(n)\n Err(_) => print(0)\n }\n print(s.len)");
+}
+
+#[test]
+fn a_mutex_in_a_shared_handle_is_changed_through_a_read_borrow() {
+    ok_m("let m = Shared.new(Mutex.new(0))\n let t = spawn { m.update(|x| x + 1) }\n match t.join() {\n Ok(_) => print(1)\n Err(_) => print(0)\n }\n par for i in 0..4 { m.update(|x| x + 1) }\n print(m.get())");
+}
+
+#[test]
+fn a_shared_handle_and_a_mutex_are_moved() {
+    err_m("let s = Shared.new(vec[1])\n let t = s\n print(s.len)", "use of moved value");
+    err_m("let m = Mutex.new(1)\n let c = m.into_inner()\n print(m.get())", "use of moved value");
+    ok_m("let s = Shared.new(vec[1])\n let t = s.clone()\n print(s.len + t.len)");
+}

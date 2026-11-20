@@ -293,7 +293,7 @@ let l = Cons(1, Box.new(Cons(2, Box.new(Nil))))
 - Mutating through a `match` binding is not possible yet (the bindings are copies of the parts); rebuild the value as above, or keep the data in a `Vec`.
 
 Escape hatches:
-- `Shared<T>`: reference-counted shared ownership, atomic when sent across threads. For mutation, `Shared<Mutex<T>>`.
+- `Shared<T>`: reference-counted shared ownership, atomic when sent across threads; read-only. For mutation, `Shared<Mutex<T>>` (see "Shared values and mutexes").
 - `unsafe { ... }`: raw pointers, manual allocation (`alloc` / `free`), unchecked indexing, calling C.
 
 No garbage collector. No hidden allocations: anything that allocates says so (`Vec`, `String`, `Shared`, `alloc`).
@@ -329,6 +329,26 @@ impl Iterator<i64> for Countdown {
 - **Not yet:** `rev()` and other double-ended steps, `peekable`, `flat_map`, `windows`/`chunks`, and `(a..b).map(..)` without `.iter()` (write `(a..b).iter().map(..)`).
 
 Two helpers for generic code: `zero<T: Num>() -> T` and `one<T: Num>() -> T` (an integer literal is not a `T`). `x.clone()` works on any type (it copies vectors, strings, boxes and maps too), and `Option` and `Result` print as `Some(3)`, `None`, `Ok(..)` and `Err(..)` when their contents can be printed. A range is a value: `let r = 2..5` has `r.start` and `r.end` (the end is always the exclusive one, so `1..=4` has `end` 5).
+
+### Shared values and mutexes
+
+```
+let cfg = Shared.new(Config(...))     // one value with several owners
+let other = cfg.clone()               // another handle to the same value (the value is not copied)
+print(cfg.name)  area(cfg, 2.0)  cfg[0]  match cfg { ... }     // read through any handle, like a Box
+
+let counter = Shared.new(Mutex.new(0))
+let c = counter.clone()
+let t = spawn { for _ in 0..1000 { c.update(|n| n + 1) } }      // `c` is moved into the task
+let _ = t.join()
+print(counter.get())                  // 1000
+```
+
+- **`Shared<T>`** is reference counted. The count is atomic, so a handle can be moved into a `spawn`ed task or used in `par for`; the value is dropped with its last handle. `s.clone()` makes a handle, `let t = s` moves it, so a handle that was moved cannot be used. A `Shared` is read like a `Box` (fields, methods, `match`, indexing, passing it where the held type is borrowed, comparing and printing) but **its contents can never be changed**: `s.push(1)`, `s.x = 5`, `s[0] = 1` and passing `mut s` are errors ("cannot change what is inside a `Shared`"). Data that must change goes in a `Mutex`. A `Shared` is a way to give several tasks, or several versions of a data structure, the same data without copying it (see the persistent tree in `examples/checked/shared.tau`).
+- **`Mutex<T>`** holds one value that is changed under a lock. `m.get()` copies the value out (`T` must be cloneable), `m.set(x)` replaces it, `m.update(|v| new)` replaces it with the closure's result, `m.with(|v| result)` reads it and returns something, and `m.into_inner()` takes the value out (the mutex is gone). Its methods take `self` by borrow, so a `Shared<Mutex<T>>` can be used from every task at once. A closure gets the value **by borrow** (like every closure): to change a vector, build a new one (`let mut w = v.clone() ... w`); changing it in place under the lock is not possible yet. A `Mutex` has one owner: it cannot be cloned or printed.
+- **Using a mutex inside its own `update`/`with` is a deadlock**, reported as the panic `deadlock: the mutex is already locked by this thread` (on both backends). Locks of different mutexes taken in different orders by different tasks can still deadlock; this is not checked. A task that panics lets go of the locks it holds.
+- **Determinism.** `Shared<Mutex<T>>` is an *escape hatch*: tasks lock in whatever order they happen to run, so the result is the same whatever the thread count **only when the updates do not depend on the order** (adding to an integer counter, taking a maximum, inserting into a set), not for a floating-point sum or a log that keeps arrival order. For those, return a value from each task and combine them after `join()`, or use `par sum`, whose order is fixed. The interpreter runs tasks one after another, so it always shows one valid order.
+- `x.clone()` now works on every cloneable type (vectors, strings, boxes, tuples, structs, `Shared` handles). `match` and indexing look through a `Box` or a `Shared`.
 
 ## 8. Errors
 
@@ -849,7 +869,7 @@ local variable or an `own` parameter.
 - A returned view derived from a `for`/`match` binding is assumed to come from the caller.
 - `par for` cannot see races through function calls (`helper(mut out)` is rejected as a mutable
   borrow, but a helper that reads `out` while another iteration writes it is not detected).
-- `Shared<T>`, `on` serialisation rules and cluster semantics are not part of v1 and are not checked.
+- `on` serialisation rules and cluster semantics are not part of v1 and are not checked. A `Shared<Mutex<T>>` is not checked for lock order or for updates that depend on it.
 
 ---
 
