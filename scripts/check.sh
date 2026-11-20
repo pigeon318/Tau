@@ -41,7 +41,7 @@ else
 fi
 
 if [ "$mode" = memory ]; then
-  filter="tensor iterator shared mutex persistent slices integer comparisons_masks for_loops option_and_result clone_zero"
+  filter="tensor iterator shared mutex persistent slices integer comparisons_masks for_loops option_and_result clone_zero vector_ sorting string parsing slicing_a_string map_ removing_from maps_ set_deque the_collections collections_free a_return a_loop rng_ date_times complex"
   step "native tests under valgrind"
   TAU_VALGRIND=1 run cargo test --release --test native -- $filter
   step "native tests under UBSan"
