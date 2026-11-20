@@ -525,6 +525,25 @@ when the standard library can be written in Tau itself.
 
 ---
 
+### `DateTime` (in `std.time`)
+
+```
+use std.time.*
+let d = DateTime.new(2026, 11, 19, 7, 13, 2)        // panics with `invalid date or time` if it does not exist
+let now = DateTime.now()   let e = DateTime.from_unix(0)
+d.year  d.month  d.day  d.hour  d.minute  d.second       // read-only fields
+d.unix()   d.weekday()   d.weekday_name()   d.day_of_year()   d.iso()      // 1795072382, 3, "Thursday", 323, "2026-11-19T07:13:02Z"
+d.add_days(45)   d.add_hours(-8)   d.add_minutes(1)   d.add_seconds(59)   // a new DateTime
+d.seconds_until(e)   d.days_until(e)                        // negative if `e` is earlier; days are cut towards zero
+d == e   d < e                                              // compares the moments
+DateTime.parse("2026-11-19")   DateTime.parse("2026-11-19 07:13:02")   DateTime.parse("2026-11-19T07:13:02Z")    // Result<DateTime, String>
+is_leap_year(2024)   days_in_month(2025, 2)
+print(d)                                                    // 2026-11-19 07:13:02
+```
+
+- Everything is **UTC**: there are no time zones and no leap seconds, and the Gregorian calendar is used for every year. `DateTime` is written in Tau on top of `civil` and `from_civil`, so adding days across month and year ends, leap years and the weekday follow the same rules as those functions (the examples above were checked against Python's `datetime`).
+- `parse` accepts only the three forms shown (digits only, four-digit year) and says what is wrong: a message that the text cannot be read, or that the date does not exist (`2023-02-29 is not a date and time that exists`).
+
 ## 8d. Formatting values
 
 `print("...")` and string literals interpolate expressions with `{expr}`. After a `:` comes a format that says how to write the value:

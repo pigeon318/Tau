@@ -1119,3 +1119,18 @@ mod random {
         err("use std.random.Rng\nfn main() {\n let g = Rng.new(1)\n g.f64()\n}\n", "not declared `mut`");
     }
 }
+
+mod date_times {
+    use super::*;
+
+    #[test]
+    fn types_of_date_and_time() {
+        let r = ok("use std.time.*\nfn main() {\n let d = DateTime.new(2026, 1, 2, 3, 4, 5)\n let y = d.year\n let u = d.unix()\n let w = d.weekday_name()\n let n = d.add_days(3)\n let p = DateTime.parse(\"2026-01-02\")\n let s = d.iso()\n let before = d < n\n}\n");
+        assert_eq!(r.binding_ty("y").as_deref(), Some("i64"));
+        assert_eq!(r.binding_ty("u").as_deref(), Some("i64"));
+        assert_eq!(r.binding_ty("w").as_deref(), Some("str"));
+        assert_eq!(r.binding_ty("n").as_deref(), Some("DateTime"));
+        assert_eq!(r.binding_ty("p").as_deref(), Some("Result<DateTime, String>"));
+        assert_eq!(r.binding_ty("before").as_deref(), Some("bool"));
+    }
+}
