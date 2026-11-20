@@ -1702,3 +1702,31 @@ fn maps_free_what_they_own() {
     );
     assert!(out.starts_with("Some([beta, BETA])\nSome([alpha, ALPHA])\nNone\n"), "{out}");
 }
+
+// ------------------------------------------------------------------ M9: DateTime
+
+#[test]
+fn date_times_run_the_same_natively() {
+    // the numbers were checked against Python's datetime
+    let out = same(
+        "use std.time.*\nfn main() {\n let d = DateTime.new(2026, 11, 19, 7, 13, 2)\n print(d)\n print(d.iso())\n print(d.weekday_name())\n print(d.day_of_year())\n print(d.add_days(45))\n print(d.add_hours(-8))\n print(d.add_seconds(59).add_minutes(1))\n\
+          let e = DateTime.from_unix(0)\n print(e)\n print(e.weekday_name())\n print(e.seconds_until(d))\n print(e.days_until(d))\n print(d == DateTime.from_unix(d.unix()))\n print(e < d)\n print(d < e)\n\
+          print(DateTime.parse(\"2024-02-29\"))\n print(DateTime.parse(\"2024-02-29T23:59:59Z\"))\n print(DateTime.parse(\"2024-02-29 12:00:00\"))\n print(DateTime.parse(\"2023-02-29\"))\n print(DateTime.parse(\"2024-13-01\"))\n print(DateTime.parse(\"24-1-1\"))\n print(DateTime.parse(\"2024-1x-01\"))\n\
+          print(is_leap_year(1900))\n print(is_leap_year(2000))\n print(days_in_month(2024, 2))\n print(days_in_month(2025, 2))\n print(d.year + d.month)\n print(DateTime.new(2026, 12, 31, 23, 59, 59).add_seconds(1))\n print(DateTime.now().year >= 2026)\n}",
+    );
+    assert!(out.starts_with("2026-11-19 07:13:02\n2026-11-19T07:13:02Z\nThursday\n323\n2027-01-03 07:13:02\n2026-11-18 23:13:02\n2026-11-19 07:15:01\n1970-01-01 00:00:00\nThursday\n1795072382\n20776\ntrue\ntrue\nfalse\n"), "{out}");
+}
+
+#[test]
+fn an_impossible_date_panics_the_same() {
+    for (stmts, msg) in [
+        ("print(DateTime.new(2023, 2, 29, 0, 0, 0))", "invalid date or time"),
+        ("print(DateTime.new(2024, 13, 1, 0, 0, 0))", "invalid date or time"),
+        ("print(DateTime.new(2024, 1, 1, 24, 0, 0))", "invalid date or time"),
+    ] {
+        let src = format!("use std.time.*\nfn main() {{\n {stmts}\n}}");
+        let (_, p) = interpret(&src);
+        assert_eq!(p.as_deref().map(|m| m.contains(msg)), Some(true), "{stmts}: {p:?}");
+        same(&src);
+    }
+}

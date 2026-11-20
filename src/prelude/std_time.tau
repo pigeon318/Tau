@@ -25,3 +25,128 @@ pub fn format_iso(unix_secs: i64) -> String
 
 // A readable duration from nanoseconds: "950 ns", "1.500 µs", "12.345 ms", "1.250 s", "2m 05s", "1h 02m 05s".
 pub fn format_duration(ns: i64) -> String
+
+// ---- DateTime ------------------------------------------------------------------------------------------------
+// A date and a time of day in UTC (there are no time zones, and no leap seconds).
+
+pub fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+pub fn days_in_month(year: i64, month: i64) -> i64 {
+    if month == 2 {
+        if is_leap_year(year) { 29 } else { 28 }
+    } else if month == 4 || month == 6 || month == 9 || month == 11 {
+        30
+    } else {
+        31
+    }
+}
+
+fn valid_date_time(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> bool {
+    if month < 1 || month > 12 || day < 1 || day > days_in_month(year, month) { return false }
+    hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 && second >= 0 && second <= 59
+}
+
+fn all_digits(s: str) -> bool {
+    if s.len == 0 { return false }
+    let mut i = 0
+    while i < s.len {
+        let b = s.byte_at(i)
+        if b < 48 || b > 57 { return false }
+        i += 1
+    }
+    true
+}
+
+pub struct DateTime {
+    pub year: i64
+    pub month: i64
+    pub day: i64
+    pub hour: i64
+    pub minute: i64
+    pub second: i64
+}
+
+impl DateTime {
+    // A date and time; panics with `invalid date or time` for one that does not exist (month 13, 30 February, hour 24).
+    pub fn new(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> DateTime {
+        if !valid_date_time(year, month, day, hour, minute, second) { panic("invalid date or time") }
+        DateTime(year, month, day, hour, minute, second)
+    }
+    // The date and time of a Unix time (seconds since 1970-01-01 00:00:00 UTC).
+    pub fn from_unix(secs: i64) -> DateTime {
+        let (y, m, d, h, mi, s) = civil(secs)
+        DateTime(y, m, d, h, mi, s)
+    }
+    pub fn now() -> DateTime {
+        DateTime.from_unix(unix_ns() / 1000000000)
+    }
+    // "2026-11-19", "2026-11-19 07:13:02" or "2026-11-19T07:13:02Z"; `Err` with a message otherwise.
+    pub fn parse(text: str) -> Result<DateTime, String> {
+        let bad = "cannot read \"{text}\" as a date and time (like 2026-11-19 or 2026-11-19T07:13:02Z)"
+        let mut t = text
+        if t.ends_with("Z") { t = t[..t.len - 1] }
+        if t.len != 10 && t.len != 19 { return Err(bad.to_string()) }
+        if t.byte_at(4) != 45 || t.byte_at(7) != 45 { return Err(bad.to_string()) }
+        let mut fields = vec[t[0..4], t[5..7], t[8..10]]
+        if t.len == 19 {
+            if (t.byte_at(10) != 84 && t.byte_at(10) != 32) || t.byte_at(13) != 58 || t.byte_at(16) != 58 { return Err(bad.to_string()) }
+            fields.push(t[11..13])
+            fields.push(t[14..16])
+            fields.push(t[17..19])
+        } else {
+            fields.push("0")
+            fields.push("0")
+            fields.push("0")
+        }
+        let mut n: Vec<i64> = Vec.new()
+        for f in fields {
+            if !all_digits(f) { return Err(bad.to_string()) }
+            n.push(f.parse_i64()?)
+        }
+        if !valid_date_time(n[0], n[1], n[2], n[3], n[4], n[5]) { return Err("{text} is not a date and time that exists".to_string()) }
+        Ok(DateTime(n[0], n[1], n[2], n[3], n[4], n[5]))
+    }
+    // Seconds since 1970-01-01 00:00:00 UTC.
+    pub fn unix(self) -> i64 {
+        from_civil(self.year, self.month, self.day, self.hour, self.minute, self.second)
+    }
+    // The day of the week: 0 is Monday, 6 is Sunday.
+    pub fn weekday(self) -> i64 {
+        weekday(self.unix())
+    }
+    pub fn weekday_name(self) -> str {
+        let names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        names[self.weekday() as usize]
+    }
+    // 1 for the first of January.
+    pub fn day_of_year(self) -> i64 {
+        (self.unix() - from_civil(self.year, 1, 1, 0, 0, 0)) / 86400 + 1
+    }
+    pub fn add_seconds(self, n: i64) -> DateTime { DateTime.from_unix(self.unix() + n) }
+    pub fn add_minutes(self, n: i64) -> DateTime { DateTime.from_unix(self.unix() + n * 60) }
+    pub fn add_hours(self, n: i64) -> DateTime { DateTime.from_unix(self.unix() + n * 3600) }
+    pub fn add_days(self, n: i64) -> DateTime { DateTime.from_unix(self.unix() + n * 86400) }
+    // The seconds from `self` to `other` (negative if `other` is earlier).
+    pub fn seconds_until(self, other: DateTime) -> i64 { other.unix() - self.unix() }
+    // Whole days from `self` to `other` (cut towards zero).
+    pub fn days_until(self, other: DateTime) -> i64 { (other.unix() - self.unix()) / 86400 }
+    // "2026-11-19T07:13:02Z"
+    pub fn iso(self) -> String { format_iso(self.unix()) }
+}
+
+impl Display for DateTime {
+    fn fmt(self) -> String {
+        let s = format_iso(self.unix())
+        "{s[0..10]} {s[11..19]}".to_string()
+    }
+}
+
+impl Eq for DateTime {
+    fn eq(self, o: DateTime) -> bool { self.unix() == o.unix() }
+}
+
+impl Ord for DateTime {
+    fn lt(self, o: DateTime) -> bool { self.unix() < o.unix() }
+}
