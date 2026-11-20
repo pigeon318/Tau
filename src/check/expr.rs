@@ -1812,7 +1812,14 @@ impl<'a> Checker<'a> {
                 // library keeps it in step with what it holds
                 if let ExprKind::Field { name, .. } = &e.kind {
                     if let Some(bt) = self.results.expr_ty.get(&NodeKey::of(base)).cloned() {
-                        if let Ty::Adt(id, _) = self.infer.shallow(&bt) {
+                        // the field belongs to what a `Box` or `Shared` holds
+                        let mut owner = self.infer.shallow(&bt);
+                        for _ in 0..self.results.derefs.get(&NodeKey::of(base)).copied().unwrap_or(0) {
+                            if let Some(inner) = self.box_inner(&owner) {
+                                owner = self.infer.shallow(&inner);
+                            }
+                        }
+                        if let Ty::Adt(id, _) = owner {
                             if self.is_user(self.body.cx.module) && !self.is_user(self.prog.adt(id).module) {
                                 self.err_hint(e.span, format!("cannot assign to the field `{}` of a library type", name.name), "it can be read, but only the library changes it");
                                 return;
