@@ -8,6 +8,8 @@ pub struct String { pub len: usize }
 pub struct Range<T> { pub start: T, pub end: T }
 pub struct Ptr<T> {}
 pub struct Box<T> {}
+pub struct Shared<T> {}
+pub struct Mutex<T> {}
 pub struct Task<T> {}
 pub struct Cluster {}
 pub struct IoError { pub message: String }
@@ -99,6 +101,25 @@ impl<T> Vec<T> {
 impl<T> Box<T> {
     pub fn new(own x: T) -> Box<T>
     pub fn take(own self) -> T
+}
+
+// `Shared<T>`: one value with several owners (reference counted, atomically, so a handle can be moved into
+// a task). `s.clone()` makes another handle to the same value; the value is read through any of them, never
+// changed. The value is dropped with its last handle.
+impl<T> Shared<T> {
+    pub fn new(own x: T) -> Shared<T>
+}
+
+// `Mutex<T>`: a value that tasks change one at a time. Usually `Shared<Mutex<T>>`.
+impl<T> Mutex<T> {
+    pub fn new(own x: T) -> Mutex<T>
+    pub fn set(self, own x: T)
+    pub fn update(self, f: fn(T) -> T)
+    pub fn with<U>(self, f: fn(T) -> U) -> U
+    pub fn into_inner(own self) -> T
+}
+impl<T: Clone> Mutex<T> {
+    pub fn get(self) -> T
 }
 
 impl<T> [T] {

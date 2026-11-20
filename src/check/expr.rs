@@ -405,6 +405,7 @@ impl<'a> Checker<'a> {
                         layers += 1;
                     }
                     if layers > 0 {
+                        let scrutinee: &Expr = scrutinee;
                         self.results.derefs.insert(NodeKey::of(scrutinee), layers);
                         st = cur;
                     }
@@ -807,6 +808,25 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Does looking through `layers` boxes of `ty` pass through a `Shared`? (Its contents are read-only.)
+    fn passes_shared(&self, ty: &Ty, layers: u32) -> bool {
+        let mut cur = self.infer.shallow(ty);
+        for _ in 0..layers {
+            if self.is_shared(&cur) {
+                return true;
+            }
+            match self.box_inner(&cur) {
+                Some(i) => cur = self.infer.shallow(&i),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    fn shared_is_read_only(&mut self, span: Span) {
+        self.err_hint(span, "cannot change what is inside a `Shared`: shared data is read-only", "keep data that changes in a `Mutex`: `Shared<Mutex<T>>`");
+    }
+
     /// Check an argument against its parameter's type. A box passed to a borrowed parameter of the
     /// type it holds is looked through (`eval(left)` with `left: Box<Expr>` and `fn eval(e: Expr)`).
     fn arg_coerce(&mut self, e: &'a Expr, expected: &Ty, mode: ParamMode) -> Ty {
@@ -821,6 +841,9 @@ impl<'a> Checker<'a> {
                     n += 1;
                 }
                 if n > 0 {
+                    if mode == ParamMode::Mut && self.passes_shared(&t, n) {
+                        self.shared_is_read_only(e.span);
+                    }
                     self.results.derefs.insert(NodeKey::of(e), n);
                     self.coerce(&cur, expected, e.span);
                     return t;
@@ -1013,6 +1036,18 @@ impl<'a> Checker<'a> {
             }
         }
         let Some(pick) = self.lookup_method(&st, &name.name, true, e.span) else {
+            // `x.clone()` on any type that can be cloned
+            if name.name == "clone" && args.is_empty() {
+                if let Some(tr) = self.prog.find_trait("Clone") {
+                    if !matches!(st, Ty::Var(_) | Ty::Error) && self.implements(&st, tr, &[]) {
+                        let tdef = self.prog.trait_(tr).clone();
+                        if let Some((_, fid)) = tdef.methods.first() {
+                            self.record_res(e, Res::Fn(*fid, vec![(tdef.self_generic, st.clone())]));
+                            return st;
+                        }
+                    }
+                }
+            }
             for a in args {
                 self.expr(a, None);
             }
@@ -1037,6 +1072,9 @@ impl<'a> Checker<'a> {
         let inst = self.instantiate(pick.fn_id, &pick.subst, None, e.span);
         if inst.self_mode == Some(ParamMode::Mut) {
             self.check_mutable_place(recv, "borrow as mutable");
+            if pick.boxes > 0 && self.passes_shared(&st, pick.boxes) {
+                self.shared_is_read_only(e.span);
+            }
         }
         let what = format!("method `{}`", name.name);
         self.check_args(args, &inst.params, e.span, &what);
@@ -1423,7 +1461,16 @@ impl<'a> Checker<'a> {
             }
         }
         let bt = self.expr(base, None);
-        let st = self.infer.shallow(&bt);
+        let mut st = self.infer.shallow(&bt);
+        // a `Box` or `Shared` is looked through to the vector, array or tensor it holds
+        let mut layers = 0u32;
+        while let Some(inner) = self.box_inner(&st) {
+            st = self.infer.shallow(&inner);
+            layers += 1;
+        }
+        if layers > 0 {
+            self.results.derefs.insert(NodeKey::of(base), layers);
+        }
         let elem_of = |this: &Self, t: &Ty| -> Option<Ty> {
             match t {
                 Ty::Array(x, _) | Ty::Slice(x) => Some((**x).clone()),
@@ -1729,6 +1776,12 @@ impl<'a> Checker<'a> {
             },
             ExprKind::Index { base, .. } if self.is_ptr_expr(base) => {}
             ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
+                let base: &Expr = base;
+                if let (Some(bt), Some(n)) = (self.results.expr_ty.get(&NodeKey::of(base)).cloned(), self.results.derefs.get(&NodeKey::of(base)).copied()) {
+                    if self.passes_shared(&bt, n) {
+                        self.shared_is_read_only(e.span);
+                    }
+                }
                 self.check_mutable_place(base, action)
             }
             ExprKind::MethodCall { .. } | ExprKind::Call { .. } => {

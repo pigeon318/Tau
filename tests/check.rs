@@ -884,6 +884,56 @@ mod iterators {
     }
 }
 
+mod shared_values {
+    use super::*;
+
+    #[test]
+    fn shared_is_read_like_a_box_and_never_changed() {
+        let r = ok("struct P { x: i64, v: Vec<i64> }\nfn len(p: P) -> usize { p.v.len }\nfn main() {\n let s = Shared.new(P(1, vec[1, 2]))\n let t = s.clone()\n let a = s.x\n let n = s.v.len\n let m = len(t)\n let i = s.v[0]\n}\n");
+        assert_eq!(r.binding_ty("s").as_deref(), Some("Shared<P>"));
+        assert_eq!(r.binding_ty("t").as_deref(), Some("Shared<P>"));
+        assert_eq!(r.binding_ty("a").as_deref(), Some("i64"));
+        assert_eq!(r.binding_ty("i").as_deref(), Some("i64"));
+        let msg = "cannot change what is inside a `Shared`";
+        err("fn main() {\n let s = Shared.new(vec[1])\n s.push(2)\n}\n", msg);
+        err("struct P { x: i64 }\nfn main() {\n let mut s = Shared.new(P(1))\n s.x = 5\n}\n", msg);
+        err("fn main() {\n let mut s = Shared.new(vec[1])\n s[0] = 5\n}\n", msg);
+        err("fn grow(v: mut Vec<i64>) { v.push(1) }\nfn main() {\n let mut s = Shared.new(vec[1])\n grow(mut s)\n}\n", msg);
+        // an error message with the way out
+        let r = err("fn main() {\n let mut s = Shared.new(vec[1])\n s.push(2)\n}\n", msg);
+        assert!(r.diagnostics[0].hint.as_deref().unwrap_or("").contains("Mutex"), "{:?}", r.diagnostics[0].hint);
+    }
+
+    #[test]
+    fn a_handle_is_moved_and_clone_makes_another() {
+        ok("fn main() {\n let s = Shared.new(vec[1])\n let t = s.clone()\n print(s.len + t.len)\n}\n");
+    }
+
+    #[test]
+    fn mutex_methods_and_what_a_mutex_is_not() {
+        let r = ok("fn main() {\n let m = Mutex.new(0)\n m.set(1)\n m.update(|x| x + 1)\n let a = m.get()\n let b = m.with(|x| x > 0)\n let c = m.into_inner()\n}\n");
+        assert_eq!(r.binding_ty("m").as_deref(), Some("Mutex<i64>"));
+        assert_eq!(r.binding_ty("a").as_deref(), Some("i64"));
+        assert_eq!(r.binding_ty("b").as_deref(), Some("bool"));
+        err("fn main() {\n let m = Mutex.new(1)\n let n = m.clone()\n}\n", "no method named `clone`");
+        err("fn main() {\n let m = Mutex.new(1)\n print(m)\n}\n", "`Display` is not implemented for `Mutex<i64>`");
+        err("fn main() {\n let m = Mutex.new(1)\n m.update(|x| x > 0)\n}\n", "mismatched types");
+    }
+
+    #[test]
+    fn any_cloneable_value_can_be_cloned() {
+        let r = ok("fn main() {\n let v = vec[1, 2]\n let w = v.clone()\n let s = String.from(\"a\").clone()\n let b = Box.new(3).clone()\n let t = (1, 2.0).clone()\n}\n");
+        assert_eq!(r.binding_ty("w").as_deref(), Some("Vec<i64>"));
+        assert_eq!(r.binding_ty("s").as_deref(), Some("String"));
+        assert_eq!(r.binding_ty("t").as_deref(), Some("(i64, f64)"));
+    }
+
+    #[test]
+    fn a_box_or_shared_is_matched_through() {
+        ok("enum T {\n Leaf\n Node(Shared<T>, i64)\n}\nfn f(t: Shared<T>) -> i64 {\n match t {\n  Leaf => 0\n  Node(_, v) => v\n }\n}\nfn main() {}\n");
+    }
+}
+
 mod integer_tensors {
     use super::*;
 

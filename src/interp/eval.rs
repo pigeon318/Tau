@@ -139,7 +139,7 @@ impl<'a> Interp<'a> {
         for _ in 0..n {
             v = self.deref(v)?;
             match v {
-                Value::Box(s) => {
+                Value::Box(s) | Value::Shared(s) => {
                     let inner = s.borrow()[0].clone();
                     v = inner;
                 }
@@ -403,7 +403,7 @@ impl<'a> Interp<'a> {
             for _ in 0..self.res.derefs.get(&NodeKey::of(e)).copied().unwrap_or(0) {
                 let v = self.load(&t)?;
                 match self.deref(v)? {
-                    Value::Box(s) => t = RefTarget::Slot(s, 0),
+                    Value::Box(s) | Value::Shared(s) => t = RefTarget::Slot(s, 0),
                     _ => break,
                 }
             }
